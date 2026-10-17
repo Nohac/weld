@@ -229,6 +229,7 @@ fn commit_event(surface: SurfaceId, size: UVec2) -> HostSurfaceEvent {
     HostSurfaceEvent {
         surface,
         kind: HostSurfaceEventKind::Commit(SurfaceTreeSnapshot {
+            revision: None,
             client_mapped: true,
             alpha_mode: Default::default(),
             root: Some(SurfaceLayerPlacement {
@@ -280,6 +281,7 @@ fn unmap_surface(app: &mut App, surface: SurfaceId) {
         HostSurfaceEvent {
             surface,
             kind: HostSurfaceEventKind::Commit(SurfaceTreeSnapshot {
+                revision: None,
                 client_mapped: false,
                 alpha_mode: Default::default(),
                 root: None,

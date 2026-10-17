@@ -47,6 +47,7 @@ pub(super) type PhysicalOutput =
 
 #[derive(Clone, Copy, Debug)]
 pub(super) struct SubmittedFrame {
+    pub(super) generation: u64,
     pub(super) lock_generation: Option<u64>,
     pub(super) presentation_id: Option<u64>,
 }

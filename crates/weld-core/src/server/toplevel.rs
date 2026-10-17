@@ -723,10 +723,7 @@ impl ServerState {
         if snapshot.root.is_none() {
             self.clear_input_focus_for_surface(root, self.event_time());
         }
-        self.pending_surface_events.push_back(PendingSurfaceEvent {
-            surface: surface_id,
-            kind: PendingSurfaceEventKind::TreeSnapshot(snapshot),
-        });
+        self.publish_surface_snapshot(surface_id, snapshot);
     }
 }
 
@@ -896,6 +893,7 @@ impl CompositorHandler for ServerState {
         };
         if matches!(&toplevel.surface, WindowSurface::Xdg(window) if !window.is_initial_configure_sent())
         {
+            self.discard_surface_feedback(surface_id, &root);
             let initial_size = self
                 .toplevels
                 .get_mut(surface_id)
@@ -934,10 +932,7 @@ impl CompositorHandler for ServerState {
         };
         let snapshot = toplevel.tree.remove_surface(&root, surface);
         self.presentation_requested = true;
-        self.pending_surface_events.push_back(PendingSurfaceEvent {
-            surface: surface_id,
-            kind: PendingSurfaceEventKind::TreeSnapshot(snapshot),
-        });
+        self.publish_surface_snapshot(surface_id, snapshot);
     }
 }
 

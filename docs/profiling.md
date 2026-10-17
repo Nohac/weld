@@ -352,6 +352,28 @@ smoke runs still report zero steady-content policy updates and 40 updates for
 `paced-render-3j8ea_zo`). The final focused suites pass 358 tests, including
 window, floating and hoist resize settlement.
 
+Adding commit/layer sampling for `wp_presentation` preserves that scheduling
+behavior. A final optimized ABBA run with the same steady workload compares the
+saved content-only binary with the feedback-enabled build:
+
+| Metric | Before feedback bookkeeping | With feedback bookkeeping |
+| --- | --- | --- |
+| CPU, % of one core | 7.200 / 6.600 | 6.800 / 7.500 |
+| Userspace instructions, million/s | 54.863 / 55.372 | 57.309 / 57.164 |
+| Full application updates | 0 / 5 | 0 / 0 |
+
+Both paths sustain 60 compositions/s and 240 commits/s. Sampling adds about
+3.8% instructions; mean CPU changes from 6.90% to 7.15% of one core in this run.
+Artifacts in ABBA order: `paced-render-68pu6f6w`, `paced-render-sqy704_4`,
+`paced-render-dqn5ssog`, `paced-render-ccnxacy8`. These producers exercise sampling
+bookkeeping; real protocol delivery is covered by the Wayland socket tests in
+[presentation feedback](drm-presentation.md#presentation-feedback). The final
+nested capture/clipboard regression passes in `screenshot-onjndtv9`; it still
+logs the previously recorded WGPU acquire-fence validation warning.
+The final 4 Hz tab-switch run (`paced-render-oszd7l41`) uses 7.100% CPU,
+59.898 compositions/s and 80 full updates over ten seconds, with byte-equivalent
+full-render and rotated-target checks passing.
+
 ## Whole-process CPU profiles
 
 ### Full-output Blender orbit comparison

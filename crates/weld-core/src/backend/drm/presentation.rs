@@ -101,6 +101,9 @@ pub(super) struct PhysicalRenderOutcome {
 }
 
 struct PhysicalOutputState {
+    generation: u64,
+    feedback: Option<crate::server::presentation_time::OutputFeedback>,
+    frame_interval: Duration,
     id: OutputId,
     crtc: crtc::Handle,
     output: PhysicalOutput,
@@ -154,6 +157,9 @@ impl PhysicalDesktop {
                     })?
             };
             outputs.push(PhysicalOutputState {
+                generation: 0,
+                feedback: None,
+                frame_interval: selected.configuration.presentation_rate().interval(),
                 id: selected.id,
                 crtc: selected.crtc,
                 output,
@@ -297,6 +303,7 @@ impl PhysicalDesktop {
                 return Ok(outcome);
             }
         };
+        let mut feedback = HashMap::new();
         let result = if lock_generation.is_some() {
             self.lock_composition.update(server.lock_images());
             self.render_state.finish_batch(|requests, frames| {
@@ -304,8 +311,17 @@ impl PhysicalDesktop {
             })?
         } else {
             self.lock_composition.update(HashMap::new());
-            self.render_state
-                .finish_batch(|requests, frames| host.render_outputs(requests, frames))?
+            self.render_state.finish_batch(|requests, frames| {
+                host.render_outputs(requests, frames)?;
+                for frame in frames {
+                    if let Some(batch) =
+                        server.take_presentation_feedback(frame.output, &frame.surfaces)
+                    {
+                        feedback.insert(frame.output, batch);
+                    }
+                }
+                Ok(())
+            })?
         };
         match result {
             BatchFinish::Complete => {}
@@ -333,11 +349,13 @@ impl PhysicalDesktop {
                 continue;
             }
             match output.output.queue_frame(SubmittedFrame {
+                generation: output.generation,
                 presentation_id,
                 lock_generation: lock_generation
                     .filter(|_| self.render_state.composition_drawn(output.id)),
             }) {
                 Ok(()) => {
+                    output.feedback = feedback.remove(&output.id);
                     let completed = output
                         .admission
                         .queue(presentation_id, output.id, callbacks);
@@ -436,6 +454,7 @@ impl PhysicalDesktop {
     pub(super) fn retire(
         &mut self,
         crtc: crtc::Handle,
+        metadata: Option<smithay::backend::drm::DrmEventMetadata>,
     ) -> Result<Option<(OutputId, RetiredFrame)>> {
         let Some(output) = self.outputs.iter_mut().find(|output| output.crtc == crtc) else {
             return Ok(None);
@@ -447,6 +466,17 @@ impl PhysicalDesktop {
         let Some(submitted) = submitted else {
             return Ok(None);
         };
+        // A delayed pre-suspend flip must leave the resumed frame's admission
+        // and feedback intact while Smithay advances its scanout queue.
+        if submitted.generation != output.generation {
+            return Ok(None);
+        }
+        if let Some(feedback) = output.feedback.take() {
+            feedback.presented(crate::server::presentation_time::PresentationTiming::drm(
+                metadata,
+                output.frame_interval,
+            ));
+        }
         let mut admission = output.admission.retire().unwrap_or(RetiredFrame {
             lock_generation: None,
             presentation_id: None,
@@ -465,6 +495,9 @@ impl PhysicalDesktop {
     }
 
     pub(super) fn pause(&mut self) {
+        for output in &mut self.outputs {
+            output.feedback = None;
+        }
         self.manager.pause();
     }
 
@@ -475,6 +508,7 @@ impl PhysicalDesktop {
             .context("failed to reactivate the Smithay DRM output manager")?;
         for output in &mut self.outputs {
             output.admission.retire();
+            output.generation = output.generation.wrapping_add(1);
             output.composition.mark_dirty();
         }
         Ok(())

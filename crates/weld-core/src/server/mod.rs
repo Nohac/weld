@@ -14,6 +14,7 @@ mod output;
 mod output_tests;
 mod popup;
 mod presentation;
+pub(crate) mod presentation_time;
 mod resize;
 mod seat;
 mod seat_bindings;
@@ -105,6 +106,7 @@ pub struct ServerState {
     pub socket_name: OsString,
     compositor_state: CompositorState,
     capture: capture::OutputCapture,
+    _presentation_time: smithay::wayland::presentation::PresentationState,
     session_lock: session_lock::SessionLock,
     xdg_shell_state: XdgShellState,
     xwayland: xwayland::XwaylandState,
@@ -200,6 +202,7 @@ impl ServerState {
         let display_handle = display.handle();
         let compositor_state = CompositorState::new::<Self>(&display_handle);
         let capture = capture::OutputCapture::new(&display_handle);
+        let presentation_time = presentation_time::global(&display_handle);
         let session_lock = session_lock::SessionLock::new(&display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
         let xwayland = xwayland::XwaylandState::new(&display_handle);
@@ -362,6 +365,7 @@ impl ServerState {
             socket_name,
             compositor_state,
             capture,
+            _presentation_time: presentation_time,
             session_lock,
             xdg_shell_state,
             xwayland,

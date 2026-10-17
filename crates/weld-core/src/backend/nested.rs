@@ -198,6 +198,7 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 composition_frames: Vec::with_capacity(1),
                 next_remote_service: Instant::now(),
                 pending_presentation_id: None,
+                pending_feedback: None,
                 host_work_drained: false,
             };
             info!(socket = ?runtime.state.data.server.socket_name, "Weld nested compositor is ready");
@@ -226,6 +227,7 @@ struct NestedDriver {
     composition_frames: Vec<CompositionOutputFrame>,
     next_remote_service: Instant,
     pending_presentation_id: Option<u64>,
+    pending_feedback: Option<crate::server::presentation_time::OutputFeedback>,
     host_work_drained: bool,
 }
 
@@ -478,6 +480,10 @@ impl NativeDriver<NestedEvent> for NestedDriver {
                     &state.capture_worker,
                 );
                 self.completed_composition = Some(composition.frame);
+                self.pending_feedback = state
+                    .data
+                    .server
+                    .take_presentation_feedback(composition.output, &composition.surfaces);
                 self.pending_presentation_id =
                     Some(crate::runtime::callbacks::stage_composition_callbacks(
                         &mut state.callbacks,
@@ -539,6 +545,10 @@ impl NativeDriver<NestedEvent> for NestedDriver {
                 &state.capture_worker,
             )?;
             if frame.presented {
+                if let Some(feedback) = self.pending_feedback.take() {
+                    feedback
+                        .presented(crate::server::presentation_time::PresentationTiming::nested());
+                }
                 self.frame_state.presented();
                 if let Some(presentation_id) = self.pending_presentation_id.take() {
                     let completed = state

@@ -77,6 +77,41 @@ example, a 120 Hz output can receive an intermediate pass while a phase-aligned
 Nested and inactive-owned targets retain interval-based pacing because they
 have no physical retirement event.
 
+### Presentation feedback
+
+`wp_presentation` advertises `CLOCK_MONOTONIC`. Native application and layer
+surface snapshots retain feedback alongside their commit revision and layer
+identity. The application renderer reports the layers actually included in
+prepared, visible GPU draw batches with current texture bindings. The host
+transfers matching feedback into that output's single queued-frame slot.
+
+On DRM page-flip completion, Weld supplies the kernel's monotonic timestamp,
+sequence number, and the physical output's refresh interval. Valid hardware
+timestamps carry `vsync`, `hw_clock`, and `hw_completion`; the software-clock
+fallback carries `vsync`. Composited surfaces use ordinary composed feedback.
+Superseded commits, failed queue submissions, and session suspension discard
+their outstanding feedback. A later client commit preserves feedback already
+owned by a queued physical frame.
+
+Nested presentation reports a software timestamp with unknown refresh and empty
+hardware flags when WGPU presents the host window. Remote presentation needs
+destination timing receipts; handing a surface to a remote presenter discards
+pending local feedback. Ordinary frame callbacks retain their queue-time pacing
+so clients can prepare the next frame while scanout owns the current one.
+
+`RUST_LOG=warn,weld_presentation=trace` records completed feedback with its output,
+timestamp, refresh interval, sequence and flags. Real Wayland socket tests cover
+commit matching, output identity, deferred completion, superseded/unmapped
+discard, independent subsurface feedback, and the nested timing flags:
+
+```text
+cargo test -p weldwm -p weld-core --features test-support --lib presentation_time_tests -- --ignored --test-threads=1
+```
+
+The GPU regression also checks that hidden surfaces produce no sampled commits
+and that resized and retained draws report their current commits. Browser-video
+cadence on physical DRM remains a manual validation step.
+
 ## Cursor
 
 Named and client cursor images are normalized into Smithay
@@ -202,6 +237,7 @@ scripts/run-smithay-drm-compositor-probe
 - Native completion-fence export.
 - Partial Bevy scene damage.
 - Primary direct scanout and overlay promotion.
-- `wp_presentation`, VRR, HDR, color management, rotation, and cross-GPU paths.
+- Remote-presenter, lock-surface and cursor-surface presentation feedback.
+- VRR, HDR, color management, rotation, and cross-GPU paths.
 - EDID make/model/serial extraction; the optional `libdisplay-info` dependency
   is not enabled in the current development shell.

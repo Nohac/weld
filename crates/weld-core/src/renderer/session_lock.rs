@@ -171,6 +171,7 @@ impl LockComposition {
                 }
             }
             frames.push(CompositionOutputFrame {
+                surfaces: Vec::new(),
                 output: request.output,
                 frame: CompositionFrame::external(target.clone()),
             });

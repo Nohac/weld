@@ -11,6 +11,7 @@ use crate::pixel_snap::{PixelSnap, PixelSnapPlugin, PixelSnapSize, PixelSnapSyst
 use bevy::{
     app::{App, Plugin, PostUpdate, PreUpdate},
     asset::{Asset, AssetId, Assets, Handle, RenderAssetUsages, load_internal_asset, uuid_handle},
+    camera::visibility::InheritedVisibility,
     ecs::{
         change_detection::Mut,
         component::Component,
@@ -33,7 +34,10 @@ use bevy::{
         render_resource::{AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat},
     },
     shader::{Shader, ShaderRef},
-    ui::{Display, LayoutConfig, Node, PositionType, Val},
+    ui::{
+        CalculatedClip, ComputedNode, ComputedUiTargetCamera, Display, LayoutConfig, Node,
+        PositionType, Val,
+    },
     ui_render::{
         UiMaterialPlugin, prelude::UiMaterial, stack_z_offsets, ui_material::MaterialNode,
     },
@@ -400,6 +404,8 @@ pub struct SurfaceInputPlacement {
 #[derive(Debug)]
 #[doc(hidden)]
 pub struct SurfaceTreeSnapshot {
+    /// Admitted client revision, cleared when its content cannot be imported.
+    pub revision: Option<weld_client::ClientCommitRevision>,
     pub client_mapped: bool,
     pub alpha_mode: SurfaceAlphaMode,
     pub root: Option<SurfaceLayerPlacement>,
@@ -559,6 +565,7 @@ struct MaterialSelector {
 }
 
 struct SurfaceEntry {
+    revision: Option<weld_client::ClientCommitRevision>,
     entity: Entity,
     buffers: HashMap<SurfaceLayerId, SurfaceBufferAsset>,
     frame_ready: bool,
@@ -717,37 +724,95 @@ pub(crate) fn reject_dmabuf_sources(world: &mut World, rejected: &HashSet<Import
     let Some(mut registry) = world.get_resource_mut::<SurfaceRegistry>() else {
         return;
     };
-    for buffer in registry
-        .entries
-        .values_mut()
-        .flat_map(|entry| entry.buffers.values_mut())
-    {
-        if buffer
-            .pending_dmabuf
-            .as_ref()
-            .is_some_and(|image| rejected.contains(&image.import))
-        {
-            buffer.pending_dmabuf = None;
-            if buffer.displayed_pixel_size != Some(buffer.pixel_size) {
-                buffer.displayed_dmabuf = None;
-                buffer.displayed_pixel_size = None;
+    for entry in registry.entries.values_mut() {
+        for buffer in entry.buffers.values_mut() {
+            if buffer
+                .pending_dmabuf
+                .as_ref()
+                .is_some_and(|image| rejected.contains(&image.import))
+            {
+                entry.revision = None;
+                buffer.pending_dmabuf = None;
+                if buffer.displayed_pixel_size != Some(buffer.pixel_size) {
+                    buffer.displayed_dmabuf = None;
+                    buffer.displayed_pixel_size = None;
+                }
             }
         }
     }
-    for buffer in registry
-        .pending_snapshots
-        .values_mut()
-        .flat_map(|snapshot| snapshot.buffers.iter_mut())
-    {
-        let rejected_image = matches!(
-            &buffer.content,
-            SurfaceBufferContent::RenderImage(image)
-                if rejected.contains(&image.import)
-        );
-        if rejected_image {
-            buffer.content = SurfaceBufferContent::Retained;
+    for snapshot in registry.pending_snapshots.values_mut() {
+        for buffer in &mut snapshot.buffers {
+            let rejected_image = matches!(
+                &buffer.content,
+                SurfaceBufferContent::RenderImage(image)
+                    if rejected.contains(&image.import)
+            );
+            if rejected_image {
+                snapshot.revision = None;
+                buffer.content = SurfaceBufferContent::Retained;
+            }
         }
     }
+}
+
+pub(crate) fn sampled_commits(
+    app: &mut App,
+    camera: Entity,
+) -> Vec<weld_core::host::SurfacePresentation> {
+    let materials = binding::sampled_materials(app);
+    let world = app.world_mut();
+    let mut nodes = world.query::<(
+        &MaterialNode<SurfaceUiMaterial>,
+        &ComputedNode,
+        &ComputedUiTargetCamera,
+        &InheritedVisibility,
+        Option<&CalculatedClip>,
+    )>();
+    let Some(registry) = world.get_resource::<SurfaceRegistry>() else {
+        return Vec::new();
+    };
+    let Some(selectors) = world.get_resource::<MaterialSelectorRegistry>() else {
+        return Vec::new();
+    };
+    let mut sampled = Vec::new();
+    for (material, node, target, visible, clip) in nodes.iter(world) {
+        if target.get() != Some(camera)
+            || !visible.get()
+            || node.is_empty()
+            || clip.is_some_and(|clip| clip.clip.is_empty())
+        {
+            continue;
+        }
+        if !materials.contains(&material.0.id()) {
+            continue;
+        }
+        let Some(surface) = selectors.0.get(&material.0.id()) else {
+            continue;
+        };
+        let Some(entry) = registry.entries.get(&surface.surface) else {
+            continue;
+        };
+        let Some(revision) = entry.revision else {
+            continue;
+        };
+        if !entry.frame_ready
+            || entry
+                .buffers
+                .get(&surface.layer)
+                .is_none_or(|buffer| buffer.pending_dmabuf.is_some())
+        {
+            continue;
+        }
+        let commit = weld_core::host::SurfacePresentation {
+            surface: surface.surface,
+            revision,
+            layer: surface.layer,
+        };
+        if !sampled.contains(&commit) {
+            sampled.push(commit);
+        }
+    }
+    sampled
 }
 
 fn apply_host_surface_events(world: &mut World) {
@@ -915,6 +980,7 @@ fn ensure_window_entity(
     registry.entries.insert(
         surface,
         SurfaceEntry {
+            revision: None,
             entity,
             buffers: HashMap::new(),
             frame_ready: false,
@@ -962,6 +1028,7 @@ fn ensure_popup_entity(
     registry.entries.insert(
         surface,
         SurfaceEntry {
+            revision: None,
             entity,
             buffers: HashMap::new(),
             frame_ready: false,
@@ -995,6 +1062,7 @@ fn ensure_layer_entity(
     registry.entries.insert(
         surface,
         SurfaceEntry {
+            revision: None,
             entity,
             buffers: HashMap::new(),
             frame_ready: false,
@@ -1079,6 +1147,7 @@ fn apply_surface_tree_snapshot(
     let Some(entry) = registry.entries.get_mut(&surface) else {
         return true;
     };
+    entry.revision = snapshot.revision;
     policy_changed |= snapshot.buffers.iter().any(|buffer| match &buffer.content {
         SurfaceBufferContent::Pixels(_) => true,
         SurfaceBufferContent::RenderImage(image) => {
@@ -1194,6 +1263,7 @@ fn apply_surface_tree_snapshot(
             }
         }
     } else {
+        entry.revision = None;
         warn!(
             ?surface,
             "discarded surface pixels because Bevy image assets are unavailable"
@@ -1844,6 +1914,7 @@ mod tests {
 
     fn root_snapshot(pixel: Option<[u8; 4]>) -> SurfaceTreeSnapshot {
         SurfaceTreeSnapshot {
+            revision: None,
             client_mapped: true,
             alpha_mode: Default::default(),
             root: Some(placement(1, Vec2::ZERO)),
@@ -2309,6 +2380,7 @@ mod tests {
             snapshot_event(
                 surface,
                 SurfaceTreeSnapshot {
+                    revision: None,
                     client_mapped: false,
                     alpha_mode: Default::default(),
                     root: None,

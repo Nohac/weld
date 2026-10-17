@@ -212,6 +212,7 @@ impl ServerState {
     fn transition_callback_owner(&mut self, surface: SurfaceId, was_native: bool) {
         let native = self.presentation_claims.native(surface);
         if was_native && !native {
+            self.pending_surface_events.discard_feedback(surface);
             // Extract before a native completion can signal these callbacks.
             // Do not wait behind another output's pending ledger prefix.
             for (_, groups) in &mut self.staged_frame_callbacks {

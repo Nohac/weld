@@ -11,11 +11,12 @@ use bevy::{
     render::{
         Render, RenderSystems,
         render_asset::RenderAssets,
+        render_phase::{PhaseItem, ViewSortedRenderPhases},
         render_resource::{BindGroup, BindGroupEntry, BindingResource, PipelineCache},
         renderer::RenderDevice,
         texture::GpuImage,
     },
-    ui_render::{PreparedUiMaterial, UiMaterialPipeline},
+    ui_render::{PreparedUiMaterial, TransparentUi, UiMaterialBatch, UiMaterialPipeline},
 };
 use tracing::warn;
 
@@ -48,6 +49,48 @@ struct SurfaceBindingCacheKey {
 
 #[derive(Resource, Default)]
 struct SurfaceBindingCache(HashMap<SurfaceBindingCacheKey, BindGroup>);
+
+/// Materials whose clipped draw batches and current image bindings were ready.
+pub(super) fn sampled_materials(app: &App) -> HashSet<AssetId<SurfaceUiMaterial>> {
+    let mut sampled = HashSet::new();
+    let Some(render) = app.get_sub_app(bevy::render::RenderApp) else {
+        return sampled;
+    };
+    let world = render.world();
+    let (Some(phases), Some(pipelines), Some(published), Some(bindings)) = (
+        world.get_resource::<ViewSortedRenderPhases<TransparentUi>>(),
+        world.get_resource::<PipelineCache>(),
+        world.get_resource::<PublishedSurfaceBindings>(),
+        world.get_resource::<SurfaceBindingCache>(),
+    ) else {
+        return sampled;
+    };
+    for phase in phases.values() {
+        for item in phase.items.values() {
+            if pipelines.get_render_pipeline(item.pipeline).is_none() {
+                continue;
+            }
+            let Some(batch) = world.get::<UiMaterialBatch<SurfaceUiMaterial>>(item.entity()) else {
+                continue;
+            };
+            if batch.range.is_empty() {
+                continue;
+            }
+            let Some(desired) = published.desired.get(&batch.material) else {
+                continue;
+            };
+            if bindings.0.contains_key(&SurfaceBindingCacheKey {
+                material: batch.material,
+                image: desired.image,
+                generation: desired.generation,
+                parameters: desired.parameters,
+            }) {
+                sampled.insert(batch.material);
+            }
+        }
+    }
+    sampled
+}
 
 pub(super) fn configure_render_app(render_app: &mut SubApp) {
     render_app

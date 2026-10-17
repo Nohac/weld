@@ -629,6 +629,7 @@ impl AppShell {
             frames.push(CompositionOutputFrame {
                 output: request.output,
                 frame,
+                surfaces: Vec::new(),
             });
         }
         {
@@ -663,6 +664,11 @@ impl AppShell {
                     .entered();
             if let Some(importer) = &mut self.dmabuf_importer {
                 importer.finish_render(&mut self.app)?;
+            }
+        }
+        for frame in frames {
+            if let Some(output) = self.outputs.get(&frame.output) {
+                frame.surfaces = crate::surface_impl::sampled_commits(&mut self.app, output.camera);
             }
         }
         Ok(())
@@ -804,7 +810,7 @@ impl AppShell {
         commit: weld_client::ClientSurfaceCommit,
     ) -> SurfaceTreeSnapshot {
         let weld_client::ClientSurfaceState {
-            revision: _,
+            revision,
             alpha_mode,
             mapped,
             root,
@@ -813,6 +819,7 @@ impl AppShell {
             inputs,
             buffers,
         } = commit.into_state();
+        let mut imported_all = true;
         let retained = buffers
             .iter()
             .filter(|buffer| !matches!(buffer.change, SurfaceBufferChange::Removed))
@@ -878,18 +885,21 @@ impl AppShell {
                                 };
                                 imported
                                     .map(SurfaceBufferContent::RenderImage)
-                                    .unwrap_or(SurfaceBufferContent::Retained)
+                                    .unwrap_or_else(|| { imported_all = false; SurfaceBufferContent::Retained })
                             }
                             ClientBufferAccessResolution::Unregistered => {
+                                imported_all = false;
                                 tracing::warn!(?surface, layer = ?buffer.layer, "dropped a client-buffer lease without a registered importer");
                                 SurfaceBufferContent::Retained
                             }
                             ClientBufferAccessResolution::SourceMismatch => {
+                                imported_all = false;
                                 tracing::warn!(?surface, layer = ?buffer.layer, "dropped a client-buffer lease from another source");
                                 SurfaceBufferContent::Retained
                             }
                             ClientBufferAccessResolution::Unsupported
                             | ClientBufferAccessResolution::Direct(_) => {
+                                imported_all = false;
                                 tracing::warn!(?surface, layer = ?buffer.layer, "client-buffer lease carried unsupported access");
                                 SurfaceBufferContent::Retained
                             }
@@ -906,6 +916,7 @@ impl AppShell {
             })
             .collect();
         SurfaceTreeSnapshot {
+            revision: imported_all.then_some(revision),
             client_mapped: mapped,
             alpha_mode,
             root: root.map(app_layer_placement),
@@ -2619,6 +2630,10 @@ mod tests {
             shell
                 .render_outputs(&[owned_request(PRIMARY_OUTPUT_ID)], &mut frames)
                 .expect("hidden render");
+            assert!(
+                frames[0].surfaces.is_empty(),
+                "hidden surface cannot receive presentation feedback"
+            );
         }
         shell
             .app
@@ -2643,6 +2658,19 @@ mod tests {
                 .render_outputs(&[owned_request(PRIMARY_OUTPUT_ID)], &mut frames)
                 .expect("resized render");
         }
+        assert_eq!(
+            frames[0].surfaces,
+            vec![weld_core::host::SurfacePresentation {
+                surface,
+                revision: ClientCommitRevision::new(1),
+                layer: SurfaceLayerId::new(1),
+            }]
+        );
+        // Content-only presentation retains the same visible, prepared batch.
+        shell
+            .render_outputs(&[owned_request(PRIMARY_OUTPUT_ID)], &mut frames)
+            .expect("retained render");
+        assert_eq!(frames[0].surfaces.len(), 1);
         assert_eq!(
             shell
                 .app

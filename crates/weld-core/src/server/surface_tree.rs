@@ -19,6 +19,7 @@ use smithay::{
         },
         dmabuf::get_dmabuf,
         drm_syncobj::{DrmSyncPoint, DrmSyncobjCachedState},
+        presentation::PresentationFeedbackCachedState,
     },
 };
 use tracing::warn;
@@ -53,6 +54,7 @@ pub struct PendingSurfaceBufferUpdate {
 
 #[derive(Debug)]
 pub struct PendingSurfaceTreeSnapshot {
+    pub(crate) feedback: Vec<(SurfaceLayerId, PresentationFeedbackCachedState)>,
     pub client_mapped: bool,
     pub root: Option<SurfaceLayerPlacement>,
     pub window_geometry: Option<SurfaceWindowGeometry>,
@@ -502,7 +504,27 @@ impl SurfaceTreeState {
             })
             .collect::<Vec<_>>();
         buffers.sort_unstable_by_key(|buffer| buffer.layer.raw());
+        let mut feedback = Vec::new();
+        for (index, node) in self.nodes.iter().enumerate() {
+            let pending = with_states(&node.surface, |states| {
+                std::mem::take(
+                    &mut *states
+                        .cached_state
+                        .get::<PresentationFeedbackCachedState>()
+                        .current(),
+                )
+            });
+            if client_mapped
+                && root_index.is_some_and(|root| index >= root)
+                && self.protocol_visible(node)
+                && !pending.callbacks.is_empty()
+                && let Some(buffer) = self.buffers.get(&node.object_id)
+            {
+                feedback.push((buffer.layer, pending));
+            }
+        }
         PendingSurfaceTreeSnapshot {
+            feedback,
             client_mapped,
             root,
             window_geometry,

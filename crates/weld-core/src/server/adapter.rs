@@ -6,18 +6,20 @@ use std::{
     rc::Rc,
 };
 
+use smithay::wayland::presentation::PresentationFeedbackCachedState;
 use tracing::warn;
 use weld_client::{
     ClientAdapter, ClientAdapterCommandEnvelope, ClientAdapterRegistration, ClientBufferId,
     ClientBufferLease, ClientBufferMetadata, ClientBufferUseId, ClientCommitRevision,
     ClientEventQueue, ClientInputEvent, ClientProvenance, ClientRequest, ClientSourceDescriptor,
     ClientSurfaceCommit, ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceId,
-    SurfaceAlphaMode, SurfaceBufferChange, SurfaceBufferUpdate,
+    SurfaceAlphaMode, SurfaceBufferChange, SurfaceBufferUpdate, SurfaceLayerId,
 };
 
 use crate::{
     WAYLAND_CLIENT_SOURCE,
     dmabuf::{DirectClientBufferAccess, DmabufContext, WaylandShmBuffer},
+    host::SurfacePresentation,
 };
 
 use super::{
@@ -27,10 +29,16 @@ use super::{
 
 #[derive(Default)]
 struct WaylandClientBridgeState {
+    feedback: HashMap<ClientSurfaceId, PendingFeedback>,
     events: VecDeque<PendingSurfaceEvent>,
     retired_dmabufs: VecDeque<crate::dmabuf::ImportId>,
     work: VecDeque<WaylandClientWork>,
     cursors: HashMap<weld_client::ClientSurfaceId, weld_client::ClientCursor>,
+}
+
+struct PendingFeedback {
+    revision: ClientCommitRevision,
+    layers: Vec<(SurfaceLayerId, PresentationFeedbackCachedState)>,
 }
 
 /// Shared same-thread mailbox used because Smithay owns its concrete dispatch state.
@@ -38,6 +46,36 @@ struct WaylandClientBridgeState {
 pub(crate) struct WaylandClientBridge(Rc<RefCell<WaylandClientBridgeState>>);
 
 impl WaylandClientBridge {
+    pub(crate) fn take_feedback(
+        &self,
+        sampled: SurfacePresentation,
+    ) -> Option<PresentationFeedbackCachedState> {
+        let mut state = self.0.borrow_mut();
+        let pending = state.feedback.get_mut(&sampled.surface)?;
+        if pending.revision != sampled.revision {
+            return None;
+        }
+        let feedback = pending
+            .layers
+            .iter()
+            .position(|(layer, _)| *layer == sampled.layer)
+            .map(|index| pending.layers.swap_remove(index).1);
+        if pending.layers.is_empty() {
+            state.feedback.remove(&sampled.surface);
+        }
+        feedback
+    }
+    pub(crate) fn discard_feedback(&self, surface: ClientSurfaceId) {
+        let mut state = self.0.borrow_mut();
+        state.feedback.remove(&surface);
+        for event in &mut state.events {
+            if event.surface == surface
+                && let PendingSurfaceEventKind::TreeSnapshot(snapshot) = &mut event.kind
+            {
+                snapshot.feedback.clear();
+            }
+        }
+    }
     pub(crate) fn publish_cursor(&self, update: weld_client::ClientCursorUpdate) {
         self.0
             .borrow_mut()
@@ -173,6 +211,7 @@ impl WaylandClientAdapter {
     fn translate_event(&mut self, event: PendingSurfaceEvent) -> Option<ClientSurfaceEvent> {
         if matches!(&event.kind, PendingSurfaceEventKind::Destroyed) {
             self.revisions.remove(&event.surface);
+            self.bridge.0.borrow_mut().feedback.remove(&event.surface);
         }
         if !matches!(&event.kind, PendingSurfaceEventKind::TreeSnapshot(_)) {
             return translate_non_commit_event(event);
@@ -202,6 +241,7 @@ impl WaylandClientAdapter {
             *revision
         };
         let PendingSurfaceTreeSnapshot {
+            feedback,
             client_mapped,
             root,
             window_geometry,
@@ -209,6 +249,7 @@ impl WaylandClientAdapter {
             inputs,
             buffers,
         } = snapshot;
+        let mut accepted = true;
         let buffers = buffers
             .into_iter()
             .map(|buffer| {
@@ -222,6 +263,7 @@ impl WaylandClientAdapter {
                     }
                     PendingSurfaceBufferContent::ShmPixels(bgra_pixels) => {
                         let Some(use_local) = self.allocate_buffer_use() else {
+                            accepted = false;
                             warn!(?surface, layer = ?buffer.layer, "discarded SHM content because client-buffer use identity space is exhausted");
                             return SurfaceBufferUpdate {
                                 layer: buffer.layer,
@@ -229,6 +271,7 @@ impl WaylandClientAdapter {
                             };
                         };
                         let Some(buffer_local) = self.buffer_ids.allocate() else {
+                            accepted = false;
                             warn!(?surface, layer = ?buffer.layer, "discarded SHM content because client-buffer identity space is exhausted");
                             return SurfaceBufferUpdate {
                                 layer: buffer.layer,
@@ -247,6 +290,7 @@ impl WaylandClientAdapter {
                         match lease {
                             Ok(buffer) => SurfaceBufferChange::Replaced { metadata, buffer },
                             Err(error) => {
+                                accepted = false;
                                 warn!(%error, ?surface, layer = ?buffer.layer, "rejected SHM client-buffer lease");
                                 SurfaceBufferChange::Retained { metadata }
                             }
@@ -254,6 +298,7 @@ impl WaylandClientAdapter {
                     }
                     PendingSurfaceBufferContent::ImportedDmabuf(frame) => {
                         let Some(import_id) = self.dmabuf.import_id(&frame) else {
+                            accepted = false;
                             self.dmabuf.release_unrendered(frame);
                             warn!(?surface, layer = ?buffer.layer, "discarded DMA-BUF content because its protocol import is unavailable");
                             return SurfaceBufferUpdate {
@@ -262,6 +307,7 @@ impl WaylandClientAdapter {
                             };
                         };
                         let Some(buffer_local) = self.buffer_ids.dmabuf(import_id) else {
+                            accepted = false;
                             self.dmabuf.release_unrendered(frame);
                             warn!(?surface, layer = ?buffer.layer, "discarded DMA-BUF content because client-buffer identity space is exhausted");
                             return SurfaceBufferUpdate {
@@ -270,6 +316,7 @@ impl WaylandClientAdapter {
                             };
                         };
                         let Some(use_local) = self.allocate_buffer_use() else {
+                            accepted = false;
                             self.dmabuf.release_unrendered(frame);
                             warn!(?surface, layer = ?buffer.layer, "discarded DMA-BUF content because client-buffer use identity space is exhausted");
                             return SurfaceBufferUpdate {
@@ -286,6 +333,7 @@ impl WaylandClientAdapter {
                         ) {
                             Ok(buffer) => SurfaceBufferChange::Replaced { metadata, buffer },
                             Err(error) => {
+                                accepted = false;
                                 warn!(%error, ?surface, layer = ?buffer.layer, "rejected DMA-BUF client-buffer lease");
                                 SurfaceBufferChange::Retained { metadata }
                             }
@@ -298,6 +346,17 @@ impl WaylandClientAdapter {
                 }
             })
             .collect();
+        let mut bridge = self.bridge.0.borrow_mut();
+        bridge.feedback.remove(&surface);
+        if accepted && !feedback.is_empty() {
+            bridge.feedback.insert(
+                surface,
+                PendingFeedback {
+                    revision: ClientCommitRevision::new(revision),
+                    layers: feedback,
+                },
+            );
+        }
         ClientSurfaceCommit::from(weld_client::ClientSurfaceState {
             revision: ClientCommitRevision::new(revision),
             alpha_mode: SurfaceAlphaMode::Preserved,

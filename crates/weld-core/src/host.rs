@@ -535,6 +535,16 @@ pub struct CompositionOutputRequest {
 pub struct CompositionOutputFrame {
     pub output: OutputId,
     pub frame: CompositionFrame,
+    /// Client layers and commit revisions sampled by this completed composition.
+    pub surfaces: Vec<SurfacePresentation>,
+}
+
+/// One client layer sampled into a completed output frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SurfacePresentation {
+    pub surface: weld_client::ClientSurfaceId,
+    pub revision: weld_client::ClientCommitRevision,
+    pub layer: weld_client::SurfaceLayerId,
 }
 
 /// Completed application composition and any storage retained for readback.

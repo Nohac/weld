@@ -153,10 +153,7 @@ impl ServerState {
         if was_mapped && !mapped {
             self.clear_input_focus_for_surface(root, self.event_time());
         }
-        self.pending_surface_events.push_back(PendingSurfaceEvent {
-            surface: id,
-            kind: PendingSurfaceEventKind::TreeSnapshot(snapshot),
-        });
+        self.publish_surface_snapshot(id, snapshot);
         true
     }
 
@@ -174,10 +171,7 @@ impl ServerState {
         };
         let snapshot = layer.tree.remove_surface(root, removed);
         self.presentation_requested = true;
-        self.pending_surface_events.push_back(PendingSurfaceEvent {
-            surface: id,
-            kind: PendingSurfaceEventKind::TreeSnapshot(snapshot),
-        });
+        self.publish_surface_snapshot(id, snapshot);
         true
     }
 }

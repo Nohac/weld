@@ -156,10 +156,7 @@ impl ServerState {
         // surface's MultiCache entry.
         self.publish_popup_layout(root);
         self.presentation_requested = true;
-        self.pending_surface_events.push_back(PendingSurfaceEvent {
-            surface: surface_id,
-            kind: PendingSurfaceEventKind::TreeSnapshot(snapshot),
-        });
+        self.publish_surface_snapshot(surface_id, snapshot);
         true
     }
 
@@ -173,10 +170,7 @@ impl ServerState {
         };
         let snapshot = popup.tree.remove_surface(root, removed);
         self.presentation_requested = true;
-        self.pending_surface_events.push_back(PendingSurfaceEvent {
-            surface: surface_id,
-            kind: PendingSurfaceEventKind::TreeSnapshot(snapshot),
-        });
+        self.publish_surface_snapshot(surface_id, snapshot);
         true
     }
 

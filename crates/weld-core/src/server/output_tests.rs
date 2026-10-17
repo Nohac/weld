@@ -8,6 +8,8 @@ mod input_binding_tests;
 mod input_seat_tests;
 #[path = "layer_tests.rs"]
 mod layer_tests;
+#[path = "presentation_time_tests.rs"]
+mod presentation_time_tests;
 #[path = "session_lock_tests.rs"]
 mod session_lock_tests;
 #[path = "touch_tests.rs"]
@@ -59,6 +61,7 @@ struct ObservedSurface {
 
 #[derive(Default)]
 struct Observer {
+    presentation: presentation_time_tests::Probe,
     lock: session_lock_tests::Probe,
     touch: touch_tests::Probe,
     input: input_seat_tests::Probe,
@@ -97,6 +100,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Observer {
         } = event
         {
             match interface.as_str() {
+                "wp_presentation" => {
+                    state.presentation.manager = Some(registry.bind(name, version.min(2), qh, ()));
+                }
                 "ext_session_lock_manager_v1" => {
                     state.lock.manager = Some(registry.bind(name, 1, qh, ()));
                 }

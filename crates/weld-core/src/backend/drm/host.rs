@@ -477,8 +477,8 @@ impl NativeDriver<HostEvent> for DrmDriver {
                     metadata,
                 } => {
                     let vblank_at = Instant::now();
-                    let sequence = metadata.map(|event| event.sequence);
-                    let retired = self.desktop.retire(crtc)?;
+                    let sequence = metadata.as_ref().map(|event| event.sequence);
+                    let retired = self.desktop.retire(crtc, metadata)?;
                     if let Some((output, retired)) = retired {
                         state
                             .data

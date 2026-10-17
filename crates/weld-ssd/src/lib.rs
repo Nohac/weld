@@ -2599,6 +2599,7 @@ mod tests {
         HostSurfaceEvent {
             surface,
             kind: HostSurfaceEventKind::Commit(SurfaceTreeSnapshot {
+                revision: None,
                 client_mapped: true,
                 alpha_mode: Default::default(),
                 root: Some(SurfaceLayerPlacement {
@@ -2633,6 +2634,7 @@ mod tests {
         HostSurfaceEvent {
             surface,
             kind: HostSurfaceEventKind::Commit(SurfaceTreeSnapshot {
+                revision: None,
                 client_mapped: false,
                 alpha_mode: Default::default(),
                 root: None,

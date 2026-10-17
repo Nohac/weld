@@ -1015,6 +1015,13 @@ including a same-size commit. That one-shot observation completes window,
 floating-anchor and hoist resize settlement; later content returns to the light
 presentation path.
 
+Completed output frames carry sampled surface/layer identities and their admitted
+commit revisions. The renderer verifies current GPU bindings and prepared draw
+batches before reporting a sample. Smithay presentation-feedback objects remain
+in the core adapter, which transfers matching feedback to native frame retirement.
+DRM completes it with page-flip timing; nested presentation supplies software
+timing. See [presentation feedback](drm-presentation.md#presentation-feedback).
+
 The local inbox has no effect on protocol processing, device-paced input, or
 relay observation in `ClientRuntime`. Other consumers retain their own cadence.
 The Smithay adapter still constructs geometry/inventory snapshots per processed

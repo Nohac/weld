@@ -307,6 +307,7 @@ impl CompositionHost for SurfaceOnly {
         self.manager.finish_render(&mut self.images)?;
         frames.clear();
         frames.push(CompositionOutputFrame {
+            surfaces: Vec::new(),
             output: OutputId::new(1),
             frame: CompositionFrame::owned(self.view.clone(), self.target.clone()),
         });
