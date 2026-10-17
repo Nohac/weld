@@ -1,6 +1,7 @@
 //! Headless measurements for Weld's production application boundary.
 
 mod presentation;
+pub(crate) mod retained;
 pub use presentation::PresentationProbe;
 use presentation::install_presentation_probe;
 pub(crate) use presentation::render_probe;

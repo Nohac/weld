@@ -2348,6 +2348,121 @@ mod tests {
 
     #[cfg(feature = "test-support")]
     #[test]
+    fn retained_ui_replays_clipping_transparency_and_rebuilds_after_resize() {
+        let (mut shell, _, device, queue) = crate::benchmark::rendering_shell_with_outputs(
+            vec![diagnostic_output(
+                PRIMARY_OUTPUT_ID,
+                LogicalPoint::ZERO,
+                true,
+                0.0,
+            )],
+            |_| {},
+        )
+        .expect("diagnostic GPU shell");
+        let surface = SurfaceId::for_test(1);
+        install_diagnostic_surface(&mut shell, surface, [0, 255, 0, 255]);
+        let parent = shell
+            .app
+            .world_mut()
+            .spawn((
+                RoundedSurfaceClip,
+                Node {
+                    width: px(32),
+                    height: px(32),
+                    overflow: bevy::ui::Overflow::clip(),
+                    border_radius: BorderRadius::all(px(8)),
+                    ..Default::default()
+                },
+                BackgroundColor(Color::srgb(0., 0., 1.)),
+            ))
+            .id();
+        shell.app.world_mut().spawn((
+            SurfaceNode {
+                surface,
+                view: SurfaceView::FullSurface,
+            },
+            Node {
+                flex_shrink: 0.,
+                ..Default::default()
+            },
+            ChildOf(parent),
+        ));
+        let overlay = shell
+            .app
+            .world_mut()
+            .spawn((
+                Node {
+                    position_type: PositionType::Absolute,
+                    left: px(10),
+                    top: px(10),
+                    width: px(20),
+                    height: px(20),
+                    ..Default::default()
+                },
+                BackgroundColor(Color::srgba(1., 0., 0., 0.5)),
+                bevy::ui::GlobalZIndex(10),
+            ))
+            .id();
+        // Prepare the SHM fixture and pipelines before installing the DMA-BUF replay experiment.
+        for tick in 0..8 {
+            shell.advance_main(tick);
+            render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        }
+        crate::benchmark::retained::install(&mut shell.app, &device, &queue)
+            .expect("install probe");
+        let mut images = Vec::new();
+        for size in [32, 48] {
+            {
+                let mut node = shell
+                    .app
+                    .world_mut()
+                    .get_mut::<Node>(parent)
+                    .expect("frame");
+                node.width = px(size);
+                node.height = px(size);
+            }
+            update_diagnostic_surface_extent(&mut shell, surface, 64, |_, _| [0, 255, 0, 255]);
+            shell.advance_main(10);
+            crate::benchmark::retained::tests::refresh_and_validate(&mut shell.app);
+            for _ in 0..4 {
+                // The probe compares replay with full preparation and a rotated output target.
+                render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+            }
+            images.push(render_owned_output(
+                &mut shell,
+                &device,
+                &queue,
+                PRIMARY_OUTPUT_ID,
+            ));
+        }
+        assert_ne!(images[0], images[1], "rebuild applies the resized clip");
+        assert!(
+            images[1]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[1] > 200 && pixel[0] == 0),
+            "surface is drawn"
+        );
+        assert!(
+            images[1]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|pixel| pixel[0] > 100 && pixel[1] > 100),
+            "overlay blends with surface"
+        );
+        shell.app.world_mut().entity_mut(overlay).despawn();
+        shell.app.world_mut().entity_mut(parent).despawn();
+        shell.advance_main(11);
+        crate::benchmark::retained::tests::refresh_and_validate(&mut shell.app);
+        for _ in 0..4 {
+            render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        }
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
     fn resized_hidden_surface_updates_layout_and_pixels_without_target_change() {
         let (mut shell, _, device, queue) = crate::benchmark::rendering_shell_with_outputs(
             vec![diagnostic_output(

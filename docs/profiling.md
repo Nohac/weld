@@ -108,6 +108,8 @@ additive decomposition of production cost.
 | `render-direct` | State-direct plus the whole empty Bevy renderer, then a direct draw |
 | `minimal` | Normal AppShell and SurfaceNode rendering |
 | `master` | Master policy, window UI and launch-free fixture config |
+| `minimal-retained` | Minimal with prepared Bevy UI replay between fixture rebuilds |
+| `master-retained` | Master with the same prepared UI replay |
 
 The first main-only cases keep input delivery in the raw presenter; their Bevy
 apps receive no client events or input. State/extract/prepare/render-direct
@@ -157,6 +159,72 @@ behavior and fractional scaling need separate measurements.
 
 The [initial comparison](performance/paced-render-2026-10-03.md) records the
 baseline and its limits.
+
+### Retained UI experiment (2026-10-17)
+
+The `test-support` presentation probe retains Bevy's prepared render entities,
+UI geometry, phase ordering and material data. Content-only frames run a small
+schedule that refreshes output attachments and surface bindings, executes the
+existing Bevy render graph, and maintains the texture cache. Core DMA-BUF
+promotion and completion remain around that submission. The main-world schedule
+continues normally, and the complete output is redrawn. This experiment adds
+no Bevy vendor changes.
+
+The fixed-scene probe runs full preparation for the first 120 frames, then every
+60 frames. Before a rebuild it retires the previous extracted entities.
+Three early replay frames are read back and compared byte-for-byte with full
+preparation of the same scene/buffers. Each also renders into a newly allocated
+output texture to check backing-texture rotation. These assertions must finish
+before `MEASUREMENT_START`; the launcher rejects a run whose validation spills
+into measurement. Use at least four warmup seconds at 60 Hz.
+
+```sh
+scripts/profiling/paced-render --mode minimal-retained --warmup 4 --seconds 10
+scripts/profiling/paced-render --no-build --mode master-retained --warmup 4 --seconds 10 --windows 3 --decorations server --input-hz 1000
+```
+
+Use `minimal` and `master` as the corresponding controls. When using an explicit
+`cargo bench --no-run --profile release --bench paced_render --features test-support`
+build, pass its executable with `--no-build --executable PATH`. The runner's
+saved executable manifest belongs to its last successful managed build.
+
+Measurements on Radeon 880M/RADV, kernel 7.2.8, optimized release, validation
+disabled, 1920×1080 at 60 Hz, and real EGL DMA-BUF clients at 120 Hz each:
+
+| Workload | Normal CPU, % of one core | Replay CPU, % of one core | Mean reduction |
+| --- | --- | --- | --- |
+| One surface, minimal shell | 9.399 / 8.800 | 6.198 / 6.300 | 31% |
+| Three SSD windows, Master, 1000 Hz input | 12.799 / 10.899 | 9.900 / 8.500 | 22% |
+
+Each workload ran sequentially in normal/replay/replay/normal order, with four
+seconds warmup and ten seconds measurement. Compilation was finished before
+measurement. Both paths maintained approximately 60 compositions/second and
+the expected 120/360 total commits/second. Render-call wall time averaged
+811→444 µs for the minimal fixture and 838→505 µs for the Master fixture.
+CPU variation between repeats is visible above; these are offscreen fixture
+results, with physical scanout and end-to-end latency left for later validation.
+
+Evidence directories under `target/validation/`, in execution order:
+
+- Minimal: `paced-render-uanm_uaq`, `paced-render-4xtlr4qd`,
+  `paced-render-clj4y2kg`, `paced-render-poierscg`.
+- Master: `paced-render-jk3jwi42`, `paced-render-mlhf7mhl`,
+  `paced-render-ps3fkhk3`, `paced-render-qbgb5m8p`.
+
+Production integration needs explicit invalidation for geometry, clipping,
+stacking, visibility, surface-tree changes, material parameters, text/atlas and
+image/shader assets, output metrics and device recovery. SHM content uploads
+also need their asset-preparation path on content-only frames. Time-dependent
+visuals must advance their relevant preparation. Periodic rebuilds only bound
+this fixed-scene experiment; the normal desktop keeps its existing renderer.
+
+Validation also includes a GPU regression with a rounded, clipped surface and
+an overlapping translucent UI node. It compares replay/full preparation and
+rotated targets before and after an explicit resize rebuild and node teardown.
+An entity-lifetime test checks that retained entities survive replay and are
+retired without removing persistent render entities. The benchmark assembly's
+stale watermark-plugin reference was updated to the current output-topology
+plugin so both control and replay use the same runnable assembly.
 
 ## Whole-process CPU profiles
 

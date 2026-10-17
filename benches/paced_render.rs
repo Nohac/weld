@@ -36,6 +36,8 @@ enum Mode {
     PrepareDirect,
     Minimal,
     Master,
+    MinimalRetained,
+    MasterRetained,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -84,6 +86,12 @@ fn main() -> Result<()> {
     let run_dir = args.run_dir.context("--producer requires --run-dir")?;
     weldwm::benchmark::initialize_tracing()?;
     ensure!((1..=8).contains(&args.windows), "window count must be 1..8");
+    if matches!(args.mode, Mode::MinimalRetained | Mode::MasterRetained) {
+        ensure!(
+            args.warmup as f64 >= 124.0 / f64::from(args.hz) + 0.5,
+            "retained probe warmup must cover 124 frames plus readback validation"
+        );
+    }
     ensure!(
         (1..=1000).contains(&args.producer_hz),
         "producer rate must be 1..1000"
@@ -177,11 +185,14 @@ fn main() -> Result<()> {
                 Mode::RenderDirect => Some(PresentationProbe::RenderThenDirect),
                 Mode::ExtractDirect => Some(PresentationProbe::ExtractThenDirect),
                 Mode::PrepareDirect => Some(PresentationProbe::PrepareThenDirect),
+                Mode::MinimalRetained | Mode::MasterRetained => Some(PresentationProbe::RetainedUi),
                 _ => None,
             };
             let shell = shell_for_host_with_probe(context, importers, probe, |app| match mode {
-                Mode::Master => configured = weldwm::benchmark::configure(app, &args.config),
-                Mode::Minimal | Mode::UiDirect => {
+                Mode::Master | Mode::MasterRetained => {
+                    configured = weldwm::benchmark::configure(app, &args.config)
+                }
+                Mode::Minimal | Mode::MinimalRetained | Mode::UiDirect => {
                     app.add_systems(PreUpdate, mount_surfaces);
                 }
                 Mode::Surface

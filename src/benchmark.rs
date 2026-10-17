@@ -27,7 +27,7 @@ pub fn configure(app: &mut App, config: &Path) -> Result<()> {
         weld_tile_ui::TileUiPlugin,
         GlobalShortcutPlugin,
         VirtualTerminalShortcutPlugin,
-        crate::overlay::DistributionOverlayPlugin,
+        crate::overlay::OutputTopologyOverlayPlugin,
         crate::master::MasterConfigPlugin::load(config)?,
         HoistPlugin,
     ));

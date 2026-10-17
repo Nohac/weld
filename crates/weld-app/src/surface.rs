@@ -47,7 +47,7 @@ pub use weld_client::{
 use weld_core::dmabuf::ImportId;
 
 #[path = "surface/binding.rs"]
-mod binding;
+pub(crate) mod binding;
 pub(crate) use binding::publish_surface_bindings;
 
 #[path = "surface/clip.rs"]

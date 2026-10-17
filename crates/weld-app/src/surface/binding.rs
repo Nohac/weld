@@ -203,3 +203,21 @@ fn prepare_surface_bindings(
         material.bind_group = bind_group;
     }
 }
+
+#[cfg(feature = "test-support")]
+pub(crate) mod benchmark {
+    use bevy::{
+        ecs::schedule::{IntoScheduleConfigs, Schedule},
+        render::{renderer::render_system, view::prepare_view_targets},
+    };
+
+    use super::prepare_surface_bindings;
+
+    pub(crate) fn configure(schedule: &mut Schedule) {
+        schedule.add_systems(
+            prepare_surface_bindings
+                .after(prepare_view_targets)
+                .before(render_system),
+        );
+    }
+}

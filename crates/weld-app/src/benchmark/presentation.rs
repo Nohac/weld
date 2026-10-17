@@ -1,4 +1,4 @@
-//! Diagnostic substitutions after the production bridge has promoted buffers.
+//! Diagnostic presentation paths after the production bridge has promoted buffers.
 
 use std::collections::HashMap;
 
@@ -27,9 +27,11 @@ use weld_core::{
     host::{CompositionOutputFrame, RenderContext},
 };
 
-/// Which render-world work precedes the diagnostic direct surface draw.
+/// Which presentation path the offscreen fixture measures.
 #[derive(Clone, Copy, Debug)]
 pub enum PresentationProbe {
+    /// Replay prepared Bevy UI between periodic fixture-scene rebuilds.
+    RetainedUi,
     /// Keep production main-world work, image registration and buffer lifetime.
     Direct,
     /// Also extract and apply render-world commands, retiring temporary entities.
@@ -65,6 +67,9 @@ pub(super) fn install_presentation_probe(
     context: &RenderContext,
     probe: PresentationProbe,
 ) -> Result<()> {
+    if matches!(probe, PresentationProbe::RetainedUi) {
+        return super::retained::install(app, &context.device, &context.queue);
+    }
     if matches!(probe, PresentationProbe::PrepareThenDirect) {
         app.get_sub_app_mut(RenderApp)
             .context("diagnostic probe requires RenderApp")?
@@ -88,6 +93,9 @@ pub(super) fn install_presentation_probe(
 }
 
 pub(crate) fn render_probe(app: &mut App, frames: &[CompositionOutputFrame]) -> Result<bool> {
+    if super::retained::render(app, frames)? {
+        return Ok(true);
+    }
     let Some(mut direct) = app.world_mut().remove_resource::<DirectPresentation>() else {
         return Ok(false);
     };
