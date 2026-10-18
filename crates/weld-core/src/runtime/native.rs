@@ -197,6 +197,9 @@ impl<Event: 'static> NativeRuntime<Event> {
             self.state.data.server.enable_output_capture();
         }
         let result = self.serve(&mut integration, interval);
+        if let Some(launches) = &mut self.launches {
+            launches.shutdown(&self.event_loop.handle());
+        }
         if let Some((driver, _)) = integration.native() {
             driver.shutdown();
         }
@@ -267,8 +270,12 @@ impl<Event: 'static> NativeRuntime<Event> {
                 break;
             }
             self.state.data.server.poll_output_captures();
-            if let Some(launches) = &self.launches {
-                launches.service(&mut self.state.children, &self.state.data.server);
+            if let Some(launches) = &mut self.launches {
+                launches.service(
+                    &mut self.state.children,
+                    &self.state.data.server,
+                    &self.event_loop.handle(),
+                );
             }
 
             {

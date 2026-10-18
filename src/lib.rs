@@ -381,6 +381,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
     if enable_hoist_policy {
         app.add_plugins(HoistPlugin);
     }
+    let launcher = control::launch::install(&mut app, launcher)?;
     let _controls = if enable_hoist_policy {
         match device_options.and_then(|options| {
             devices::install(

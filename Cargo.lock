@@ -9544,6 +9544,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "tracing-tracy",
+ "uuid",
  "weld-access",
  "weld-app",
  "weld-client",

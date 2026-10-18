@@ -238,6 +238,11 @@ uncertain input.
 
 ## Native testing loop
 
+For automatic authorization, use `weldctl run --control --owner agent --headless -- PROGRAM ...`
+and resolve its receipt with `window find --launch-id ID --json`. `window peek`
+shows or hides its local frame. See [Native application launch](native-launch.md)
+for workspace placement, persistent-slot matching and socket lifetime.
+
 Launch one app through `weldctl launch -- PROGRAM ...`, then resolve it with
 `window find --app-id APP_ID --occupied true --json`. Obtain local authorization
 through the header or `window control`, and retain the copied shorthand for a

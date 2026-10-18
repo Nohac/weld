@@ -62,7 +62,7 @@ pub(crate) fn install(
     app: &mut WeldApp,
     options: DeviceOptions,
     host: Option<IrohHost>,
-    launcher: weld_core::runtime::launch::ClientLauncher,
+    launcher: crate::control::launch::Launcher,
     access: weld_access::AccessAuthority,
 ) -> Result<ControlService> {
     let policy = app.policy_wake()?;

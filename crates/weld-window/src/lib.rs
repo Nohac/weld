@@ -94,6 +94,17 @@ pub struct WindowZOrder(pub i32);
 #[derive(Component, Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct FloatingWindow;
 
+/// Keeps a managed application off local layouts until a presenter admits it.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct WindowManagementHold;
+
+/// Requests dismissal of a local view while retaining its application.
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub struct WindowDismissOnClose;
+
+#[derive(Event, Clone, Copy, Debug)]
+pub struct WindowDismissRequest(pub Entity);
+
 /// Initial placement and activation preferences supplied before manager admission.
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub struct WindowAdmissionPreferences {
@@ -1392,12 +1403,14 @@ struct ApplyWindowCommandParams<'w, 's> {
     actions: ResMut<'w, SurfaceActionQueue>,
     vacant_persistent_windows: persistence::AvailablePersistentWindows<'w, 's>,
     redraw: bevy::ecs::message::MessageWriter<'w, RequestRedraw>,
+    dismiss_on_close: Query<'w, 's, (), With<WindowDismissOnClose>>,
 }
 
 fn apply_window_command(command: On<WindowCommand>, params: ApplyWindowCommandParams) {
     let ApplyWindowCommandParams {
         mut commands,
         windows,
+        dismiss_on_close,
         clients,
         mut focus,
         mut applied_focus,
@@ -1433,7 +1446,9 @@ fn apply_window_command(command: On<WindowCommand>, params: ApplyWindowCommandPa
             }
         }
         WindowCommandKind::Close => {
-            if let Some(client) = clients.mapped_client(window) {
+            if dismiss_on_close.contains(window) {
+                commands.trigger(WindowDismissRequest(window));
+            } else if let Some(client) = clients.mapped_client(window) {
                 actions.push(SurfaceAction::Close {
                     surface: client.surface(),
                 });

@@ -42,7 +42,8 @@ fn fixture() -> (App, ClientAdapterRegistration) {
         .add_observer(fit_to_frame)
         .add_systems(
             PreUpdate,
-            reconcile
+            (admit_launches, reconcile)
+                .chain()
                 .after(WindowSystems::AdmissionPolicy)
                 .before(WindowSystems::PresentationRevoke),
         )
@@ -53,6 +54,55 @@ fn fixture() -> (App, ClientAdapterRegistration) {
                 .after(WindowSystems::UiReconcile),
         );
     (app, adapter)
+}
+
+#[test]
+fn controlled_launch_is_authorized_once_and_global_revoke_covers_delayed_windows() {
+    use crate::control::launch::{LaunchPolicy, WindowLaunch};
+    use std::sync::Arc;
+    let (mut app, _adapter) = fixture();
+    let (_, window) = occupant(&mut app, 901);
+    let policy = Arc::new(LaunchPolicy {
+        id: 17,
+        options: weld_control::launch::LaunchOptions {
+            control: true,
+            ..Default::default()
+        },
+        permit: Some(
+            app.world()
+                .resource::<SessionAccess>()
+                .0
+                .open("test-launch".into())
+                .expect("permit"),
+        ),
+    });
+    app.world_mut()
+        .entity_mut(window)
+        .insert(WindowLaunch(policy.clone()));
+    app.update();
+    assert!(app.world().get::<ControlledWindow>(window).is_some());
+    app.world_mut().trigger(ToggleControl(window));
+    app.update();
+    assert!(
+        app.world().get::<ControlledWindow>(window).is_none(),
+        "manual disable stays disabled"
+    );
+    app.world()
+        .resource::<SessionAccess>()
+        .0
+        .revoke_all()
+        .expect("revoke");
+    app.world()
+        .resource::<SessionAccess>()
+        .0
+        .allow_new_sessions()
+        .expect("allow fresh launches");
+    let (_, delayed) = occupant(&mut app, 902);
+    app.world_mut()
+        .entity_mut(delayed)
+        .insert(WindowLaunch(policy));
+    app.update();
+    assert!(app.world().get::<ControlledWindow>(delayed).is_none());
 }
 
 fn occupant(app: &mut App, id: u64) -> (Entity, Entity) {

@@ -49,6 +49,8 @@ pub struct WindowInfo {
     /// Slot shorthand that resolves to the current control ID, including after relaunch.
     pub control_key: Option<String>,
     pub capabilities: Option<Capabilities>,
+    pub launch_id: Option<String>,
+    pub owner: Option<String>,
 }
 
 impl fmt::Display for WindowInfo {
@@ -76,6 +78,7 @@ type Administrator = Arc<dyn Fn(String, ControlAction) -> Result<(), String> + S
 
 #[derive(Clone, Copy)]
 pub enum ControlAction {
+    Peek(bool),
     Enable,
     Disable,
     Permissions(Capabilities),
@@ -261,6 +264,12 @@ impl WindowService {
                 ControlAction::Disable
             },
         )
+    }
+
+    /// Show a headless controlled application in a local frame, preserving its viewport.
+    pub fn peek(&self, control: String, visible: Option<bool>) -> Result<String, String> {
+        let window = self.resolve(control)?;
+        self.administer(window.id, ControlAction::Peek(visible.unwrap_or(true)))
     }
 
     /// Replace the enabled window's remote-control permissions.
@@ -494,6 +503,8 @@ impl WindowService {
         app_id: Option<String>,
         occupied: Option<bool>,
         controlled: Option<bool>,
+        owner: Option<String>,
+        launch_id: Option<String>,
     ) -> Result<WindowCatalogue, String> {
         let mut catalogue = self.list()?;
         catalogue.windows.retain(|window| {
@@ -502,6 +513,12 @@ impl WindowService {
                 .is_none_or(|app_id| window.app_id.as_ref() == Some(app_id))
                 && occupied.is_none_or(|occupied| window.occupied == occupied)
                 && controlled.is_none_or(|controlled| window.control_key.is_some() == controlled)
+                && owner
+                    .as_ref()
+                    .is_none_or(|owner| window.owner.as_ref() == Some(owner))
+                && launch_id
+                    .as_ref()
+                    .is_none_or(|id| window.launch_id.as_ref() == Some(id))
         });
         Ok(catalogue)
     }
@@ -595,6 +612,11 @@ impl WindowClient {
     /// Enable or revoke remote control. This administrative command is available through the local CLI.
     pub fn control(&self, id: String, enabled: bool) -> Result<String, String> {
         self.request("control", json!({"id":id,"enabled":enabled}))
+    }
+
+    /// Show a controlled application in a local desktop frame.
+    pub fn peek(&self, control: String, visible: Option<bool>) -> Result<String, String> {
+        self.request("peek", json!({"control":control,"visible":visible}))
     }
 
     /// Replace remote-control permissions through the local administrative CLI. Omitted flags disable their capability.
@@ -735,10 +757,12 @@ impl WindowClient {
         app_id: Option<String>,
         occupied: Option<bool>,
         controlled: Option<bool>,
+        owner: Option<String>,
+        launch_id: Option<String>,
     ) -> Result<WindowCatalogue, String> {
         self.request(
             "find",
-            json!({"app_id":app_id,"occupied":occupied,"controlled":controlled}),
+            json!({"app_id":app_id,"occupied":occupied,"controlled":controlled,"owner":owner,"launch_id":launch_id}),
         )
     }
     /// List managed windows, including vacant persistent slots.

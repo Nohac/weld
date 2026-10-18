@@ -113,6 +113,7 @@ x11-dl = "2.21.0"
 xcursor = "0.3.11"
 
 [dependencies]
+uuid = { version = "1", features = ["v4"] }
 weld-hoist-protocol = { path = "crates/weld-hoist-protocol" }
 weld-remote-control-ui = { path = "crates/weld-remote-control-ui" }
 base64 = "0.22.1"

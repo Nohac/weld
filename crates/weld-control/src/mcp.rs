@@ -24,12 +24,19 @@ struct InventoryTools(WindowClient);
 #[server_less::mcp(namespace = "window")]
 impl InventoryTools {
     /// List control-enabled windows, including waiting persistent slots. Set all_windows to true to include the entire desktop inventory.
-    pub fn list(&self, all_windows: Option<bool>) -> Result<WindowCatalogue, String> {
-        if all_windows.unwrap_or(false) {
-            self.0.list()
-        } else {
-            self.0.find(None, None, Some(true))
-        }
+    pub fn list(
+        &self,
+        all_windows: Option<bool>,
+        owner: Option<String>,
+        launch_id: Option<String>,
+    ) -> Result<WindowCatalogue, String> {
+        self.0.find(
+            None,
+            None,
+            (!all_windows.unwrap_or(false)).then_some(true),
+            owner,
+            launch_id,
+        )
     }
 }
 

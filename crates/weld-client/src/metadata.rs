@@ -1,4 +1,4 @@
-//! Client-supplied display labels. These are never authenticated identities.
+//! Surface display labels and host-local connection attribution.
 use std::fmt;
 
 pub const MAX_SURFACE_LABEL_BYTES: usize = 1024;
@@ -14,6 +14,7 @@ pub struct ClientSurfaceMetadata {
     title: String,
     x11_instance: Option<String>,
     local_process_id: Option<u32>,
+    local_launch_id: Option<u64>,
 }
 
 impl ClientSurfaceMetadata {
@@ -26,6 +27,7 @@ impl ClientSurfaceMetadata {
             title,
             x11_instance: None,
             local_process_id: None,
+            local_launch_id: None,
         })
     }
 
@@ -44,6 +46,7 @@ impl ClientSurfaceMetadata {
             title,
             x11_instance: None,
             local_process_id: None,
+            local_launch_id: None,
         }
     }
     /// X11 class remains the cross-platform application label; instance also
@@ -74,6 +77,14 @@ impl ClientSurfaceMetadata {
     }
     pub const fn local_process_id(&self) -> Option<u32> {
         self.local_process_id
+    }
+    /// Native listener attribution, retained only on the originating host.
+    pub fn with_local_launch_id(mut self, launch: Option<u64>) -> Self {
+        self.local_launch_id = launch;
+        self
+    }
+    pub const fn local_launch_id(&self) -> Option<u64> {
+        self.local_launch_id
     }
     pub fn title(&self) -> &str {
         &self.title
@@ -130,11 +141,13 @@ mod tests {
     #[test]
     fn transport_excludes_host_local_process_hints() {
         let local = ClientSurfaceMetadata::truncated("foot".into(), "Shell".into())
-            .with_local_process_id(Some(4242));
+            .with_local_process_id(Some(4242))
+            .with_local_launch_id(Some(17));
         let remote =
             ClientSurfaceMetadata::try_from(WireMetadata::from(local)).expect("wire metadata");
         assert_eq!(remote.app_id(), "foot");
         assert_eq!(remote.local_process_id(), None);
+        assert_eq!(remote.local_launch_id(), None);
     }
     #[test]
     fn native_truncation_preserves_utf8_and_wire_bounds_are_strict() {

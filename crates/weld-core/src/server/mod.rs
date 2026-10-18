@@ -8,6 +8,7 @@ mod input_admission;
 mod input_seat;
 mod keyboard;
 mod keyboard_focus;
+pub(crate) mod launch;
 mod layer;
 mod output;
 #[cfg(test)]
@@ -657,6 +658,7 @@ pub enum PendingSurfaceEventKind {
 struct ClientState {
     compositor_state: CompositorClientState,
     id: ClientId,
+    launch_id: Option<u64>,
 }
 
 impl ClientState {
@@ -664,6 +666,7 @@ impl ClientState {
         Self {
             compositor_state: CompositorClientState::default(),
             id,
+            launch_id: None,
         }
     }
 }

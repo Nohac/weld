@@ -6,6 +6,16 @@ project intent and future direction without presenting it as current behavior.
 
 Weld is a workspace of reusable layers and one standard distribution:
 
+- Attributed launches split native process/socket ownership from admission policy.
+  `weld-core` accepts launch listeners into the existing Smithay display and stamps
+  host-local metadata before surface admission. The distribution resolves launch
+  intent through a bounded policy channel before spawning, retains workspace and
+  owner metadata, and grants control through the existing remote-control owner.
+  `WindowManagementHold` keeps headless applications outside local managers;
+  peek admits them without transferring viewport ownership. `WindowDismissOnClose`
+  routes local close to a dismissal event, preserving the application. See
+  [Native application launch](native-launch.md) for lifecycle and commands.
+
 - `weld-remote-control` owns bounded local window-control operations, occupant-scoped
   handles and native adapter servicing. It reuses the hoist source relay's input
   seat and retirement ledger. Composed view geometry and hit testing live in

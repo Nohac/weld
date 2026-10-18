@@ -37,10 +37,26 @@ enum Command {
         command: Access,
     },
     /// Launch an application in the selected Weld session.
+    #[command(visible_aliases = ["run", "exec"])]
     Launch {
         /// Working directory; defaults to the calling shell's current directory.
         #[arg(long)]
         cwd: Option<PathBuf>,
+        /// Destination workspace, or "current" captured before spawning.
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Label used to find this launch's windows later.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Give the launched application's windows remote-control permissions.
+        #[arg(long)]
+        control: bool,
+        /// Keep controlled windows off the desktop until explicitly peeked.
+        #[arg(long, requires = "control")]
+        headless: bool,
+        /// Use the session's shared Wayland/X11 endpoints, without launch attribution.
+        #[arg(long, conflicts_with_all = ["workspace", "owner", "control", "headless"])]
+        shared_display: bool,
         /// Executable and exact arguments, following --.
         #[arg(required = true, num_args = 1.., last = true)]
         command: Vec<String>,
@@ -121,6 +137,7 @@ fn main() -> Result<()> {
         None => socket_path(
             &args
                 .session
+                .or_else(|| std::env::var("WELD_SESSION").ok())
                 .or_else(|| std::env::var("WAYLAND_DISPLAY").ok())
                 .unwrap_or_else(|| "weld-0".into()),
         )?,
@@ -176,7 +193,15 @@ fn main() -> Result<()> {
                 _ => anyhow::bail!("unexpected access response"),
             }
         }
-        Command::Launch { cwd, command } => {
+        Command::Launch {
+            cwd,
+            workspace,
+            owner,
+            control,
+            headless,
+            shared_display,
+            command,
+        } => {
             let (program, arguments) = command
                 .split_first()
                 .context("launch needs an executable")?;
@@ -187,11 +212,18 @@ fn main() -> Result<()> {
                 program: program.clone(),
                 arguments: arguments.to_vec(),
                 directory,
+                options: weld_control::launch::LaunchOptions {
+                    workspace,
+                    owner,
+                    control,
+                    headless,
+                    shared_display,
+                },
             };
-            let Response::Launched(receipt) = call(&path, &Request::Launch(request))? else {
+            let Response::Launched(receipt) = call(&path, &Request::Run(request))? else {
                 anyhow::bail!("unexpected launch response");
             };
-            println!("Started process {} in Weld.", receipt.process_id);
+            println!("{}", serde_json::to_string(&receipt)?);
         }
         Command::Diagnostics { command } => match command {
             Diagnostics::List => {

@@ -36,8 +36,9 @@ use weld_remote_control_ui::{
 };
 use weld_window::{
     FocusedWindow, ManagedWindow, PresentationInsets, PrimaryWindowPresentation,
-    WindowExternalControl, WindowGeometry, WindowHeaderRequested, WindowLocalInputBlocked,
-    WindowOccupant, WindowSystems, persistence::PersistentWindow, rounded_client_size,
+    WindowAdmissionPreferences, WindowExternalControl, WindowGeometry, WindowHeaderRequested,
+    WindowLocalInputBlocked, WindowOccupant, WindowSystems, persistence::PersistentWindow,
+    rounded_client_size,
 };
 
 #[derive(Component)]
@@ -113,6 +114,7 @@ pub(crate) fn install(app: &mut WeldApp, service: &WindowService) -> Result<()> 
             (reconcile, administer)
                 .chain()
                 .after(WindowSystems::AdmissionPolicy)
+                .after(crate::control::launch::LaunchAdmission)
                 .before(WindowSystems::PresentationRevoke),
         )
         .add_systems(
@@ -122,6 +124,12 @@ pub(crate) fn install(app: &mut WeldApp, service: &WindowService) -> Result<()> 
                 .after(WindowSystems::UiReconcile)
                 .before(PickingSystems::Backend),
         );
+    app.app_mut().add_systems(
+        PreUpdate,
+        admit_launches
+            .after(crate::control::launch::LaunchAdmission)
+            .before(reconcile),
+    );
     weld_remote_control_ui::install(app.app_mut())?;
     Ok(())
 }
@@ -133,6 +141,44 @@ struct Grants<'w, 's> {
     windows: ControllableWindows<'w, 's>,
     clients: Query<'w, 's, &'static ClientToplevel, With<MappedSurface>>,
     commands: Commands<'w, 's>,
+    held: Query<'w, 's, (), With<weld_window::WindowManagementHold>>,
+    dismissible: Query<'w, 's, (), With<weld_window::WindowDismissOnClose>>,
+}
+
+#[derive(Component)]
+struct LaunchControlApplied(weld_client::ClientSurfaceId);
+
+fn admit_launches(
+    launches: Query<(
+        Entity,
+        &crate::control::launch::WindowLaunch,
+        &WindowOccupant,
+        Option<&LaunchControlApplied>,
+    )>,
+    clients: Query<&ClientToplevel>,
+    mut grants: Grants,
+) {
+    for (window, launch, occupant, previous) in &launches {
+        let Ok(client) = clients.get(occupant.entity()) else {
+            continue;
+        };
+        if previous.is_some_and(|previous| previous.0 == client.surface) {
+            continue;
+        }
+        if launch
+            .0
+            .permit
+            .as_ref()
+            .is_some_and(|permit| permit.is_authorized())
+            && let Err(error) = grants.set(window, ControlAction::Enable)
+        {
+            tracing::warn!(%error, "could not enable launch control");
+        }
+        grants
+            .commands
+            .entity(window)
+            .insert(LaunchControlApplied(client.surface));
+    }
 }
 
 type ControllableWindows<'w, 's> = Query<
@@ -156,6 +202,37 @@ impl Grants<'_, '_> {
                 .get(window)
                 .context("window is vacant or unavailable")?;
         let capabilities = match action {
+            ControlAction::Peek(visible) => {
+                ensure!(
+                    existing.is_some_and(|grant| grant.0.active()),
+                    "window control is unavailable"
+                );
+                if !visible {
+                    ensure!(
+                        self.dismissible.contains(window),
+                        "only headless-launched views can be dismissed"
+                    );
+                    self.commands
+                        .trigger(weld_window::WindowDismissRequest(window));
+                } else if self.held.contains(window) {
+                    self.commands
+                        .entity(window)
+                        .remove::<weld_window::WindowManagementHold>();
+                    self.commands.entity(window).insert((
+                        weld_window::WindowVisibility::Visible,
+                        WindowAdmissionPreferences {
+                            floating: None,
+                            focus: false,
+                        },
+                    ));
+                    self.commands
+                        .trigger(weld_i3_quirks::workspace::I3WindowWorkspaceRequest {
+                            window,
+                            target: weld_i3_quirks::workspace::WorkspaceTarget::Current,
+                        });
+                }
+                return Ok(());
+            }
             ControlAction::Disable => {
                 if let Some(existing) = existing {
                     existing.0.revoke();

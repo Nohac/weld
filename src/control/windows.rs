@@ -27,6 +27,7 @@ fn publish(
     publisher: Res<Publisher>,
     controlled: Query<(&ManagedWindow, Ref<ControlledWindow>)>,
     policies: Query<(&ManagedWindow, Ref<ControlPolicy>)>,
+    launches: Query<(&ManagedWindow, Ref<super::launch::WindowLaunch>)>,
     mut retired: RemovedComponents<ControlledWindow>,
     mut removed_policies: RemovedComponents<ControlPolicy>,
 ) {
@@ -38,6 +39,7 @@ fn publish(
         && !policy_removed
         && !policies.iter().any(|(_, policy)| policy.is_changed())
         && !controlled.iter().any(|(_, control)| control.is_changed())
+        && !launches.iter().any(|(_, launch)| launch.is_changed())
     {
         return;
     }
@@ -80,6 +82,14 @@ fn publish(
                 .iter()
                 .find(|(window, _)| window.id == *id)
                 .map(|(_, policy)| policy.capabilities),
+            launch_id: launches
+                .iter()
+                .find(|(window, _)| window.id == *id)
+                .map(|(_, launch)| format!("{:08x}", launch.0.id)),
+            owner: launches
+                .iter()
+                .find(|(window, _)| window.id == *id)
+                .and_then(|(_, launch)| launch.0.options.owner.clone()),
         })
         .collect();
     if let Err(error) = publisher.0.publish(snapshot) {

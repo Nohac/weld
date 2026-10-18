@@ -34,7 +34,7 @@ use weld_hoist_iroh::{IrohDeviceIdentity, IrohHost, IrohNetwork};
 pub enum Request {
     Window(serde_json::Value),
     Access(access::AccessRequest),
-    Launch(LaunchRequest),
+    Run(LaunchRequest),
     DiagnosticSessions,
     DiagnosticReport(weld_diagnostics::SessionId),
     CollectDiagnostics(weld_diagnostics::SessionId),
@@ -399,7 +399,7 @@ impl Owner {
         Ok(match request {
             Request::Window(_) => anyhow::bail!("window requests require the window service"),
             Request::Access(request) => request.execute(&self.access)?,
-            Request::Launch(request) => Response::Launched((self.launch)(request)?),
+            Request::Run(request) => Response::Launched((self.launch)(request)?),
             Request::DiagnosticSessions => Response::DiagnosticSessions(
                 self.host
                     .as_ref()
@@ -639,14 +639,18 @@ mod tests {
                 assert_eq!(request.directory, expected_directory);
                 assert_eq!(request.arguments, ["space in argument", "$(literal)"]);
                 ensure!(request.program == "available", "executable missing");
-                Ok(LaunchReceipt { process_id: 123 })
+                Ok(LaunchReceipt {
+                    process_id: 123,
+                    launch_id: Some("01234567".into()),
+                })
             }),
         )
         .expect("service");
         for program in ["missing", "available"] {
             let response = call(
                 &socket,
-                &Request::Launch(LaunchRequest {
+                &Request::Run(LaunchRequest {
+                    options: Default::default(),
                     program: program.into(),
                     arguments: vec!["space in argument".into(), "$(literal)".into()],
                     directory: directory.path().into(),
@@ -663,7 +667,10 @@ mod tests {
             } else {
                 assert!(matches!(
                     response.expect("launch"),
-                    Response::Launched(LaunchReceipt { process_id: 123 })
+                    Response::Launched(LaunchReceipt {
+                        process_id: 123,
+                        ..
+                    })
                 ));
             }
         }
@@ -694,7 +701,10 @@ mod tests {
             Box::new(move |_| {
                 entered.send(()).expect("entered");
                 wait.recv_timeout(Duration::from_secs(5)).expect("release");
-                Ok(LaunchReceipt { process_id: 123 })
+                Ok(LaunchReceipt {
+                    process_id: 123,
+                    launch_id: Some("01234567".into()),
+                })
             }),
         )
         .expect("service");
@@ -702,7 +712,8 @@ mod tests {
         let launch = thread::spawn(move || {
             call(
                 &launch_socket,
-                &Request::Launch(LaunchRequest {
+                &Request::Run(LaunchRequest {
+                    options: Default::default(),
                     program: "test".into(),
                     arguments: Vec::new(),
                     directory: PathBuf::from("/tmp"),
@@ -758,6 +769,8 @@ mod tests {
         let waiting = client.clone();
         let wait = thread::spawn(move || waiting.wait(initial.revision, 2000));
         let window = windows::WindowInfo {
+            launch_id: None,
+            owner: None,
             id: "9007199254740993".into(),
             app_id: Some("test".into()),
             title: Some("Window".into()),
@@ -810,7 +823,7 @@ mod tests {
         );
         assert_eq!(
             client
-                .find(Some("test".into()), Some(false), Some(true))
+                .find(Some("test".into()), Some(false), Some(true), None, None)
                 .expect("controlled empty filter")
                 .windows,
             vec![controlled.clone()]

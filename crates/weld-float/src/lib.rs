@@ -167,6 +167,7 @@ type UnclassifiedWindows = (
     With<ManagedWindow>,
     Without<ManagedBy>,
     Without<FloatingWindow>,
+    Without<weld_window::WindowManagementHold>,
 );
 
 fn classify_windows(mut commands: Commands, windows: Query<Entity, UnclassifiedWindows>) {
@@ -278,7 +279,10 @@ type UnmanagedWindowQuery<'w, 's> = Query<
         Option<&'static WindowOutput>,
         &'static mut WindowGeometry,
     ),
-    Without<ManagedBy>,
+    (
+        Without<ManagedBy>,
+        Without<weld_window::WindowManagementHold>,
+    ),
 >;
 
 type OutputQuery<'w, 's> = Query<

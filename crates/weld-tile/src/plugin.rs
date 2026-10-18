@@ -39,7 +39,12 @@ use crate::{
 pub struct TilePlugin;
 
 type ChangedOwnership = Or<(Changed<ManagedWindow>, Changed<ManagedBy>)>;
-type Unmanaged = (With<ManagedWindow>, Without<TileParent>, Without<ManagedBy>);
+type Unmanaged = (
+    With<ManagedWindow>,
+    Without<TileParent>,
+    Without<ManagedBy>,
+    Without<weld_window::WindowManagementHold>,
+);
 
 #[derive(QueryData)]
 struct TiledWindow {

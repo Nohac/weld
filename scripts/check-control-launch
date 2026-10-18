@@ -31,9 +31,12 @@ def main():
     parser.add_argument("--nested", action="store_true")
     parser.add_argument("--xwayland", action="store_true")
     parser.add_argument("--no-build", action="store_true")
+    parser.add_argument("--attributed", action="store_true", help="Test workspace attribution and headless control/peek (requires --nested)")
     parser.add_argument("--accessibility-app", metavar="ZENITY", help="Validate AT-SPI with this Zenity executable (requires --nested)")
     parser.add_argument("--text-app", metavar="ZENITY", help="Validate Unicode typing in a GTK entry on Wayland and, with --xwayland, X11")
     args = parser.parse_args()
+    if args.attributed and not args.nested:
+        parser.error("--attributed requires --nested")
     if args.accessibility_app and not args.nested:
         parser.error("--accessibility-app requires --nested")
     if args.text_app and not args.nested:
@@ -62,7 +65,7 @@ def main():
     ]
     if args.xwayland:
         options.append("--xwayland")
-    command = ["cargo", "run", "--locked", "-p", "weldwm", "--", *options, "--wayland-socket", str(display)]
+    command = [str(root / "target/debug/weldwm"), *options, "--wayland-socket", str(display)]
     print(f"Logs: {run}", flush=True)
     with (run / "host.log").open("w") as log:
         host = subprocess.Popen(command, cwd=root, env=environment, stdout=log,
@@ -78,6 +81,7 @@ def main():
                                            capture_output=True, text=True, timeout=10)
             if bad_directory.returncode == 0 or "failed to spawn" not in bad_directory.stderr:
                 raise RuntimeError(f"missing directory did not return spawn failure: {bad_directory}")
+            assert not list(run.glob("weld-run-*")), "failed launch retained its socket"
             mode = "nested" if args.nested else "headless"
             output = subprocess.check_output([
                 *ctl, "launch", "--cwd", str(run), "--", sys.executable,
@@ -89,9 +93,12 @@ def main():
             assert str(child["pid"]) in output, (child, output)
             assert child["cwd"] == str(run), child
             assert child["argv"] == ["argument with spaces", "$(literal); untouched"], child
-            assert child["environment"]["WAYLAND_DISPLAY"] == str(display), child
+            assert Path(child["environment"]["WAYLAND_DISPLAY"]).parent == display.parent, child
+            assert child["environment"]["WAYLAND_DISPLAY"] != str(display), child
+            assert Path(child["environment"]["WAYLAND_DISPLAY"]).stat().st_mode & 0o777 == 0o600
+            assert child["environment"]["WELD_SESSION"] == str(display), child
             assert "WAYLAND_SOCKET" not in child["environment"], child
-            assert bool(child["environment"].get("DISPLAY")) == args.xwayland, child
+            assert "DISPLAY" not in child["environment"], child
             print("PASS exact arguments, working directory, display routing and failure recovery", flush=True)
             if args.nested:
                 ipc = child["environment"]["SWAYSOCK"]
@@ -99,9 +106,12 @@ def main():
                     tree = subprocess.check_output(["swaymsg", "-s", ipc, "-t", "get_tree", "-r"], text=True, timeout=5)
                     return name in tree
                 wait_for(host, lambda: mapped("weld-launch-probe"), "Foot admission through native launch")
-                check_windows(ctl, control, host, run, display, args.accessibility_app, args.text_app, args.xwayland)
+                if args.attributed:
+                    check_attributed(ctl, control, host, run)
+                else:
+                    check_windows(ctl, control, host, run, display, args.accessibility_app, args.text_app, args.xwayland)
                 if args.xwayland:
-                    subprocess.run([*ctl, "launch", "--", str(root / "target/debug/examples/x11_window_probe"),
+                    subprocess.run([*ctl, "launch", "--shared-display", "--", str(root / "target/debug/examples/x11_window_probe"),
                                     "--seconds", "2", "--title", "Weld X11 launch probe"], check=True, timeout=10)
                     wait_for(host, lambda: mapped("Weld X11 launch probe"), "X11 admission through native launch")
                     wait_for(host, lambda: "X11_PROBE_DONE" in (run / "host.log").read_text(), "X11 probe completion")
@@ -113,6 +123,7 @@ def main():
             if host.wait(timeout=10) != 0:
                 raise RuntimeError("host shutdown failed")
             assert not control.exists(), "control socket survived shutdown"
+            assert not list(run.glob("weld-run-*")), "launch socket survived shutdown"
             if args.xwayland and display.exists():
                 with socket.socket(socket.AF_UNIX) as connection:
                     connection.settimeout(1)
@@ -134,6 +145,82 @@ def main():
                 host.wait(timeout=5)
 
 
+def window_rpc(control, method, params):
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.settimeout(10)
+        connection.connect(str(control))
+        body = json.dumps({"Window": {"jsonrpc": "2.0", "id": "validation", "method": method, "params": params}}).encode()
+        connection.sendall(len(body).to_bytes(4, "little") + body)
+        def exact(length):
+            data = bytearray()
+            while len(data) < length:
+                chunk = connection.recv(length - len(data))
+                if not chunk:
+                    raise RuntimeError("window RPC disconnected before reply")
+                data.extend(chunk)
+            return data
+        length = int.from_bytes(exact(4), "little")
+        assert length <= 16 * 1024 * 1024
+        response = json.loads(exact(length))["Window"]
+        assert response["id"] == "validation", response
+        return response
+
+
+def check_attributed(ctl, control, host, run):
+    def invoke(method, **params):
+        result = window_rpc(control, method, params)
+        assert "result" in result, result
+        return result["result"]
+    def windows():
+        return invoke("list")["windows"]
+    def launch(*arguments):
+        return json.loads(subprocess.check_output([*ctl, "run", *arguments], text=True, timeout=10))
+    original = next(window for window in windows() if window["app_id"] == "weld-launch-probe")
+    # The launcher exits before its descendant connects to the inherited endpoint.
+    delayed = "import subprocess,sys; subprocess.Popen([sys.executable,'-c',\"import time,os; time.sleep(2); os.execvp('foot',['foot','--app-id=weld-delayed-probe'])\"])"
+    receipt = launch("--workspace", "3", "--owner", "validation", "--", sys.executable, "-c", delayed)
+    wait_for(host, lambda: any(window["app_id"] == "weld-delayed-probe" for window in windows()), "delayed attributed window")
+    delayed_window = next(window for window in windows() if window["app_id"] == "weld-delayed-probe")
+    assert delayed_window["workspace"] != original["workspace"], delayed_window
+    assert not delayed_window["visible"] and not delayed_window["focused"], delayed_window
+    assert delayed_window["launch_id"] == receipt["launch_id"], delayed_window
+    assert len(invoke("find", owner="validation")["windows"]) == 1
+    print("PASS delayed descendant placement and owner/launch filtering", flush=True)
+
+    probe = run / "headless"
+    probe.mkdir()
+    receipt = launch("--control", "--headless", "--owner", "validation", "--cwd", str(probe), "--", "foot", "--app-id=weld-headless-probe", sys.executable, str(Path(__file__).resolve()), "--input-probe")
+    def controlled():
+        return next((window for window in windows() if window["launch_id"] == receipt["launch_id"] and window["control"]), None)
+    wait_for(host, controlled, "headless automatic control")
+    window = controlled()
+    assert not window["visible"] and not window["focused"] and window["workspace"] is None, window
+    handle = window["control"]
+    wait_for(host, lambda: (probe / "input.bin").exists(), "terminal program ready")
+    invoke("input", control=handle, actions=["headless-input", {"key": "Return"}])
+    wait_for(host, lambda: b"headless-input\r" in (probe / "input.bin").read_bytes(), "headless keyboard delivery")
+    invoke("resize", control=handle, width=960, height=540)
+    wait_for(host, lambda: (controlled()["application_viewport"] or {}).get("logical_width") == 960, "headless resize")
+    snapshot = invoke("capture", control=handle)
+    png = base64.b64decode(snapshot["png_base64"], validate=True)
+    assert png.startswith(b"\x89PNG\r\n\x1a\n")
+    (run / "headless.png").write_bytes(png)
+    invoke("peek", control=handle)
+    wait_for(host, lambda: controlled()["visible"], "local peek")
+    assert controlled()["application_viewport"]["logical_width"] == 960, controlled()
+    invoke("peek", control=handle, visible=False)
+    wait_for(host, lambda: controlled() and not controlled()["visible"], "peek dismissal")
+    assert controlled()["control"] == handle
+    invoke("input", control=handle, actions=["after-dismiss"])
+    wait_for(host, lambda: b"after-dismiss" in (probe / "input.bin").read_bytes(), "input after dismiss")
+    invoke("peek", control=handle)
+    wait_for(host, lambda: controlled()["visible"], "repeat peek")
+    subprocess.run([*ctl, "access", "revoke", "--all"], check=True, capture_output=True, timeout=10)
+    wait_for(host, lambda: not controlled(), "global revocation")
+    assert "error" in window_rpc(control, "capture", {"control": handle})
+    print("PASS headless input, resize, pixels, repeated peek/dismiss and global revoke", flush=True)
+
+
 def check_windows(ctl, control, host, run, display, accessibility_app, text_app, xwayland):
     listing = json.loads(subprocess.check_output([*ctl, "window", "list", "--json"], text=True, timeout=10))
     window = next(window for window in listing["windows"] if window["app_id"] == "weld-launch-probe")
@@ -141,26 +228,7 @@ def check_windows(ctl, control, host, run, display, accessibility_app, text_app,
         [*ctl, "window", "get", window["id"], "--json"], text=True, timeout=10))
     assert details == window
     def rpc(method, params):
-        with socket.socket(socket.AF_UNIX) as connection:
-            connection.settimeout(5)
-            connection.connect(str(control))
-            body = json.dumps({"Window": {
-                "jsonrpc": "2.0", "id": "validation", "method": method, "params": params,
-            }}).encode()
-            connection.sendall(len(body).to_bytes(4, "little") + body)
-            def exact(length):
-                data = bytearray()
-                while len(data) < length:
-                    chunk = connection.recv(length - len(data))
-                    if not chunk:
-                        raise RuntimeError("window RPC disconnected before reply")
-                    data.extend(chunk)
-                return data
-            length = int.from_bytes(exact(4), "little")
-            assert length <= 16 * 1024 * 1024
-            response = json.loads(exact(length))["Window"]
-            assert response["id"] == "validation", response
-            return response
+        return window_rpc(control, method, params)
     assert rpc("get", {"id": window["id"]})["result"] == details
     assert any(item["id"] == window["id"] for item in rpc("list", {})["result"]["windows"])
     assert rpc("missing_method", {})["error"]["code"] == -32601
@@ -206,6 +274,7 @@ def check_windows(ctl, control, host, run, display, accessibility_app, text_app,
                 "window_type_text",
                 "window_input",
                 "window_accessibility",
+                "window_peek",
             }
             result = request(3, "tools/call", {"name": "window_get", "arguments": {"id": window["id"]}})
             assert not result.get("isError"), result
@@ -390,7 +459,7 @@ def check_text_entry(ctl, rpc, host, run, program, backend):
     title = "Weld text probe " + backend
     output = run / ("text-" + backend + ".txt")
     launcher = "import subprocess,sys; result=subprocess.run(sys.argv[2:],capture_output=True,check=True); open(sys.argv[1],'wb').write(result.stdout)"
-    subprocess.run([*ctl, "launch", "--", "env", "GDK_BACKEND=" + backend,
+    subprocess.run([*ctl, "launch", *(["--shared-display"] if backend == "x11" else []), "--", "env", "GDK_BACKEND=" + backend,
                     sys.executable, "-c", launcher, str(output), program,
                     "--entry", "--title=" + title, "--text=Unicode input probe"], check=True, capture_output=True, timeout=10)
     def window():
@@ -472,7 +541,7 @@ def child():
     facts = {
         "pid": os.getpid(), "cwd": os.getcwd(), "argv": sys.argv[3:],
         "environment": {key: os.environ[key] for key in (
-            "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "DISPLAY", "SWAYSOCK", "I3SOCK",
+            "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "DISPLAY", "SWAYSOCK", "I3SOCK", "WELD_SESSION",
         ) if key in os.environ},
     }
     # Rename makes readiness publication atomic for the supervising test.

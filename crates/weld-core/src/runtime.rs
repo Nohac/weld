@@ -170,7 +170,8 @@ impl ChildProcesses {
         program: &OsStr,
         arguments: &[OsString],
     ) -> Result<()> {
-        self.spawn_at(server, program, arguments, None).map(|_| ())
+        self.spawn_at(server, program, arguments, None, None)
+            .map(|_| ())
     }
 
     fn spawn_at(
@@ -179,6 +180,7 @@ impl ChildProcesses {
         program: &OsStr,
         arguments: &[OsString],
         directory: Option<&Path>,
+        attributed_socket: Option<&OsStr>,
     ) -> Result<u32> {
         let _launch_span =
             tracing::trace_span!(target: crate::PROFILE_TARGET, "host_launch_client").entered();
@@ -189,11 +191,16 @@ impl ChildProcesses {
         }
         configure_client_command(
             &mut command,
-            &server.socket_name,
-            server.x11_display(),
+            attributed_socket.unwrap_or(&server.socket_name),
+            if attributed_socket.is_some() {
+                None
+            } else {
+                server.x11_display()
+            },
             server.cursor_configuration(),
             &self.environment,
         );
+        command.env("WELD_SESSION", &server.socket_name);
         let child = command
             .spawn()
             .with_context(|| format!("failed to spawn Wayland client {program:?}"))?;
