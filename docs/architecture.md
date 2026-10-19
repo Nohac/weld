@@ -1141,8 +1141,12 @@ Prepared surface-material bind groups are cached by material, stable imported
 image, sampling parameters, and resource generation. The cache retains the
 entries for every still-live member of a rotating client buffer pool and
 evicts them when the material changes, the selector disappears, or the client
-destroys the buffer. Promotion is transactional: the surface registry publishes
-a pending image only after native acquisition and GPU-image installation both
+destroys the buffer. Each material's immutable GPU parameter buffer is created
+from the same published snapshot as its binding-cache key and shared across
+image generations while the parameters remain unchanged. Late image promotion can precede Bevy's material
+asset extraction; owning these uniforms keeps image readiness and clipping
+parameters consistent on that first render. Promotion is transactional: the
+surface registry publishes a pending image only after native acquisition and GPU-image installation both
 succeed. Failure retains a compatible previously displayed image, or the
 transparent selector when no compatible image exists.
 

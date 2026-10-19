@@ -1442,6 +1442,11 @@ mod tests {
 
     #[cfg(feature = "test-support")]
     use crate::surface::{RoundedSurfaceClip, SurfaceNode, SurfaceView};
+    #[cfg(feature = "test-support")]
+    use crate::surface_impl::{
+        SurfaceImageEncoding,
+        tests::{binding_cache_allocations, set_surface_encoding},
+    };
 
     #[derive(Resource, Default)]
     struct RenderCount(u32);
@@ -2394,6 +2399,126 @@ mod tests {
             render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID),
             images[0],
             "removing the container clip restores the child's independent rounding"
+        );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn late_surface_binding_publication_draws_without_another_policy_update() {
+        let (mut shell, _, device, queue) = crate::benchmark::rendering_shell_with_outputs(
+            vec![diagnostic_output(
+                PRIMARY_OUTPUT_ID,
+                LogicalPoint::ZERO,
+                true,
+                0.0,
+            )],
+            |_| {},
+        )
+        .expect("off-screen GPU shell");
+        let surface = SurfaceId::for_test(1);
+        install_diagnostic_surface(&mut shell, surface, [0, 255, 0, 255]);
+        let parent = shell
+            .app
+            .world_mut()
+            .spawn((
+                RoundedSurfaceClip,
+                Node {
+                    width: px(64),
+                    height: px(64),
+                    ..Default::default()
+                },
+            ))
+            .id();
+        shell.app.world_mut().spawn((
+            SurfaceNode {
+                surface,
+                view: SurfaceView::FullSurface,
+            },
+            Node::default(),
+            ChildOf(parent),
+        ));
+        for tick in 0..8 {
+            shell.advance_main(tick);
+            render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        }
+        let warm = render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        assert_eq!(
+            &warm[(16 * 64 + 16) * 4..(16 * 64 + 16) * 4 + 4],
+            &[0, 255, 0, 255],
+            "initial green surface"
+        );
+        set_surface_encoding(&mut shell.app, surface, SurfaceImageEncoding::Unbound);
+        for tick in 8..12 {
+            shell.advance_main(tick);
+            render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        }
+        // Native image promotion can publish readiness after main-world asset events.
+        set_surface_encoding(&mut shell.app, surface, SurfaceImageEncoding::EncodedOpaque);
+        assert_surface_pixel(
+            render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID),
+            [0, 255, 0, 255],
+        );
+        let ready_bindings = binding_cache_allocations(&shell.app);
+        assert_eq!((ready_bindings.0.len(), ready_bindings.1.len()), (1, 1));
+        for tick in 13..20 {
+            shell.advance_main(tick);
+            render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+            assert_eq!(
+                binding_cache_allocations(&shell.app),
+                ready_bindings,
+                "stable frames reuse both the bind group and parameter buffer"
+            );
+        }
+        let ready = render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        assert_eq!(
+            &ready[(16 * 64 + 16) * 4..(16 * 64 + 16) * 4 + 4],
+            &[0, 255, 0, 255],
+            "later material preparation preserves ready parameters"
+        );
+        update_diagnostic_surface(&mut shell, surface, [255, 0, 0, 255]);
+        shell.advance_main(20);
+        assert_surface_pixel(
+            render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID),
+            [0, 0, 255, 255],
+        );
+        assert_eq!(
+            binding_cache_allocations(&shell.app).1,
+            ready_bindings.1,
+            "new image generations reuse unchanged parameter buffers"
+        );
+        shell
+            .app
+            .world_mut()
+            .get_mut::<Node>(parent)
+            .expect("parent")
+            .display = bevy::ui::Display::None;
+        for tick in 21..23 {
+            shell.advance_main(tick);
+            render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        }
+        shell
+            .app
+            .world_mut()
+            .get_mut::<Node>(parent)
+            .expect("parent")
+            .display = bevy::ui::Display::Flex;
+        for tick in 23..27 {
+            shell.advance_main(tick);
+            render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        }
+        let restored = render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        assert_eq!(
+            &restored[(16 * 64 + 16) * 4..(16 * 64 + 16) * 4 + 4],
+            &[0, 0, 255, 255],
+            "hide/show restores the same image"
+        );
+        shell.app.world_mut().entity_mut(parent).despawn();
+        shell.advance_main(28);
+        render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        let retired = binding_cache_allocations(&shell.app);
+        assert!(
+            retired.0.is_empty() && retired.1.is_empty(),
+            "removed selectors release cached GPU resources"
         );
     }
 

@@ -1863,10 +1863,35 @@ fn transparent_surface_image() -> Image {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    #[cfg(feature = "test-support")]
+    use bevy::render::render_resource::{BindGroupId, BufferId};
     use bevy::{app::App, asset::AssetApp, ecs::change_detection::DetectChanges};
 
     use super::*;
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn binding_cache_allocations(
+        app: &App,
+    ) -> (HashSet<BindGroupId>, HashSet<BufferId>) {
+        binding::tests::cache_allocations(app)
+    }
+
+    #[cfg(feature = "test-support")]
+    pub(crate) fn set_surface_encoding(
+        app: &mut App,
+        surface: SurfaceId,
+        encoding: SurfaceImageEncoding,
+    ) {
+        let mut registry = app.world_mut().resource_mut::<SurfaceRegistry>();
+        let entry = registry
+            .entries
+            .get_mut(&surface)
+            .expect("diagnostic surface");
+        for buffer in entry.buffers.values_mut() {
+            buffer.encoding = encoding;
+        }
+    }
 
     fn test_app() -> App {
         let mut app = App::new();

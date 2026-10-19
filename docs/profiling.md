@@ -249,6 +249,8 @@ scopes reinsert resources with a fresh change tick even without a mutation.
 GPU regressions cover rounded clipping, translucent overlap, live SHM pixel
 updates, text/glyph changes, resize, node teardown, backing-target rotation,
 ordinary/tiled images, fractional pixel snapping and multiple output passes.
+The late-surface-publication regression verifies first-render recovery, stable
+bind-group/parameter-buffer reuse, image-generation changes, hide/show and teardown.
 Policy tests cover removals across intervening main updates and expired asset
 events. `RetainedUiStats` exposes prepared/reused counts; use
 `RUST_LOG=warn,weld_render_cache=trace` to inspect individual invalidations in a
