@@ -18,8 +18,9 @@ and dependency direction are recorded in [Architecture](docs/architecture.md).
 
 For Bevy-related work, read the relevant project skill first:
 
-- [bevy-019](.agents/skills/bevy-019/SKILL.md) for Bevy 0.19 APIs and Weld's
-  integration boundaries.
+- [bevy-020](.agents/skills/bevy-020/SKILL.md) for the Bevy 0.20 migration and
+  Weld's integration boundaries. Check the manifests for the currently built
+  version before applying version-specific guidance.
 - [bevy-bsn-ui](.agents/skills/bevy-bsn-ui/SKILL.md) for BSN scenes and reusable
   UI composition.
 

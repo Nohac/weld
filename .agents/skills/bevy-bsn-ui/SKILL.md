@@ -1,33 +1,37 @@
 ---
 name: bevy-bsn-ui
-description: Author or refactor Weld's Bevy 0.19 scenes and UI composition with `bsn!`, `bsn_list!`, scene functions, patches, relationships, observers, and project-owned scene components. Use when evaluating or implementing UI hierarchies and reusable composition without assuming Feathers or Bevy's full application runtime.
+description: Author or migrate Weld's Bevy 0.20 BSN scenes and UI composition. Use for scene functions, hierarchy, patches, lifecycle observers, headless widgets, clipping, and project-owned visual controls.
 ---
 
 # Compose Weld UI with BSN
 
-Read `CONTRIBUTING.md` and the `bevy-019` skill first. Confirm that the current
-Weld slice has deliberately adopted the necessary Bevy scene/UI crates before
-writing BSN code.
+Read `CONTRIBUTING.md` and [bevy-020](../bevy-020/SKILL.md) first. Check the
+resolved Bevy version: the syntax below targets 0.20, while the repository
+remains on 0.19.1 until the dependency migration. Use the matching tagged
+examples for pre-migration maintenance.
 
 ## Workflow
 
 1. Express one conceptual entity as a small function returning `impl Scene`.
 2. Express sibling roots as `impl SceneList` with `bsn_list!`.
-3. Compose hierarchy inline with `Children [...]`; parenthesize entities with
-   multiple entries when boundaries would otherwise be unclear.
+3. Compose hierarchy inline with `Children [...]`, separating sibling entities
+   with `--`. Use braces for the outer `bsn! {}` and `bsn_list! {}` invocation.
 4. Parameterize ordinary scene functions first. Derive `SceneComponent` only
    for a project-owned conceptual control or a reusable scene with named props.
 5. Attach UI behavior declaratively with `on(...)` observers and translate it
    into project-owned actions or state changes.
-6. Keep the host and spawn path explicit; do not add Bevy `App`, Winit, or
-   `DefaultPlugins` solely to match an example.
+6. Use the existing host and scene-aware spawn path. When initialization needs
+   the completed child hierarchy, use `on(... On<Ready> ...)` rather than a
+   component-add observer. Layout measurements still require the layout pass.
 7. Run formatting and the narrowest compile/test that exercises the scene.
 
 ## Syntax and composition
 
 - Omit fields that should retain defaults. BSN entries are ordered patches, not
   full struct replacement.
-- Use `{expression}` for arbitrary Rust or a dynamic scene/list.
+- Compose scenes with `@scene`, `@scene_function()`, or `@{scene_expression}`.
+  Pass component/template values directly; remove old `template_value(...)`
+  wrappers. Braces still delimit complex Rust field expressions.
 - Use `#Name` only for scoped names and references inside one macro invocation.
 - Use `@Widget` for a `SceneComponent` and `@prop` for its immediate,
   non-patchable props.
@@ -35,8 +39,8 @@ writing BSN code.
   appearance, markers, or observers without copying its implementation.
 - Use `Children [{children}]` for an `impl SceneList` slot in a reusable
   container.
-- Keep conditionals in Rust before the macro where possible. BSN 0.19 has no
-  native `if` or `match` syntax.
+- Keep conditionals in Rust before the macro where possible. Use expression
+  interpolation when a conditional value belongs inside a scene.
 - Build runtime-length homogeneous children as `Vec<S>` where `S: Scene`, or
   heterogeneous children as `Vec<Box<dyn SceneList>>`, then interpolate the
   collection.
@@ -47,11 +51,34 @@ writing BSN code.
   scene functions and components create their own name scopes.
 - Avoid scene caching until profiling demonstrates a need and its update
   semantics are understood.
+- For enum entries, supply every field of the selected variant. The old
+  `VariantDefaults` partial-variant pattern has been removed.
+- Keep `.bsn` file loading explicit and tested. The 0.20 scene docs still label
+  the built-in asset format as planned, despite asset-path examples.
+
+Minimal 0.20 composition shape:
+
+```rust
+fn panel(contents: impl SceneList) -> impl Scene {
+    bsn! {
+        Node
+        Children [
+            Text("Weld")
+            --
+            {contents}
+        ]
+    }
+}
+
+fn screen() -> impl Scene {
+    bsn! { @panel(bsn_list! { Text("Ready") -- Text("Connected") }) }
+}
+```
 
 ## Preserve a custom-UI path
 
-Do not add Feathers by default. Use its implementation architecture only as a
-reference for future Weld controls:
+Use headless widget behavior with Weld-owned visuals. Feathers provides
+reference implementations when evaluating future controls:
 
 ```text
 headless behavior + semantic/accessibility state + Weld visual scene
@@ -62,10 +89,32 @@ headless events such as `Activate` and `ValueChange<T>` at a UI boundary, update
 project-owned state, and reflect that state back into widget components. Domain
 systems must not query presentation-specific marker types.
 
+Use `bevy_ui_widgets::Button`, `Hovered`, and `Pressed` for new controls. For
+tabs, inspect the controlled `TabList` example: translate
+`ValueChange<Option<Entity>>` into a Weld action and publish authoritative
+selection through `SelectedTab`. Keep widget focus separate from compositor
+window focus. Use `tablist_self_update` only for locally owned UI selection.
+
 When a repeated control warrants a Weld component, compose the unstyled
 headless behavior with focus/navigation, semantics, accessibility, interaction
-state, and a Weld-owned visual scene. Do not build that design system before a
-concrete UI workflow establishes its requirements.
+state, and a Weld-owned visual scene. Let concrete UI workflows establish the
+requirements of shared controls.
+
+## Geometry and text
+
+- Treat `BorderRadius` corners as `CornerRadius` and resolved corners as 2D
+  radii. Preserve circular intent with the circular constructors.
+- Preserve transformed `CalculatedClip` geometry when mapping surface clips;
+  an axis-aligned bounding box alone loses rotated clip edges.
+- Keep client textures inside the existing rounded content container. Apply
+  pixel snapping to the surface boundary while retaining smooth shell motion.
+- Use `FixedNode` for deliberately viewport-relative overlays. Its root-like
+  layout, transform and clipping behavior makes it inappropriate for content
+  that must remain clipped by a window frame.
+- Retain explicit configured font sizes where required. Default text now uses
+  `RemSize`; `em`/`rem` are useful for controls whose spacing follows typography.
+- Render-world paint hooks must account for retained nodes and invalidation;
+  read the migration audit before changing the border-underlap hook.
 
 ## Ownership and review
 
@@ -80,12 +129,14 @@ concrete UI workflow establishes its requirements.
   incidental visual state.
 - Verify scene functions do not capture references that violate the returned
   scene's lifetime.
-- Verify syntax and component names against Bevy 0.19, not `main`.
+- Verify syntax against the tagged 0.20 examples. Some API prose retains older
+  snippets; cross-check conflicting examples against source before copying.
 
 ## Primary references
 
-- [Bevy 0.19 BSN overview](https://bevy.org/news/bevy-0-19/#next-generation-scenes)
-- [Bevy Scene 0.19 API and syntax](https://docs.rs/bevy_scene/0.19.0/bevy_scene/)
-- [Bevy 0.19 BSN example](https://github.com/bevyengine/bevy/blob/v0.19.0/examples/scene/bsn.rs)
-- [Bevy 0.19 headless widget API](https://docs.rs/bevy/0.19.0/bevy/ui_widgets/)
-- [Bevy standard headless widget example](https://bevy.org/examples/ui-user-interface/standard-widgets/)
+- [Bevy Scene 0.20 API and syntax](https://docs.rs/bevy_scene/0.20.0/bevy_scene/)
+- [BSN example](https://github.com/bevyengine/bevy/blob/v0.20.0/examples/scene/bsn.rs)
+- [Headless widget example](https://github.com/bevyengine/bevy/blob/v0.20.0/examples/ui/widgets/standard_widgets.rs)
+- [Controlled and self-updating tabs](https://github.com/bevyengine/bevy/blob/v0.20.0/examples/ui/widgets/headless_tabs.rs)
+- [UI node geometry source](https://github.com/bevyengine/bevy/blob/v0.20.0/crates/bevy_ui/src/ui_node.rs)
+- [Migration audit](../bevy-020/references/migration-020.md)

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bevy 0.20 for Weld"
+  short_description: "Migrate and use Bevy 0.20 within Weld boundaries"
+  default_prompt: "Use $bevy-020 to implement this Weld change against the correct Bevy APIs."
