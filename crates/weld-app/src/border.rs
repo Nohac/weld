@@ -1,10 +1,12 @@
 //! Paint-only overlap for compositor frame borders.
 
 use bevy::{
-    app::App,
+    app::{App, PostUpdate},
     ecs::{
+        change_detection::{DetectChanges, DetectChangesMut, Ref},
         component::Component,
         entity::Entity,
+        lifecycle::RemovedComponents,
         schedule::IntoScheduleConfigs,
         system::{Query, ResMut},
         template::FromTemplate,
@@ -12,8 +14,11 @@ use bevy::{
     math::Vec2,
     render::{Extract, ExtractSchedule, RenderApp},
     sprite::BorderRect,
-    ui::{ComputedNode, ComputedStackIndex},
-    ui_render::{ExtractedUiItem, ExtractedUiNodes, NodeType, RenderUiSystems, stack_z_offsets},
+    ui::{ComputedNode, ComputedStackIndex, UiSystems},
+    ui_render::{
+        ExtractedUiItem, ExtractedUiNodes, NodeType, RenderUiSystems, extract_uinode_borders,
+        stack_z_offsets,
+    },
 };
 
 /// Extends each existing solid border edge inward by one physical pixel during rendering.
@@ -24,11 +29,36 @@ use bevy::{
 pub struct BorderUnderlap(pub Entity);
 
 pub(crate) fn install(app: &mut App) {
+    app.add_systems(PostUpdate, invalidate_border_paint.after(UiSystems::Stack));
     if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
         render_app.add_systems(
             ExtractSchedule,
-            extend_border_paint.after(RenderUiSystems::ExtractBorders),
+            extend_border_paint
+                .in_set(RenderUiSystems::ExtractBorders)
+                .after(extract_uinode_borders),
         );
+    }
+}
+
+fn invalidate_border_paint(
+    mut frames: Query<(&mut ComputedNode, Ref<BorderUnderlap>)>,
+    backgrounds: Query<Ref<ComputedStackIndex>>,
+    mut removed: RemovedComponents<BorderUnderlap>,
+    mut ordinary: Query<&mut ComputedNode, bevy::ecs::query::Without<BorderUnderlap>>,
+) {
+    for (mut node, underlap) in &mut frames {
+        if underlap.is_changed()
+            || backgrounds
+                .get(underlap.0)
+                .is_ok_and(|stack| stack.is_changed())
+        {
+            node.set_changed();
+        }
+    }
+    for entity in removed.read() {
+        if let Ok(mut node) = ordinary.get_mut(entity) {
+            node.set_changed();
+        }
     }
 }
 
@@ -37,27 +67,33 @@ fn extend_border_paint(
     backgrounds: Extract<Query<&ComputedStackIndex>>,
     mut nodes: ResMut<ExtractedUiNodes>,
 ) {
-    for node in &mut nodes.uinodes {
-        if let Ok((underlap, computed)) = frames.get(node.main_entity.id())
-            && let Ok(stack) = backgrounds.get(underlap.0)
-            && let ExtractedUiItem::Node {
-                border,
-                rect,
-                node_type: NodeType::Border(_),
-                ..
-            } = &mut node.item
-            && rect.size() == computed.size()
-            && *border == computed.border()
-        {
-            let scale = Vec2::new(
-                node.transform.matrix2.x_axis.length(),
-                node.transform.matrix2.y_axis.length(),
-            );
-            if !scale.is_finite() || scale.min_element() <= 0.0 {
-                continue;
+    let ExtractedUiNodes { uinodes, changed } = &mut *nodes;
+    for entity in changed.iter() {
+        let Some((_, items)) = uinodes.get_mut(entity) else {
+            continue;
+        };
+        for node in items.values_mut() {
+            if let Ok((underlap, computed)) = frames.get(entity.id())
+                && let Ok(stack) = backgrounds.get(underlap.0)
+                && let ExtractedUiItem::Node {
+                    border,
+                    rect,
+                    node_type: NodeType::Border(_),
+                    ..
+                } = &mut node.item
+                && rect.size() == computed.size()
+            {
+                let scale = Vec2::new(
+                    node.transform.matrix2.x_axis.length(),
+                    node.transform.matrix2.y_axis.length(),
+                );
+                if !scale.is_finite() || scale.min_element() <= 0.0 {
+                    continue;
+                }
+                *border = computed.border();
+                extend_edges(border, scale.recip());
+                node.z_order = stack.0 as f32 + stack_z_offsets::BORDER;
             }
-            extend_edges(border, scale.recip());
-            node.z_order = stack.0 as f32 + stack_z_offsets::BORDER;
         }
     }
 }

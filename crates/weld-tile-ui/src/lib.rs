@@ -18,18 +18,15 @@ use bevy::{
         system::{Commands, Query, Res, SystemParam},
         template::template,
     },
-    picking::{
-        Pickable,
-        events::{Pointer, Press},
-        pointer::PointerButton,
-    },
+    picking::{Pickable, events::PointerPress, pointer::PointerButton},
     prelude::{
-        AccessibleLabel, AlignItems, BackgroundColor, BorderColor, BorderRadius, Button, Children,
+        AccessibleLabel, AlignItems, BackgroundColor, BorderColor, BorderRadius, Children,
         GlobalZIndex, Node, Overflow, PositionType, Scene, Text, TextColor, TextFont, UiRect,
         UiTargetCamera, px,
     },
     scene::{CommandsSceneExt, bsn},
     text::TextLayout,
+    ui_widgets::Button,
     window::{CursorIcon, RequestRedraw, SystemCursorIcon},
 };
 use weld_app::{output::OutputCompositionCamera, surface::ClientWindowMetadata};
@@ -111,7 +108,7 @@ impl Plugin for TileUiPlugin {
 }
 
 fn press_header(
-    mut event: On<Pointer<Press>>,
+    mut event: On<PointerPress>,
     targets: Query<&HeaderTarget>,
     tree: HeaderTree,
     mut commands: Commands,
@@ -171,13 +168,13 @@ fn header_scene(target: HeaderTarget, visual: HeaderVisual) -> impl Scene {
         AccessibleLabel::new(accessible)
         template(move |_| Ok(CursorIcon::System(SystemCursorIcon::Default)))
         template(move |_| Ok(visual.clone()))
-        Children [(
+        Children [
             Text::new(label)
             template(move |_| Ok(font.clone()))
             TextLayout::no_wrap()
             TextColor({colors.foreground})
             Pickable::IGNORE
-        )]
+        ]
     }
 }
 

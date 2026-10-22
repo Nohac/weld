@@ -6,7 +6,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context as ContextExt, Result, ensure};
 use bevy::prelude::*;
 use weld_access::AccessSession;
 use weld_app::{WeldApp, surface::ClientWindowMetadata, wake::PolicyWake};

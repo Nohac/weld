@@ -1,5 +1,5 @@
 //! GLES conversion shares Bevy's device/context and submission ordering.
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context as ContextExt, Result, ensure};
 use bevy::{
     prelude::*,
     render::{render_asset::RenderAssets, renderer::RenderDevice, texture::GpuImage},

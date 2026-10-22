@@ -1,6 +1,6 @@
 //! Reuses prepared UI geometry while scene dependencies remain unchanged.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use bevy::{
     app::{App, Inherited, Propagate},
     asset::{Asset, AssetEvent},
@@ -12,7 +12,10 @@ use bevy::{
         message::{MessageCursor, Messages},
         query::{Or, With, Without},
         resource::{IsResource, Resource},
-        schedule::{IntoScheduleConfigs, Schedule, ScheduleLabel, SingleThreadedExecutor},
+        schedule::{
+            IntoScheduleConfigs, Schedule, ScheduleCleanupPolicy, ScheduleLabel,
+            SingleThreadedExecutor,
+        },
         system::{Commands, Local, Query, Res, ResMut, SystemChangeTick},
         world::{EntityRef, World},
     },
@@ -27,7 +30,7 @@ use bevy::{
     sprite::Sprite,
     text::{Font, TextSpan},
     ui::{ComputedUiRenderTargetInfo, ComputedUiTargetCamera, Node, UiScale, widget::ViewportNode},
-    ui_render::RenderUiSystems,
+    ui_render::{RenderUiSystems, clear_batches},
 };
 
 /// Requests full preparation for custom rendering driven by external state or time.
@@ -105,6 +108,7 @@ pub(crate) fn install(app: &mut App) {
         images_tick: None,
     });
     for set in [
+        RenderUiSystems::ExtractChanges,
         RenderUiSystems::ExtractCameraViews,
         RenderUiSystems::ExtractBoxShadows,
         RenderUiSystems::ExtractBackgrounds,
@@ -141,6 +145,33 @@ pub(crate) fn install(app: &mut App) {
 
 pub(crate) fn watch_asset<A: Asset>(app: &mut App) {
     app.add_systems(CheckUiChanges, detect_assets::<A>);
+}
+
+/// Preserve UI draw batches across content-only frames, rebuilding them with the scene.
+pub(crate) fn configure_batch_cleanup(app: &mut App) -> Result<()> {
+    let render = app
+        .get_sub_app_mut(RenderApp)
+        .context("UI batch retention requires RenderApp")?;
+    render
+        .world_mut()
+        .try_schedule_scope(Render, |world, schedule| -> Result<()> {
+            let removed = schedule
+                .remove_systems_in_set(
+                    clear_batches,
+                    world,
+                    ScheduleCleanupPolicy::RemoveSystemsOnly,
+                )
+                .context("replace UI batch cleanup")?;
+            ensure!(removed == 1, "expected one Bevy UI batch cleanup system");
+            schedule.add_systems(
+                clear_batches
+                    .in_set(RenderSystems::Cleanup)
+                    .run_if(|state: Res<PreparedUi>| !state.retain),
+            );
+            Ok(())
+        })
+        .context("configure UI batch cleanup schedule")??;
+    Ok(())
 }
 
 fn detect_assets<A: Asset>(
@@ -391,7 +422,7 @@ mod tests {
     #[test]
     fn retired_batches_leave_persistent_entities_alive() {
         let mut world = World::new();
-        let transient = world.spawn(TemporaryRenderEntity).id();
+        let transient = world.spawn(TemporaryRenderEntity::default()).id();
         let persistent = world.spawn_empty().id();
         let mut schedule = Schedule::default();
         schedule.add_systems(retain_entities);

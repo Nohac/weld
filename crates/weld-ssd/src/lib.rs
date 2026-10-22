@@ -703,61 +703,57 @@ fn window_scene(content: impl SceneList, style: FrameGeometry) -> impl Scene {
         BorderColor::all(UNFOCUSED_BORDER)
         template(move |_| Ok(if style.border == BorderStyle::None { BoxShadow::default() } else { window_shadow() }))
         Children [
-            (
-                #Body
-                WindowBody
+            #Body
+            WindowBody
+            Node {
+                width: percent(100),
+                height: percent(100),
+                min_width: px(0),
+                min_height: px(0),
+                flex_direction: FlexDirection::Column,
+                border_radius: BorderRadius::px(
+                    if style.joined_top { 0.0 } else { style.inner_radius() },
+                    if style.joined_top { 0.0 } else { style.inner_radius() },
+                    if style.round_bottom_right { style.inner_radius() } else { 0.0 },
+                    if style.round_bottom_left { style.inner_radius() } else { 0.0 },
+                ),
+                overflow: Overflow::clip(),
+            }
+            BackgroundColor(Color::srgb(0.10, 0.12, 0.16))
+            Children [
+                WindowMoveHandle
+                FrameHeader
+                FrameColorOwner(#FrameRoot)
+                Node {
+                    display: {if style.header() > 0.0 { Display::Flex } else { Display::None }},
+                    width: percent(100),
+                    height: px(style.header()),
+                    flex_shrink: 0.0,
+                    align_items: AlignItems::Center,
+                    justify_content: JustifyContent::FlexEnd,
+                    border_radius: BorderRadius::px(
+                        style.inner_radius(),
+                        style.inner_radius(),
+                        0.0,
+                        0.0,
+                    ),
+                }
+                BackgroundColor(Color::srgb(0.14, 0.17, 0.22))
+                --
+                RoundedSurfaceClip
                 Node {
                     width: percent(100),
-                    height: percent(100),
+                    flex_grow: 1.0,
+                    flex_basis: px(0),
                     min_width: px(0),
                     min_height: px(0),
-                    flex_direction: FlexDirection::Column,
-                    border_radius: BorderRadius::px(
-                        if style.joined_top { 0.0 } else { style.inner_radius() },
-                        if style.joined_top { 0.0 } else { style.inner_radius() },
-                        if style.round_bottom_right { style.inner_radius() } else { 0.0 },
-                        if style.round_bottom_left { style.inner_radius() } else { 0.0 },
-                    ),
                     overflow: Overflow::clip(),
+                    border_radius: {style.content_radius()},
                 }
-                BackgroundColor(Color::srgb(0.10, 0.12, 0.16))
-                Children [
-                    (
-                        WindowMoveHandle
-                        FrameHeader
-                        FrameColorOwner(#FrameRoot)
-                        Node {
-                            display: {if style.header() > 0.0 { Display::Flex } else { Display::None }},
-                            width: percent(100),
-                            height: px(style.header()),
-                            flex_shrink: 0.0,
-                            align_items: AlignItems::Center,
-                            justify_content: JustifyContent::FlexEnd,
-                            border_radius: BorderRadius::px(
-                                style.inner_radius(),
-                                style.inner_radius(),
-                                0.0,
-                                0.0,
-                            ),
-                        }
-                        BackgroundColor(Color::srgb(0.14, 0.17, 0.22))
-                    ),
-                    (
-                        RoundedSurfaceClip
-                        Node {
-                            width: percent(100),
-                            flex_grow: 1.0,
-                            flex_basis: px(0),
-                            min_width: px(0),
-                            min_height: px(0),
-                            overflow: Overflow::clip(),
-                            border_radius: {style.content_radius()},
-                        }
-                        Children [{content}]
-                    ),
-                ]
-            ),
-            {resize_handles},
+                Children [{content}]
+            ]
+            --
+            {resize_handles}
         ]
     }
 }
@@ -772,8 +768,8 @@ fn resize_handles(border: BorderStyle) -> impl SceneList {
         }
         resize_handle(edge, node)
     };
-    bsn_list![
-        handle(
+    bsn_list! {
+        @handle(
             ToplevelResizeEdge::Top,
             Node {
                 position_type: PositionType::Absolute,
@@ -783,8 +779,9 @@ fn resize_handles(border: BorderStyle) -> impl SceneList {
                 height: px(extent),
                 ..Default::default()
             }
-        ),
-        handle(
+        )
+        --
+        @handle(
             ToplevelResizeEdge::Bottom,
             Node {
                 position_type: PositionType::Absolute,
@@ -794,8 +791,9 @@ fn resize_handles(border: BorderStyle) -> impl SceneList {
                 height: px(extent),
                 ..Default::default()
             }
-        ),
-        handle(
+        )
+        --
+        @handle(
             ToplevelResizeEdge::Left,
             Node {
                 position_type: PositionType::Absolute,
@@ -805,8 +803,9 @@ fn resize_handles(border: BorderStyle) -> impl SceneList {
                 width: px(extent),
                 ..Default::default()
             }
-        ),
-        handle(
+        )
+        --
+        @handle(
             ToplevelResizeEdge::Right,
             Node {
                 position_type: PositionType::Absolute,
@@ -816,8 +815,9 @@ fn resize_handles(border: BorderStyle) -> impl SceneList {
                 width: px(extent),
                 ..Default::default()
             }
-        ),
-        handle(
+        )
+        --
+        @handle(
             ToplevelResizeEdge::TopLeft,
             Node {
                 position_type: PositionType::Absolute,
@@ -827,8 +827,9 @@ fn resize_handles(border: BorderStyle) -> impl SceneList {
                 height: px(extent),
                 ..Default::default()
             }
-        ),
-        handle(
+        )
+        --
+        @handle(
             ToplevelResizeEdge::TopRight,
             Node {
                 position_type: PositionType::Absolute,
@@ -838,8 +839,9 @@ fn resize_handles(border: BorderStyle) -> impl SceneList {
                 height: px(extent),
                 ..Default::default()
             }
-        ),
-        handle(
+        )
+        --
+        @handle(
             ToplevelResizeEdge::BottomLeft,
             Node {
                 position_type: PositionType::Absolute,
@@ -849,8 +851,9 @@ fn resize_handles(border: BorderStyle) -> impl SceneList {
                 height: px(extent),
                 ..Default::default()
             }
-        ),
-        handle(
+        )
+        --
+        @handle(
             ToplevelResizeEdge::BottomRight,
             Node {
                 position_type: PositionType::Absolute,
@@ -860,8 +863,8 @@ fn resize_handles(border: BorderStyle) -> impl SceneList {
                 height: px(extent),
                 ..Default::default()
             }
-        ),
-    ]
+        )
+    }
 }
 
 fn resize_handle(edge: ToplevelResizeEdge, node: Node) -> impl Scene {
@@ -899,7 +902,7 @@ mod tests {
         picking::{
             Pickable,
             backend::HitData,
-            events::{Pointer, Press},
+            events::{Pointer, PointerPress},
             pointer::{Location, PointerButton, PointerId},
         },
         scene::ScenePlugin,
@@ -1556,7 +1559,7 @@ mod tests {
                         .get::<Node>(root)
                         .expect("frame node")
                         .border_radius,
-                    BorderRadius::ZERO
+                    BorderRadius::all(px(0))
                 );
                 assert_eq!(
                     app.world().get::<BoxShadow>(root),
@@ -1599,9 +1602,9 @@ mod tests {
         assert_eq!(style.border, BorderStyle::None);
         assert!(style.joined_top);
         let node = app.world().get::<Node>(root).expect("node");
-        assert_eq!(node.border_radius.top_left, px(0));
-        assert_eq!(node.border_radius.top_right, px(0));
-        assert_eq!(node.border_radius.bottom_left, px(style.radius));
+        assert_eq!(node.border_radius.top_left, px(0).into());
+        assert_eq!(node.border_radius.top_right, px(0).into());
+        assert_eq!(node.border_radius.bottom_left, px(style.radius).into());
         assert_eq!(node.border, UiRect::all(px(0)));
         assert_eq!(
             app.world().get::<BoxShadow>(root),
@@ -1688,7 +1691,7 @@ mod tests {
             assert_eq!(style.border, original.border);
             assert_eq!(style.radius, original.radius);
             assert_eq!(style.header(), 34.0);
-            assert_eq!(style.content_radius().top_left, px(0));
+            assert_eq!(style.content_radius().top_left, px(0).into());
             assert_eq!(
                 app.world().get::<PresentationInsets>(root),
                 Some(&style.insets())
@@ -2733,16 +2736,13 @@ mod tests {
             .get::<WindowGeometry>(window)
             .expect("managed window should retain geometry")
             .position;
-        app.world_mut().trigger(Pointer::new(
-            PointerId::Mouse,
-            location,
-            Press {
-                button: PointerButton::Primary,
-                hit: HitData::new(camera, 0.0, None, None),
-                count: 1,
-            },
-            move_handle,
-        ));
+        app.world_mut().trigger(PointerPress {
+            entity: move_handle,
+            pointer: Pointer::new(PointerId::Mouse, location),
+            button: PointerButton::Primary,
+            hit: HitData::new(camera, 0.0, None, None),
+            count: 1,
+        });
         write_primary_button(&mut app, ButtonState::Pressed);
         app.update();
         write_mouse_motion(&mut app, Vec2::new(12.0, 8.0));
@@ -2840,16 +2840,13 @@ mod tests {
         };
         take_surface_actions(app.world_mut());
 
-        app.world_mut().trigger(Pointer::new(
-            PointerId::Mouse,
-            location.clone(),
-            Press {
-                button: PointerButton::Primary,
-                hit: HitData::new(camera, 0.0, Some(Vec2::new(0.495, 0.0).extend(0.0)), None),
-                count: 1,
-            },
-            resize_handle,
-        ));
+        app.world_mut().trigger(PointerPress {
+            entity: resize_handle,
+            pointer: Pointer::new(PointerId::Mouse, location.clone()),
+            button: PointerButton::Primary,
+            hit: HitData::new(camera, 0.0, Some(Vec2::new(0.495, 0.0).extend(0.0)), None),
+            count: 1,
+        });
         write_primary_button(&mut app, ButtonState::Pressed);
         app.update();
         assert!(matches!(

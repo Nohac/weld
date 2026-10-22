@@ -22,10 +22,8 @@ pub fn surface_content_with_node(
     node.display = Display::None;
     node.flex_shrink = 0.0;
     bsn_list! {
-        (
-            template(move |_| Ok(SurfaceNode { surface, view }))
-            Pickable::IGNORE
-            template(move |_| Ok(node.clone()))
-        )
+        template(move |_| Ok(SurfaceNode { surface, view }))
+        Pickable::IGNORE
+        template(move |_| Ok(node.clone()))
     }
 }

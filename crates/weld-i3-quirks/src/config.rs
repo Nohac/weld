@@ -870,7 +870,7 @@ mod tests {
         use bevy::text::{FontSource, FontStyle, FontWeight, FontWidth};
         let config = parse("font", "set $face monospace\nfont pango:$face 8").expect("font");
         let font = config.decorations.title_font;
-        assert_eq!(font.family, FontSource::Monospace);
+        assert_eq!(font.family, FontSource::monospace());
         assert!((font.size - 8.0 * 96.0 / 72.0).abs() < 0.001);
         let config = parse(
             "font",
@@ -889,7 +889,7 @@ mod tests {
                 .decorations
                 .title_font
                 .family,
-            FontSource::Serif
+            FontSource::serif()
         );
         for source in [
             "font",

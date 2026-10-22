@@ -73,7 +73,7 @@ struct SurfaceMaterialParameters {
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-struct SurfaceParameterKey([u32; 20]);
+struct SurfaceParameterKey([u32; 24]);
 
 impl From<SurfaceMaterialParameters> for SurfaceParameterKey {
     fn from(parameters: SurfaceMaterialParameters) -> Self {
@@ -98,6 +98,10 @@ impl From<SurfaceMaterialParameters> for SurfaceParameterKey {
             parameters.clip.radii.y.to_bits(),
             parameters.clip.radii.z.to_bits(),
             parameters.clip.radii.w.to_bits(),
+            parameters.clip.radii_y.x.to_bits(),
+            parameters.clip.radii_y.y.to_bits(),
+            parameters.clip.radii_y.z.to_bits(),
+            parameters.clip.radii_y.w.to_bits(),
         ])
     }
 }
@@ -485,8 +489,8 @@ impl Plugin for SurfacePlugin {
         load_internal_asset!(
             app,
             SURFACE_MATERIAL_SHADER,
-            "surface_material.wgsl",
-            Shader::from_wgsl
+            "surface_material.wesl",
+            Shader::from_wesl
         );
         app.add_plugins((
             UiMaterialPlugin::<SurfaceUiMaterial>::default(),
@@ -779,7 +783,7 @@ pub(crate) fn sampled_commits(
         if target.get() != Some(camera)
             || !visible.get()
             || node.is_empty()
-            || clip.is_some_and(|clip| clip.clip.is_empty())
+            || matches!(clip, Some(CalculatedClip::FullyClipped))
         {
             continue;
         }

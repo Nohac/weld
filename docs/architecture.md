@@ -50,7 +50,13 @@ Weld is a workspace of reusable layers and one standard distribution:
   using child relationships. The distribution publishes the active grant's
   permissions and handles UI requests; the native control owner enforces them.
   SSD owns header geometry and the normal/persistent palettes. Bundled Lucide
-  SVGs use `bevy_lucide`'s DPI-sized image cache.
+  artwork uses `weld-svg` for rendering.
+- `weld-svg` loads SVG assets and rasterizes them with resvg at each UI node's
+  physical pixel size. Nodes share cached images by asset and size; asset changes
+  invalidate them and unused sizes are retired. Artwork retains explicit colors,
+  gradients and alpha; monochrome icons can resolve `currentColor` to white and
+  use `ImageNode::color` for tinting. Raster allocation respects the device's
+  texture dimensions and a separate CPU pixel budget.
 - `weld-accessibility` owns asynchronous AT-SPI association, bounded traversal
   and filtered read-only observations. `weld-control` supplies credentialed native
   process identity, singleton-window checks and an occupant-scoped View permit
@@ -939,14 +945,21 @@ texture through winit. A physical adapter will bind Smithay-owned output
 allocations at the same application boundary. Do not enable Bevy's window
 runner or expand its features without a concrete need.
 
-Bevy's public APIs remain pinned to 0.19, while the active rendering crates are
-temporarily patched under `vendor/bevy-wgpu30` to use wgpu 30 as one coherent
-type generation. This pin exists because wgpu 30 lets Weld tell the resource
-tracker the initial state of an already initialized HAL texture. Weld uses that
-API for its DMA-BUF import path. Remove the vendor tree, its provenance record,
-and the root `[patch.crates-io]` section when Weld adopts a suitable Bevy
-release that natively depends on wgpu 30 or newer; the import architecture does
-not otherwise depend on the patch being local.
+Bevy is pinned to 0.20.0 with native wgpu 30 support. Weld uses wgpu's initial
+HAL-texture state API for DMA-BUF imports. Two narrowly patched upstream crates
+remain: `vendor/bevy-render` preserves manual-target scale and metric change
+detection, plus a capability guard for Tracy GPU timestamps; `vendor/bevy-ui`
+preserves fractional border insets. Their adjacent `.upstream` records describe
+refresh and removal criteria. Both the desktop and standalone Bevy mobile
+assembly use these patches.
+
+Weld's retained UI path gates extraction and preparation on scene invalidation.
+During shell initialization it replaces Bevy's unconditional `clear_batches`
+cleanup with a conditional registration, retaining ordinary-image batches for
+content-only replay. Border-underlap extraction starts from computed layout
+on each changed node and explicitly invalidates Weld-owned marker/backing-node
+changes. Surface clipping supports resolved elliptical corner radii while
+keeping exact circular distances for crisp pixel-snapped content.
 
 Weld accepts multiple xdg-toplevels backed by `wl_shm` or linux-dmabuf and
 exposes their lifecycle through protocol-neutral ECS entities. SHM pixels are

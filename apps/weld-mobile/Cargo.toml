@@ -8,18 +8,18 @@ publish = false
 crate-type = ["cdylib", "rlib"]
 
 # Android's activity, graphics and native media dependencies build independently
-# of Master's Linux host and development dylib.
+# of the Linux compositor host.
 [workspace]
 
 [dependencies]
 weld-hoist-protocol = { path = "../../crates/weld-hoist-protocol" }
 weld-hoist-core = { path = "../../crates/weld-hoist-core" }
 anyhow = "1"
-bevy = { version = "=0.19.1", default-features = false, features = [
+bevy = { version = "=0.20.0", default-features = false, features = [
     "std", "async_executor", "bevy_log", "bevy_winit",
-    "scene", "ui_bevy_render", "default_font",
+    "scene", "ui_bevy_render", "ui_picking", "bevy_ui_widgets", "default_font",
 ] }
-bevy_render = { version = "=0.19.1", features = ["gles"] }
+bevy_render = { version = "=0.20.0", features = ["gles"] }
 wgpu = { version = "=30.0.0", default-features = false, features = ["gles"] }
 tracing = "0.1"
 serde = { version = "1", features = ["derive"] }
@@ -39,11 +39,11 @@ tempfile = "3"
 
 [target.'cfg(target_os = "android")'.dependencies]
 jni = "0.22.4"
-bevy = { version = "=0.19.1", default-features = false, features = ["android-native-activity"] }
+bevy = { version = "=0.20.0", default-features = false, features = ["android-native-activity"] }
 weld-media-android = { path = "../../crates/weld-media-android" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
-bevy = { version = "=0.19.1", default-features = false, features = ["wayland"] }
+bevy = { version = "=0.20.0", default-features = false, features = ["wayland"] }
 
 [profile.dev]
 opt-level = 1
@@ -54,19 +54,10 @@ incremental = false
 opt-level = 3
 debug = 0
 
-# Same version/type boundary as Master; see vendor/bevy-wgpu30.upstream.
+# Share the compositor's manual-output, fractional-border and profiling fixes.
 [patch.crates-io]
-bevy_camera = { path = "../../vendor/bevy-wgpu30/bevy_camera" }
-bevy_color = { path = "../../vendor/bevy-wgpu30/bevy_color" }
-bevy_image = { path = "../../vendor/bevy-wgpu30/bevy_image" }
-bevy_light = { path = "../../vendor/bevy-wgpu30/bevy_light" }
-bevy_material = { path = "../../vendor/bevy-wgpu30/bevy_material" }
-bevy_mesh = { path = "../../vendor/bevy-wgpu30/bevy_mesh" }
-bevy_reflect = { path = "../../vendor/bevy-wgpu30/bevy_reflect" }
-bevy_render = { path = "../../vendor/bevy-wgpu30/bevy_render" }
-bevy_shader = { path = "../../vendor/bevy-wgpu30/bevy_shader" }
-bevy_sprite = { path = "../../vendor/bevy-wgpu30/bevy_sprite" }
-bevy_text = { path = "../../vendor/bevy-wgpu30/bevy_text" }
+bevy_render = { path = "../../vendor/bevy-render" }
+bevy_ui = { path = "../../vendor/bevy-ui" }
 
 [lints.rust]
 unsafe_op_in_unsafe_fn = "deny"

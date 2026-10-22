@@ -10,10 +10,7 @@ use crate::{
 };
 use bevy::{
     app::{App, PreUpdate},
-    picking::{
-        Pickable,
-        events::{Pointer, Press},
-    },
+    picking::{Pickable, events::PointerPress},
     prelude::*,
     ui::{GlobalZIndex, UiTargetCamera},
 };
@@ -232,7 +229,7 @@ fn mount(
 }
 
 fn pointer_focus(
-    event: On<Pointer<Press>>,
+    event: On<PointerPress>,
     parents: Query<&ChildOf>,
     roots: Query<&LayerPresentation>,
     layers: Query<(&ClientSurface, &ClientLayerSurface)>,
@@ -438,22 +435,22 @@ mod tests {
                     (keyboard == LayerKeyboardInteractivity::OnDemand).then_some(surface);
                 focus.applied = Some(surface);
             }
-            app.world_mut().trigger(Pointer::new(
-                PointerId::Mouse,
-                Location {
-                    target: NormalizedRenderTarget::None {
-                        width: 800,
-                        height: 600,
+            app.world_mut().trigger(PointerPress {
+                entity: input,
+                pointer: Pointer::new(
+                    PointerId::Mouse,
+                    Location {
+                        target: NormalizedRenderTarget::None {
+                            width: 800,
+                            height: 600,
+                        },
+                        position: Vec2::ZERO,
                     },
-                    position: Vec2::ZERO,
-                },
-                Press {
-                    button: PointerButton::Primary,
-                    hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
-                    count: 1,
-                },
-                input,
-            ));
+                ),
+                button: PointerButton::Primary,
+                hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+                count: 1,
+            });
             assert_eq!(
                 resolve_focus_actions(app.world_mut(), vec![]),
                 vec![SurfaceAction::Focus {

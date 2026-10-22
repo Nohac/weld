@@ -5,6 +5,7 @@ use bevy::input::{
     keyboard::{Key, KeyboardInput, NativeKeyCode},
 };
 use bevy::prelude::*;
+use bevy::ui_widgets::{Activate, Button};
 use std::sync::atomic::Ordering;
 use weld_hoist_protocol::device::ApplicationInfo;
 
@@ -42,9 +43,10 @@ struct BrowserSignature {
 pub(super) fn install(app: &mut App) {
     app.init_resource::<BrowserState>()
         .init_resource::<Enrollment>()
+        .add_observer(actions)
         .add_systems(
             Update,
-            (actions, enroll, draw)
+            (enroll, draw)
                 .chain()
                 .before(super::touch)
                 .after(super::viewport),
@@ -59,26 +61,24 @@ fn button(label: String, action: Action) -> impl Scene + SceneList {
         AccessibleLabel::new(accessible_label)
         Node { min_height: px(44), padding: UiRect::all(px(8)), margin: UiRect::all(px(4)), justify_content: JustifyContent::Center, align_items: AlignItems::Center }
         BackgroundColor(Color::srgb(0.12, 0.20, 0.30))
-        Children [(
+        Children [
             Text::new(label)
             TextFont { font_size: FontSize::Px(16.0) }
             TextColor(Color::WHITE)
-        )]
+        ]
     }
 }
 fn actions(
+    event: On<Activate>,
     receiver: Option<Res<Receiver>>,
-    buttons: Query<(&Interaction, &Action), Changed<Interaction>>,
+    buttons: Query<&Action>,
     mut enrollment: ResMut<Enrollment>,
     mut browser: ResMut<BrowserState>,
 ) {
     let Some(receiver) = receiver else {
         return;
     };
-    for (interaction, action) in &buttons {
-        if *interaction != Interaction::Pressed {
-            continue;
-        }
+    if let Ok(action) = buttons.get(event.entity) {
         match action {
             Action::Diagnostics => {
                 browser.page = 0;
@@ -236,8 +236,9 @@ fn draw(
                 Node { position_type: PositionType::Absolute, left: px(viewport.safe[0] as f32), top: px(viewport.safe[1] as f32), width: px(viewport.safe[2] as f32), height: px(viewport.safe[3] as f32), flex_direction: FlexDirection::Column, padding: UiRect::all(px(12)) }
                 BackgroundColor(Color::srgb(0.035, 0.045, 0.065))
                 Children [
-                    (Text::new(page) TextFont { font_size: FontSize::Px(14.0) } TextColor(Color::WHITE)),
-                    (Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap } Children [{controls}]),
+                    Text::new(page) TextFont { font_size: FontSize::Px(14.0) } TextColor(Color::WHITE)
+                    --
+                    Node { flex_direction: FlexDirection::Row, flex_wrap: FlexWrap::Wrap } Children [{controls}]
                 ]
             });
             return;
@@ -281,8 +282,9 @@ fn draw(
             Node { position_type: PositionType::Absolute, left: px(viewport.safe[0] as f32), top: px(viewport.safe[1] as f32), width: px(viewport.safe[2] as f32), height: px(viewport.safe[3] as f32), flex_direction: FlexDirection::Column, padding: UiRect::all(px(12)) }
             BackgroundColor(Color::srgb(0.035, 0.045, 0.065))
             Children [
-                (Text::new(message) TextFont { font_size: FontSize::Px(18.0) } TextColor(Color::WHITE)),
-                {rows},
+                Text::new(message) TextFont { font_size: FontSize::Px(18.0) } TextColor(Color::WHITE)
+                --
+                {rows}
             ]
         });
     }

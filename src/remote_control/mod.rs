@@ -4,7 +4,7 @@
 mod tests;
 
 use crate::control::SessionAccess;
-use anyhow::{Context, Result, ensure};
+use anyhow::{Context as ContextExt, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bevy::{ecs::system::SystemParam, picking::PickingSystems, prelude::*};
 use std::{

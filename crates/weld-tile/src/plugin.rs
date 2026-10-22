@@ -500,7 +500,7 @@ fn admit_windows(
     }
 }
 
-fn clear_tile_hints(event: On<Remove, TileParent>, mut commands: Commands) {
+fn clear_tile_hints(event: On<Remove<TileParent>>, mut commands: Commands) {
     commands.entity(event.entity).try_remove::<(
         WindowInSoloFrame,
         WindowSplitEdge,
@@ -510,7 +510,7 @@ fn clear_tile_hints(event: On<Remove, TileParent>, mut commands: Commands) {
 }
 
 fn mark_tiled_window(
-    event: On<bevy::ecs::lifecycle::Add, TileParent>,
+    event: On<bevy::ecs::lifecycle::Add<TileParent>>,
     windows: Query<(), With<ManagedWindow>>,
     mut commands: Commands,
 ) {

@@ -16,7 +16,8 @@ test-support = ["weld-app/test-support"]
 
 [workspace]
 members = [
-    "crates/weld-session",
+  "crates/weld-svg",
+  "crates/weld-session",
   "crates/weld-accessibility",
   "crates/weld-access",
   "crates/weld-remote-control",
@@ -59,11 +60,10 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
-bevy_lucide = "=0.1.1"
 zeroize = "1"
 anyhow = "1.0.100"
 ash = "0.38.0"
-bevy = { version = "=0.19.1", default-features = false, features = [
+bevy = { version = "=0.20.0", default-features = false, features = [
   "bevy_remote",
   "bevy_log",
   "bevy_ui_widgets",
@@ -73,13 +73,13 @@ bevy = { version = "=0.19.1", default-features = false, features = [
   "ui_bevy_render",
   "ui_picking",
 ] }
-bevy_app = { version = "=0.19.1", default-features = false, features = ["std"] }
-bevy_ecs = { version = "=0.19.1", default-features = false, features = ["std"] }
-bevy_asset = { version = "=0.19.1", default-features = false }
-bevy_image = { version = "=0.19.1", default-features = false }
-bevy_render = { version = "=0.19.1", default-features = false }
-bevy_ui_render = { version = "=0.19.1", default-features = false }
-bevy_winit = { version = "=0.19.1", default-features = false }
+bevy_app = { version = "=0.20.0", default-features = false, features = ["std"] }
+bevy_ecs = { version = "=0.20.0", default-features = false, features = ["std"] }
+bevy_asset = { version = "=0.20.0", default-features = false }
+bevy_image = { version = "=0.20.0", default-features = false }
+bevy_render = { version = "=0.20.0", default-features = false }
+bevy_ui_render = { version = "=0.20.0", default-features = false }
+bevy_winit = { version = "=0.20.0", default-features = false }
 calloop = { version = "0.14.4", features = ["signals"] }
 clap = { version = "4.5", features = ["derive"] }
 cros-codecs = { version = "=0.0.6", features = ["vaapi"] }
@@ -87,7 +87,7 @@ cros-libva = "=0.0.12"
 cursor-icon = "1.2.0"
 ffmpeg-next = { version = "=9.0.0", default-features = false, features = ["format"] }
 futures-lite = "2.6.1"
-leafwing-input-manager = { version = "0.21.0", default-features = false }
+leafwing-input-manager = { version = "0.22.0", default-features = false }
 input = { version = "0.10.0", features = ["libinput_1_26"] }
 insta = { version = "1.48.0", default-features = false }
 indoc = "2.0.7"
@@ -104,7 +104,7 @@ smithay = { path = "vendor/smithay", default-features = false }
 smithay-drm-extras = { path = "vendor/smithay/smithay-drm-extras", default-features = false, features = ["display-info"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter"] }
-tracing-tracy = "0.11.4"
+tracing-tracy = "0.12.0"
 tokio = { version = "1.47", default-features = false, features = ["rt", "sync", "io-util", "time", "net"] }
 wgpu = { version = "30", default-features = false }
 winit = { version = "0.30.13", default-features = false }
@@ -176,21 +176,9 @@ inherits = "release"
 debug = 2
 strip = "none"
 
-# Temporary Bevy 0.19 compatibility layer. Remove this entire section when
-# Weld adopts a Bevy release that natively depends on wgpu 30 or newer.
 [patch.crates-io]
-bevy_camera = { path = "vendor/bevy-wgpu30/bevy_camera" }
-bevy_color = { path = "vendor/bevy-wgpu30/bevy_color" }
-bevy_image = { path = "vendor/bevy-wgpu30/bevy_image" }
-bevy_light = { path = "vendor/bevy-wgpu30/bevy_light" }
-bevy_material = { path = "vendor/bevy-wgpu30/bevy_material" }
-bevy_mesh = { path = "vendor/bevy-wgpu30/bevy_mesh" }
-bevy_pbr = { path = "vendor/bevy-wgpu30/bevy_pbr" }
-bevy_reflect = { path = "vendor/bevy-wgpu30/bevy_reflect" }
-bevy_render = { path = "vendor/bevy-wgpu30/bevy_render" }
-bevy_shader = { path = "vendor/bevy-wgpu30/bevy_shader" }
-bevy_sprite = { path = "vendor/bevy-wgpu30/bevy_sprite" }
-bevy_text = { path = "vendor/bevy-wgpu30/bevy_text" }
+bevy_render = { path = "vendor/bevy-render" }
+bevy_ui = { path = "vendor/bevy-ui" }
 cros-libva = { path = "vendor/cros-libva" }
 cros-codecs = { path = "vendor/cros-codecs" }
 

@@ -30,6 +30,7 @@ pub(super) struct ClipParameters {
     pub x: Vec4,
     pub y: Vec4,
     pub radii: Vec4,
+    pub radii_y: Vec4,
 }
 
 impl Default for ClipParameters {
@@ -38,6 +39,7 @@ impl Default for ClipParameters {
             x: Vec4::new(0.0, 0.0, 0.0, -1.0),
             y: Vec4::ZERO,
             radii: Vec4::ZERO,
+            radii_y: Vec4::ZERO,
         }
     }
 }
@@ -54,17 +56,19 @@ impl ClipParameters {
                 x: Vec4::ZERO,
                 y: Vec4::ZERO,
                 radii: Vec4::ZERO,
+                radii_y: Vec4::ZERO,
             };
         };
         let relative = inverse * **transform;
         let x_axis = relative.transform_vector2(Vec2::new(surface.size().x, 0.0));
         let y_axis = relative.transform_vector2(Vec2::new(0.0, surface.size().y));
         let origin = relative.transform_point2(-0.5 * surface.size());
-        let radii: [f32; 4] = clip.border_radius().into();
+        let radii: [[f32; 4]; 2] = clip.border_radius().into();
         Self {
             x: Vec4::new(x_axis.x, y_axis.x, origin.x, clip.size().x * 0.5),
             y: Vec4::new(x_axis.y, y_axis.y, origin.y, clip.size().y * 0.5),
-            radii: Vec4::from_array(radii),
+            radii: Vec4::from_array(radii[0]),
+            radii_y: Vec4::from_array(radii[1]),
         }
     }
 }

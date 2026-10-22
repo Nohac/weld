@@ -38,10 +38,10 @@ pub(super) fn parse(words: &[&str]) -> Result<TitleFont> {
         "font size must not exceed 512 logical pixels"
     );
     let family = match family.to_ascii_lowercase().as_str() {
-        "monospace" => FontSource::Monospace,
-        "sans" | "sans-serif" => FontSource::SansSerif,
-        "serif" => FontSource::Serif,
-        "system-ui" => FontSource::SystemUi,
+        "monospace" => FontSource::monospace(),
+        "sans" | "sans-serif" => FontSource::sans_serif(),
+        "serif" => FontSource::serif(),
+        "system-ui" => FontSource::system_ui(),
         _ => FontSource::Family(family.as_str().into()),
     };
     let style = match description.style() {

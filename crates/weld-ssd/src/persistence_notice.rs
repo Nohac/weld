@@ -91,7 +91,7 @@ fn scene(toggle: &WindowPersistenceToggled, settings: &SsdSettings) -> impl Scen
             align_items: AlignItems::Center, justify_content: JustifyContent::Center,
             overflow: Overflow::clip(),
         }
-        Children [(
+        Children [
             Pickable::IGNORE
             Node {
                 width: px(240), min_height: px(240), max_width: percent(90), max_height: percent(90),
@@ -102,7 +102,7 @@ fn scene(toggle: &WindowPersistenceToggled, settings: &SsdSettings) -> impl Scen
             }
             BackgroundColor({colors.background})
             BorderColor::all(colors.child_border)
-            Children [(
+            Children [
                 Pickable::IGNORE
                 Node { max_width: percent(100) }
                 Text(label)
@@ -110,7 +110,7 @@ fn scene(toggle: &WindowPersistenceToggled, settings: &SsdSettings) -> impl Scen
                 TextLayout::justify(Justify::Center)
                 template(move |_| Ok(font.clone()))
                 TextColor({colors.foreground})
-            )]
-        )]
+            ]
+        ]
     }
 }

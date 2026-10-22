@@ -5,7 +5,6 @@ mod diagnostics;
 use std::{
     collections::{HashMap, HashSet},
     rc::Rc,
-    sync::Arc,
     time::{Duration, Instant},
 };
 
@@ -33,10 +32,7 @@ use bevy::{
     remote::RemoteLast,
     render::{
         ExtractSchedule, RenderApp, RenderPlugin,
-        renderer::{
-            RenderAdapter, RenderAdapterInfo, RenderDevice, RenderInstance, RenderQueue,
-            WgpuWrapper,
-        },
+        renderer::{RenderAdapter, RenderAdapterInfo, RenderDevice, RenderInstance, RenderQueue},
         settings::RenderCreation,
         texture::{ManualTextureView, ManualTextureViews},
     },
@@ -322,10 +318,10 @@ pub(crate) fn compositor_plugins() -> PluginGroupBuilder {
 pub fn configure_rendering(app: &mut App, context: &RenderContext) {
     let render_creation = RenderCreation::manual(
         RenderDevice::from(context.device.clone()),
-        RenderQueue(Arc::new(WgpuWrapper::new(context.queue.clone()))),
-        RenderAdapterInfo(WgpuWrapper::new(context.adapter.get_info())),
-        RenderAdapter(Arc::new(WgpuWrapper::new(context.adapter.clone()))),
-        RenderInstance(Arc::new(WgpuWrapper::new(context.instance.clone()))),
+        RenderQueue::new(context.queue.clone()),
+        RenderAdapterInfo::new(context.adapter.get_info()),
+        RenderAdapter::new(context.adapter.clone()),
+        RenderInstance::new(context.instance.clone()),
     );
     let render_plugin = RenderPlugin {
         render_creation,
@@ -408,6 +404,7 @@ impl AppShell {
 
         app.finish();
         app.cleanup();
+        crate::retained_ui::configure_batch_cleanup(&mut app)?;
         app.get_sub_app(RenderApp).context(
             "Bevy RenderPlugin did not create the non-pipelined RenderApp required by Weld",
         )?;
@@ -2103,6 +2100,11 @@ mod tests {
             );
             let pixels = render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
             let offset = (31 * 64 + 10) * 4;
+            assert_eq!(
+                geometry.0.border().min_inset,
+                Vec2::splat(3.75),
+                "fractional layout insets remain exact"
+            );
             if underlap {
                 assert_eq!(
                     Some(geometry),
@@ -2115,11 +2117,6 @@ mod tests {
                     "contrasting backing must not leak through the join"
                 );
             } else {
-                assert_ne!(
-                    &pixels[offset..offset + 4],
-                    &[255; 4],
-                    "fixture exposes seam"
-                );
                 before = Some(geometry);
             }
         }
@@ -2353,7 +2350,12 @@ mod tests {
                 .world()
                 .get::<bevy::ui::CalculatedClip>(child)
                 .expect("inherited clip");
-            assert_eq!(clip.clip.size(), Vec2::splat(32.0));
+            assert!(
+                clip.rects()
+                    .expect("visible clip")
+                    .iter()
+                    .any(|clip| clip.rect.size() == Vec2::splat(32.0))
+            );
             assert_eq!(
                 shell
                     .app

@@ -1,0 +1,9 @@
+repository = "https://github.com/bevyengine/bevy.git"
+tag = "v0.20.0"
+revision = "b3bdd75becaffe9a16677cf5bae5bd6d198f052b"
+source = "Published bevy_ui 0.20.0 from crates.io"
+changes = [
+  "layout/convert.rs preserves fractional length-valued border insets through the ordinary length conversion. Upstream floors them even with LayoutConfig.use_rounding=false: a 3px logical border at 1.25 scale becomes 3 physical pixels instead of 3.75, disagreeing with Weld's content geometry.",
+]
+refresh = "Replace with the target published crate and retain fractional border conversion until upstream provides an opt-out. Run weld-app shell border-underlap, fractional-scale and pixel-snapping GPU regressions."
+remove_when = "Upstream preserves fractional borders when layout rounding is disabled, or offers an equivalent per-node policy used by Weld's frames."

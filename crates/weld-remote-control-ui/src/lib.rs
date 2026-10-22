@@ -1,22 +1,23 @@
 //! Capability controls mounted in the window's ordinary decoration header.
 
-use anyhow::{Context, Result};
+use anyhow::{Context as ContextExt, Result};
 use bevy::{
     ecs::template::template,
     picking::{
         Pickable, PickingSystems,
-        events::{Click, Pointer, Press},
+        events::{PointerClick, PointerPress},
         pointer::PointerButton,
     },
     prelude::*,
     scene::{CommandsSceneExt, bsn},
     text::TextLayout,
+    ui_widgets::Button,
     window::{CursorIcon, RequestRedraw, SystemCursorIcon},
 };
-use bevy_lucide::{LucideIcon, LucidePlugin, Svg};
 use weld_app::surface::ClientWindowMetadata;
 use weld_remote_control::{Capabilities, Capability};
 use weld_ssd::{FrameColors, FrameHeader, SsdSettings, WindowFrameColors};
+use weld_svg::{Svg, SvgImage, SvgPlugin};
 use weld_window::{WindowGeometry, WindowOccupant, WindowProjectionLookup, WindowSystems};
 
 /// The control owner publishes the current grant's permissions on its managed window.
@@ -104,7 +105,7 @@ struct ButtonForeground(ControlButton);
 
 /// Installs frame-mounted controls and their bundled, DPI-aware Lucide icons.
 pub fn install(app: &mut App) -> Result<()> {
-    app.add_plugins(LucidePlugin);
+    app.add_plugins(SvgPlugin);
     let mut assets = app.world_mut().resource_mut::<Assets<Svg>>();
     let mut icons = Vec::new();
     for (action, source) in [
@@ -132,9 +133,7 @@ pub fn install(app: &mut App) -> Result<()> {
         (Action::Copy, include_str!("../assets/lucide/copy.svg")),
         (Action::TakeBack, include_str!("../assets/lucide/power.svg")),
     ] {
-        let svg = Svg::parse(source)
-            .map_err(anyhow::Error::msg)
-            .context("invalid bundled control icon")?;
+        let svg = Svg::parse_icon(source).context("invalid bundled control icon")?;
         icons.push((action, assets.add(svg)));
     }
     app.insert_resource(Icons(icons))
@@ -223,19 +222,18 @@ fn panel(window: Entity, font: TextFont, icons: &Icons) -> impl Scene {
             padding: UiRect::horizontal(px(7)),
         }
         Children [
-            (
+            Pickable::IGNORE
+            Node { flex_grow: 1.0, flex_shrink: 1.0, min_width: px(0), overflow: Overflow::clip() }
+            Children [
+                template(move |_| Ok(HeaderTitle(window)))
+                Text::new("Remote control")
+                template(move |_| Ok(font.clone()))
+                TextLayout::no_wrap()
+                TextColor(Color::WHITE)
                 Pickable::IGNORE
-                Node { flex_grow: 1.0, flex_shrink: 1.0, min_width: px(0), overflow: Overflow::clip() }
-                Children [(
-                    template(move |_| Ok(HeaderTitle(window)))
-                    Text::new("Remote control")
-                    template(move |_| Ok(font.clone()))
-                    TextLayout::no_wrap()
-                    TextColor(Color::WHITE)
-                    Pickable::IGNORE
-                )]
-            ),
-            {buttons},
+            ]
+            --
+            {buttons}
         ]
     }
 }
@@ -256,32 +254,29 @@ fn button(target: ControlButton, icon: Handle<Svg>, font: TextFont) -> impl Scen
         BackgroundColor(Color::NONE)
         BorderColor::all(Color::NONE)
         Children [
-            (
-                template(move |_| Ok(ButtonForeground(target)))
-                template(move |_| Ok(LucideIcon::from_handle(icon.clone())))
-                Node { width: px(16), height: px(16), flex_shrink: 0.0 }
-                Pickable::IGNORE
-            ),
-            (
-                template(move |_| Ok(ButtonForeground(target)))
-                Text::new(target.action.label())
-                template(move |_| Ok(font.clone()))
-                TextLayout::no_wrap()
-                TextColor(Color::WHITE)
-                Pickable::IGNORE
-            ),
+            template(move |_| Ok(ButtonForeground(target)))
+            template(move |_| Ok(SvgImage(icon.clone())))
+            Node { width: px(16), height: px(16), flex_shrink: 0.0 }
+            Pickable::IGNORE
+            --
+            template(move |_| Ok(ButtonForeground(target)))
+            Text::new(target.action.label())
+            template(move |_| Ok(font.clone()))
+            TextLayout::no_wrap()
+            TextColor(Color::WHITE)
+            Pickable::IGNORE
         ]
     }
 }
 
-fn press(mut event: On<Pointer<Press>>, buttons: Query<(), With<ControlButton>>) {
+fn press(mut event: On<PointerPress>, buttons: Query<(), With<ControlButton>>) {
     if buttons.contains(event.entity) {
         event.propagate(false);
     }
 }
 
 fn click(
-    mut event: On<Pointer<Click>>,
+    mut event: On<PointerClick>,
     buttons: Query<&ControlButton>,
     mut commands: Commands,
     mut redraw: MessageWriter<RequestRedraw>,
@@ -522,20 +517,20 @@ mod tests {
             .collect();
         assert_eq!(buttons.len(), 8);
         for (entity, target) in &buttons {
-            app.world_mut().trigger(Pointer::new(
-                PointerId::Mouse,
-                Location {
-                    target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1)),
-                    position: Vec2::ZERO,
-                },
-                Click {
-                    button: PointerButton::Primary,
-                    hit: HitData::new(header, 0.0, None, None),
-                    duration: Duration::ZERO,
-                    count: 1,
-                },
-                *entity,
-            ));
+            app.world_mut().trigger(PointerClick {
+                entity: *entity,
+                pointer: Pointer::new(
+                    PointerId::Mouse,
+                    Location {
+                        target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1)),
+                        position: Vec2::ZERO,
+                    },
+                ),
+                button: PointerButton::Primary,
+                hit: HitData::new(header, 0.0, None, None),
+                duration: Duration::ZERO,
+                count: 1,
+            });
             app.world_mut().flush();
             let action = app
                 .world()

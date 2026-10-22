@@ -172,7 +172,7 @@ pub struct WorkspaceFocused {
 }
 
 pub(crate) fn removed(
-    event: On<Remove, Workspace>,
+    event: On<Remove<Workspace>>,
     workspaces: Query<&Workspace>,
     mut ids: ResMut<WorkspaceIds>,
     mut selected: ResMut<FocusedWorkspace>,
@@ -195,7 +195,7 @@ pub struct WorkspaceMemberMoved {
 /// Retain every member as a focus candidate, including windows admitted to an
 /// inactive workspace. Re-inserting membership preserves existing recency.
 pub(crate) fn member_inserted(
-    event: On<Insert, WorkspaceMember>,
+    event: On<Insert<WorkspaceMember>>,
     members: Query<&WorkspaceMember, With<ManagedWindow>>,
     mut workspaces: Query<&mut Workspace>,
 ) {
@@ -214,7 +214,7 @@ pub(crate) fn member_inserted(
 }
 
 pub(crate) fn member_removed(
-    event: On<Remove, WorkspaceMember>,
+    event: On<Remove<WorkspaceMember>>,
     members: Query<&WorkspaceMember>,
     mut workspaces: Query<&mut Workspace>,
 ) {

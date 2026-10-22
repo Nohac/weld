@@ -302,6 +302,6 @@ fn mount_surfaces(
             ..Default::default()
         };
         let surface = client.surface;
-        commands.spawn_scene(bsn! { (BenchSurface template(move |_| Ok(SurfaceNode { surface, view: SurfaceView::WindowGeometry }))) }).insert(node);
+        commands.spawn_scene(bsn! { BenchSurface template(move |_| Ok(SurfaceNode { surface, view: SurfaceView::WindowGeometry })) }).insert(node);
     }
 }

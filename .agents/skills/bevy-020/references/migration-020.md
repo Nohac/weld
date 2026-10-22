@@ -1,30 +1,32 @@
 # Weld's Bevy 0.20 migration audit
 
-Reviewed against `v0.20.0` on 2026-10-22. The repository still pins 0.19.1 at
-this checkpoint. Recheck manifests and patch history when starting the upgrade.
+Migrated to `v0.20.0` on 2026-10-22. Recheck manifests and patch history when
+refreshing dependencies.
 
 ## Vendor removal gates
 
 The [0.20 render manifest](https://github.com/bevyengine/bevy/blob/v0.20.0/crates/bevy_render/Cargo.toml)
-uses wgpu 30, matching Weld's graphics boundary. The twelve crates under
-`vendor/bevy-wgpu30` also carry behavior beyond that version adjustment:
+uses wgpu 30, matching Weld's graphics boundary. The twelve-crate compatibility
+tree was removed. Two narrow patches remain under `vendor/bevy-render` and
+`vendor/bevy-ui`:
 
 | Local behavior | 0.20 upstream status | Weld validation gate |
 | --- | --- | --- |
 | Manual texture-view scale | Camera target info still reports `1.0` | Preserve fractional scaling and per-output logical geometry. |
 | Manual-target metric change detection | Manual targets still count as changed every update | Texture rotation must preserve stable projection/UI metrics while size and scale changes invalidate them. |
 | Tracy timestamp capability guard | GPU-context construction still assumes timestamp features | Profiling on Weld-created devices must respect their enabled capabilities. |
+| Fractional border insets | Length-valued borders are floored even with layout rounding disabled | A 3px logical border at 1.25 scale must retain its 3.75px physical inset. |
 
 Sources: [camera](https://github.com/bevyengine/bevy/blob/v0.20.0/crates/bevy_render/src/camera.rs),
 [Tracy](https://github.com/bevyengine/bevy/blob/v0.20.0/crates/bevy_render/src/diagnostic/tracy_gpu.rs).
-Read `vendor/bevy-wgpu30.upstream` and the complete local patch history; the
-scale field was added in `a2890773`, the change-detection optimization in
-`f295008d`. Prefer supported integration points for equivalent behavior; retain
-a narrowly documented patch if removing it would regress correctness or cost.
+Read `vendor/bevy-render.upstream` and `vendor/bevy-ui.upstream` for provenance
+and removal criteria. Prefer supported integration points for equivalent
+behavior; preserve regression coverage before dropping a patch.
 
 Check both root `Cargo.toml` and `apps/weld-mobile/Cargo.toml` before removing
-shared Bevy paths. Resolve Bevy-dependent Leafwing and Lucide versions together
-with the desktop graph. Smithay, VA-API and AnyRender patches have independent
+shared Bevy paths. Resolve Bevy-dependent Leafwing versions with the desktop
+graph. SVG artwork uses the project-owned resvg adapter `weld-svg`. Smithay,
+VA-API and AnyRender patches have independent
 provenance and removal criteria in their vendor records.
 
 ## Render integration
@@ -41,6 +43,14 @@ when adapting `crates/weld-app/src/border.rs`:
 - Keep hide/show, camera reassignment and despawn cleanup covered. Transparent
   UI still has an incomplete retention migration; inspect custom materials
   separately before estimating savings.
+- Bevy clears ordinary `UiBatch` components during render cleanup. Weld replaces
+  that registration after plugin initialization with conditional cleanup, using
+  the public schedule API. Retained replay must keep those batches as well as
+  extraction data; otherwise ordinary images disappear after the first frame.
+- Preserve the exact circular clip distance in Weld's surface shader. The
+  upstream elliptical approximation with derivative-based antialiasing softened
+  interior texels in the fractional-scale regression. Elliptical corners use
+  the upstream distance function.
 
 For `surface.rs`, `surface/clip.rs`, `surface/snap.rs`, and the surface shader,
 check transformed clipping, 2D corner radii and logical/physical coordinates.
@@ -52,7 +62,7 @@ The [migration guide](https://bevy.org/learn/migration-guides/0-19-to-0-20/)
 identifies these additional boundaries to inspect:
 
 - Bevy shaders use WESL; translate preprocessor imports/defines and rename
-  affected assets. Plain WGSL remains usable. Inspect `surface_material.wgsl`
+  affected assets. Plain WGSL remains usable. Inspect `surface_material.wesl`
   and its embedded asset registration together.
 - Extraction traits identify the target app, such as
   `ExtractComponent<RenderApp>` / `#[extract_app(RenderApp)]`; implementation

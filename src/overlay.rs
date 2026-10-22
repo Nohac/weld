@@ -18,7 +18,7 @@ use bevy::{
         GlobalZIndex, Node, PositionType, UiRect, UiTargetCamera, px,
     },
     scene::{CommandsSceneExt, Scene, bsn},
-    text::{FontSourceTemplate, TextColor, TextFont},
+    text::{FontSourceTemplate, GenericFontFamily, TextColor, TextFont},
     ui::widget::Text,
 };
 use weld_app::output::{
@@ -248,48 +248,44 @@ fn output_topology_panel() -> impl Scene {
         GlobalZIndex(weld_app::layer::SHELL_Z_INDEX)
         Pickable::IGNORE
         Children [
-            (
-                Pickable::IGNORE
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: px(16),
-                    top: px(10),
-                }
-                Text("Output topology diagnostics")
-                TextFont {
-                    font: FontSourceTemplate::Monospace,
-                    font_size: px(16.0),
-                }
-                TextColor(Color::srgb(0.92, 0.96, 1.0))
-            ),
-            (
-                Pickable::IGNORE
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: px(20),
-                    top: px(42),
-                }
-                Text("Logical workspace (mode / scale)")
-                TextFont {
-                    font: FontSourceTemplate::Monospace,
-                    font_size: px(13.0),
-                }
-                TextColor(Color::srgb(0.72, 0.85, 0.94))
-            ),
-            (
-                Pickable::IGNORE
-                Node {
-                    position_type: PositionType::Absolute,
-                    left: px(470),
-                    top: px(42),
-                }
-                Text("Physical placement (mm, scale-independent)")
-                TextFont {
-                    font: FontSourceTemplate::Monospace,
-                    font_size: px(13.0),
-                }
-                TextColor(Color::srgb(0.72, 0.85, 0.94))
-            ),
+            Pickable::IGNORE
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(16),
+                top: px(10),
+            }
+            Text("Output topology diagnostics")
+            TextFont {
+                font: FontSourceTemplate::Generic(GenericFontFamily::Monospace),
+                font_size: px(16.0),
+            }
+            TextColor(Color::srgb(0.92, 0.96, 1.0))
+            --
+            Pickable::IGNORE
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(20),
+                top: px(42),
+            }
+            Text("Logical workspace (mode / scale)")
+            TextFont {
+                font: FontSourceTemplate::Generic(GenericFontFamily::Monospace),
+                font_size: px(13.0),
+            }
+            TextColor(Color::srgb(0.72, 0.85, 0.94))
+            --
+            Pickable::IGNORE
+            Node {
+                position_type: PositionType::Absolute,
+                left: px(470),
+                top: px(42),
+            }
+            Text("Physical placement (mm, scale-independent)")
+            TextFont {
+                font: FontSourceTemplate::Generic(GenericFontFamily::Monospace),
+                font_size: px(13.0),
+            }
+            TextColor(Color::srgb(0.72, 0.85, 0.94))
         ]
     }
 }
@@ -348,15 +344,15 @@ fn logical_output_box(
         }
         BorderColor::all(border)
         BackgroundColor(background)
-        Children [(
+        Children [
             Pickable::IGNORE
             Text(label)
             TextFont {
-                font: FontSourceTemplate::Monospace,
+                font: FontSourceTemplate::Generic(GenericFontFamily::Monospace),
                 font_size: px(11.0),
             }
             TextColor(Color::srgb(0.94, 0.97, 1.0))
-        )]
+        ]
     }
 }
 
@@ -415,14 +411,14 @@ fn physical_output_box(
         }
         BorderColor::all(border)
         BackgroundColor(background)
-        Children [(
+        Children [
             Pickable::IGNORE
             Text(label)
             TextFont {
-                font: FontSourceTemplate::Monospace,
+                font: FontSourceTemplate::Generic(GenericFontFamily::Monospace),
                 font_size: px(11.0),
             }
             TextColor(Color::srgb(0.94, 0.97, 1.0))
-        )]
+        ]
     }
 }

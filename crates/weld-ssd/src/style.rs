@@ -133,7 +133,7 @@ pub struct TitleFont {
 impl Default for TitleFont {
     fn default() -> Self {
         Self {
-            family: FontSource::SansSerif,
+            family: FontSource::sans_serif(),
             size: 14.0,
             weight: FontWeight::NORMAL,
             style: FontStyle::Normal,

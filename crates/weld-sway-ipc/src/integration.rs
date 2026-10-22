@@ -7,7 +7,7 @@ mod tests;
 use crate::{
     DesktopPublisher, DesktopSnapshot, Layout, Node, NodeType, Output, Rect, X11Properties,
 };
-use anyhow::{Context, Result};
+use anyhow::{Context as ContextExt, Result};
 use bevy::{
     app::{App, Last, Plugin},
     prelude::*,

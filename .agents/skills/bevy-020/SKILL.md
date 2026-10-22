@@ -7,10 +7,9 @@ description: Implement, review, or migrate Weld's Bevy integration to 0.20. Use 
 
 1. Read `CONTRIBUTING.md` before changing code or structure.
 2. Check the workspace manifests and lockfile for the version actually being
-   built. This skill prepares the 0.20 migration; its installation does not
-   upgrade the repository's existing 0.19.1 dependencies.
+   built. Desktop and the standalone Bevy mobile assembly pin 0.20.0.
 3. Confirm target APIs in versioned 0.20.0 documentation and the `v0.20.0`
-   source tag. For maintenance before migration, use the resolved 0.19.1 API.
+   source tag.
 4. Add only the standalone Bevy crate and features required by the current
    slice.
 5. Preserve Weld's host boundaries and test policy without a display server
@@ -42,9 +41,9 @@ For scene authoring, also read `bevy-bsn-ui`.
 
 ## Version and dependency rules
 
-- Bevy 0.20.0 uses wgpu 30. Audit the additional local patches described in the
-  migration reference before removing `vendor/bevy-wgpu30`; native wgpu support
-  resolves only the dependency compatibility part.
+- Bevy 0.20.0 uses wgpu 30. Read `vendor/bevy-render.upstream` and
+  `vendor/bevy-ui.upstream` before refreshing the remaining scale, timestamp
+  capability and fractional-border patches.
 - Select features deliberately. Do not inherit a feature set from a full Bevy
   game or editor when Weld only needs a standalone crate.
 - Keep workspace Bevy versions and features centralized. Also inspect separate

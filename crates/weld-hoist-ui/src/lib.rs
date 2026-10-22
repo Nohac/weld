@@ -14,18 +14,15 @@ use bevy::{
         system::{Commands, Query},
         template::template,
     },
-    picking::{
-        Pickable,
-        events::{Click, Pointer},
-        pointer::PointerButton,
-    },
+    picking::{Pickable, events::PointerClick, pointer::PointerButton},
     prelude::{
-        AccessibleLabel, AlignItems, BackgroundColor, BorderColor, BorderRadius, BoxShadow, Button,
+        AccessibleLabel, AlignItems, BackgroundColor, BorderColor, BorderRadius, BoxShadow,
         Children, Color, FlexDirection, GlobalZIndex, JustifyContent, Node, Overflow, PositionType,
         Scene, UiRect, UiTargetCamera, px,
     },
     scene::{CommandsSceneExt, bsn},
-    text::{FontSourceTemplate, TextFont},
+    text::{FontSourceTemplate, GenericFontFamily, TextFont},
+    ui_widgets::Button,
     window::RequestRedraw,
 };
 use weld_app::output::{OutputCompositionCamera, PrimaryOutput, WeldOutput};
@@ -102,7 +99,7 @@ impl Plugin for HoistUiPlugin {
 }
 
 fn request_action(
-    mut click: On<Pointer<Click>>,
+    mut click: On<PointerClick>,
     handles: Query<&HoistActionHandle>,
     mut reclaims: MessageWriter<ReclaimHoist>,
     mut dismissals: MessageWriter<DismissHoistTombstone>,
@@ -332,32 +329,29 @@ fn placeholder_scene(
             px(22),
         )
         Children [
-            (
+            Pickable::IGNORE
+            bevy::ui::widget::Text(message)
+            TextFont { font: FontSourceTemplate::Generic(GenericFontFamily::Monospace), font_size: px(20.0) }
+            bevy::text::TextColor(Color::srgb(0.88, 0.91, 0.96))
+            --
+            Button
+            AccessibleLabel::new(label)
+            template(move |_| Ok(HoistActionHandle { session, reclaim }))
+            Node {
+                width: px(132),
+                height: px(38),
+                margin: bevy::ui::UiRect::top(px(16)),
+                align_items: AlignItems::Center,
+                justify_content: JustifyContent::Center,
+                border_radius: BorderRadius::all(px(8)),
+            }
+            BackgroundColor(color)
+            Children [
                 Pickable::IGNORE
-                bevy::ui::widget::Text(message)
-                TextFont { font: FontSourceTemplate::Monospace, font_size: px(20.0) }
-                bevy::text::TextColor(Color::srgb(0.88, 0.91, 0.96))
-            ),
-            (
-                Button
-                AccessibleLabel::new(label)
-                template(move |_| Ok(HoistActionHandle { session, reclaim }))
-                Node {
-                    width: px(132),
-                    height: px(38),
-                    margin: bevy::ui::UiRect::top(px(16)),
-                    align_items: AlignItems::Center,
-                    justify_content: JustifyContent::Center,
-                    border_radius: BorderRadius::all(px(8)),
-                }
-                BackgroundColor(color)
-                Children [(
-                    Pickable::IGNORE
-                    bevy::ui::widget::Text(action)
-                    TextFont { font: FontSourceTemplate::Monospace, font_size: px(16.0) }
-                    bevy::text::TextColor(Color::WHITE)
-                )]
-            ),
+                bevy::ui::widget::Text(action)
+                TextFont { font: FontSourceTemplate::Generic(GenericFontFamily::Monospace), font_size: px(16.0) }
+                bevy::text::TextColor(Color::WHITE)
+            ]
         ]
     }
 }
@@ -371,7 +365,7 @@ mod tests {
         math::Vec2,
         picking::{
             backend::HitData,
-            events::{Click, Pointer},
+            events::{Pointer, PointerClick},
             pointer::{Location, PointerButton, PointerId},
         },
     };
@@ -393,20 +387,20 @@ mod tests {
             .id();
         let camera = app.world_mut().spawn_empty().id();
 
-        app.world_mut().trigger(Pointer::new(
-            PointerId::Mouse,
-            Location {
-                target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1)),
-                position: Vec2::ZERO,
-            },
-            Click {
-                button: PointerButton::Primary,
-                hit: HitData::new(camera, 0.0, None, None),
-                duration: std::time::Duration::ZERO,
-                count: 1,
-            },
-            button,
-        ));
+        app.world_mut().trigger(PointerClick {
+            entity: button,
+            pointer: Pointer::new(
+                PointerId::Mouse,
+                Location {
+                    target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1)),
+                    position: Vec2::ZERO,
+                },
+            ),
+            button: PointerButton::Primary,
+            hit: HitData::new(camera, 0.0, None, None),
+            duration: std::time::Duration::ZERO,
+            count: 1,
+        });
 
         assert_eq!(app.world().resource::<Messages<ReclaimHoist>>().len(), 1);
         assert_eq!(app.world().resource::<Messages<RequestRedraw>>().len(), 1);

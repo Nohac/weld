@@ -7,6 +7,7 @@ use bevy::{
     math::{UVec2, Vec2},
     picking::{
         backend::HitData,
+        events::Pointer,
         pointer::{Location, PointerId},
     },
     scene::ScenePlugin,
@@ -330,7 +331,7 @@ fn smart_outer_chrome_counts_a_tab_or_stack_group_as_one_frame() {
             .single(app.world())
             .expect("frame");
         assert_eq!(frame.border, UiRect::all(px(3)));
-        assert_ne!(frame.border_radius, BorderRadius::ZERO);
+        assert_ne!(frame.border_radius, BorderRadius::all(px(0)));
         assert_eq!(frame.left, px(8));
         assert!(app.world().get::<WindowInSoloFrame>(second).is_none());
         app.world_mut().despawn(neighbor);
@@ -350,7 +351,7 @@ fn smart_outer_chrome_counts_a_tab_or_stack_group_as_one_frame() {
             .single(app.world())
             .expect("frame");
         assert_eq!(frame.border, UiRect::all(px(3)));
-        assert_ne!(frame.border_radius, BorderRadius::ZERO);
+        assert_ne!(frame.border_radius, BorderRadius::all(px(0)));
         assert_eq!(frame.left, px(8));
     }
 }
@@ -364,7 +365,7 @@ fn assert_solo_group(app: &mut App, header_count: usize) {
     assert_eq!((frame.left, frame.top), (px(0), px(0)));
     assert_eq!((frame.width, frame.height), (px(800), px(600)));
     assert_eq!(frame.border, UiRect::all(px(0)));
-    assert_eq!(frame.border_radius, BorderRadius::ZERO);
+    assert_eq!(frame.border_radius, BorderRadius::all(px(0)));
     assert!(shadow.0.is_empty());
     let mut count = 0;
     for (header, node) in app
@@ -373,7 +374,7 @@ fn assert_solo_group(app: &mut App, header_count: usize) {
         .iter(app.world())
     {
         count += 1;
-        assert_eq!(node.border_radius, BorderRadius::ZERO);
+        assert_eq!(node.border_radius, BorderRadius::all(px(0)));
         assert!(app.world().get::<WindowInSoloFrame>(header.child).is_some());
         let body = app
             .world()
@@ -418,7 +419,7 @@ fn tab_and_stack_titles_use_system_fonts_and_follow_client_metadata() {
             assert_eq!(app.world().get::<Text>(label).expect("text").0, expected);
             assert_eq!(
                 app.world().get::<TextFont>(label).expect("font").font,
-                FontSource::SansSerif
+                FontSource::sans_serif()
             );
             assert_eq!(
                 app.world()
@@ -461,7 +462,7 @@ fn font_reload_updates_header_text_and_reserved_height_together() {
             .world()
             .get::<TextFont>(*children.first().expect("label"))
             .expect("font");
-        assert_eq!(font.font, FontSource::Serif);
+        assert_eq!(font.font, FontSource::serif());
         assert_eq!(font.font_size, bevy::text::FontSize::Px(24.0));
         assert_eq!(font.weight, FontWeight::BOLD);
         assert_eq!(font.style, FontStyle::Italic);
@@ -495,19 +496,19 @@ fn headers_select_hidden_windows_keep_identity_and_retire_on_split() {
         Some(&WindowVisibility::Hidden)
     );
     let camera = app.world().get::<UiTargetCamera>(header).expect("camera").0;
-    app.world_mut().trigger(Pointer::new(
-        PointerId::Mouse,
-        Location {
-            target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1)),
-            position: Vec2::new(10.0, 10.0),
-        },
-        Press {
-            count: 1,
-            button: PointerButton::Primary,
-            hit: HitData::new(camera, 0.0, None, None),
-        },
-        header,
-    ));
+    app.world_mut().trigger(PointerPress {
+        entity: header,
+        pointer: Pointer::new(
+            PointerId::Mouse,
+            Location {
+                target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1)),
+                position: Vec2::new(10.0, 10.0),
+            },
+        ),
+        count: 1,
+        button: PointerButton::Primary,
+        hit: HitData::new(camera, 0.0, None, None),
+    });
     app.update();
     assert_eq!(
         app.world().resource::<FocusedWindow>().entity(),
@@ -707,10 +708,10 @@ fn group_frame_reserves_one_perimeter_and_rounds_only_outer_header_corners() {
         .find(|(target, _)| target.child == second)
         .expect("second")
         .1;
-    assert_ne!(first_header.border_radius.top_left, px(0));
-    assert_eq!(first_header.border_radius.top_right, px(0));
-    assert_eq!(last_header.border_radius.top_left, px(0));
-    assert_ne!(last_header.border_radius.top_right, px(0));
+    assert_ne!(first_header.border_radius.top_left, px(0).into());
+    assert_eq!(first_header.border_radius.top_right, px(0).into());
+    assert_eq!(last_header.border_radius.top_left, px(0).into());
+    assert_ne!(last_header.border_radius.top_right, px(0).into());
     app.world_mut()
         .trigger(I3LayoutRequest::Set(TileLayout::Stacked));
     app.update();
@@ -730,10 +731,10 @@ fn group_frame_reserves_one_perimeter_and_rounds_only_outer_header_corners() {
         .find(|(target, _)| target.child == second)
         .expect("second")
         .1;
-    assert_ne!(first_header.border_radius.top_left, px(0));
-    assert_ne!(first_header.border_radius.top_right, px(0));
-    assert_eq!(last_header.border_radius.top_left, px(0));
-    assert_eq!(last_header.border_radius.top_right, px(0));
+    assert_ne!(first_header.border_radius.top_left, px(0).into());
+    assert_ne!(first_header.border_radius.top_right, px(0).into());
+    assert_eq!(last_header.border_radius.top_left, px(0).into());
+    assert_eq!(last_header.border_radius.top_right, px(0).into());
 }
 
 #[test]
@@ -792,7 +793,7 @@ fn nested_tab_and_stack_combinations_share_one_frame_and_keep_independent_header
                 .iter(app.world())
             {
                 if target.container == inner {
-                    assert_eq!(node.border_radius, BorderRadius::ZERO);
+                    assert_eq!(node.border_radius, BorderRadius::all(px(0)));
                 }
             }
             let inner_bounds = app.world().get::<TileGeometry>(inner).expect("bounds").0;
@@ -830,7 +831,7 @@ fn nested_tab_and_stack_combinations_share_one_frame_and_keep_independent_header
                     .query::<(&HeaderTarget, &Node)>()
                     .iter(app.world())
                     .any(|(target, node)| target.container == inner
-                        && node.border_radius.top_left != px(0))
+                        && node.border_radius.top_left != px(0).into())
             );
         }
     }

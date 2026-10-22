@@ -72,12 +72,10 @@ fn setup(mut commands: Commands) {
             align_items: AlignItems::End,
         }
         Children [
-            (
-                Status
-                Text::new("Weld Mobile")
-                TextFont { font_size: FontSize::Px(16.0) }
-                TextColor(Color::WHITE)
-            )
+            Status
+            Text::new("Weld Mobile")
+            TextFont { font_size: FontSize::Px(16.0) }
+            TextColor(Color::WHITE)
         ]
     });
     info!("Weld mobile presentation ready");

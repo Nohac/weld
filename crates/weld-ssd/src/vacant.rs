@@ -62,7 +62,7 @@ pub(super) fn scene(
             justify_content: JustifyContent::Center, overflow: Overflow::clip(),
         }
         BackgroundColor({colors.background})
-        Children [(
+        Children [
             template(move |_| Ok(VacantText(window)))
             Node { max_width: percent(100) }
             Text::new(label)
@@ -70,7 +70,7 @@ pub(super) fn scene(
             template(move |_| Ok(font.clone()))
             TextColor({colors.foreground})
             Pickable::IGNORE
-        )]
+        ]
     };
     window_scene(content, geometry)
 }

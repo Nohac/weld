@@ -179,7 +179,7 @@ fn classify_windows(mut commands: Commands, windows: Query<Entity, UnclassifiedW
 #[derive(Resource)]
 struct DefaultFloatManager(Entity);
 
-fn remove_floating(event: On<Remove, FloatingWindow>, mut commands: Commands) {
+fn remove_floating(event: On<Remove<FloatingWindow>>, mut commands: Commands) {
     commands
         .entity(event.entity)
         .try_remove::<(PointerInteractionControl, ResizeAnchor)>();
@@ -189,7 +189,7 @@ fn remove_floating(event: On<Remove, FloatingWindow>, mut commands: Commands) {
     });
 }
 
-fn clear_fullscreen_anchor(event: On<Add, WindowFullscreen>, mut commands: Commands) {
+fn clear_fullscreen_anchor(event: On<Add<WindowFullscreen>>, mut commands: Commands) {
     commands.entity(event.entity).try_remove::<ResizeAnchor>();
 }
 

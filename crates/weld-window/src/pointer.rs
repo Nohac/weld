@@ -34,7 +34,7 @@ use bevy::{
     math::Vec2,
     picking::{
         PickingSystems,
-        events::{Click, Pointer, Press},
+        events::{PointerClick, PointerPress},
         pointer::PointerButton,
     },
     window::RequestRedraw,
@@ -278,7 +278,7 @@ impl PointerTargets<'_, '_> {
 }
 
 fn activate_window(
-    mut press: On<Pointer<Press>>,
+    mut press: On<PointerPress>,
     capture: Res<ShortcutCapture>,
     targets: PointerTargets,
     mut commands: Commands,
@@ -299,7 +299,7 @@ fn activate_window(
 }
 
 fn begin_move_handle(
-    press: On<Pointer<Press>>,
+    press: On<PointerPress>,
     capture: Res<ShortcutCapture>,
     handles: Query<(), With<WindowMoveHandle>>,
     targets: PointerTargets,
@@ -324,7 +324,7 @@ fn begin_move_handle(
 }
 
 fn begin_resize_handle(
-    press: On<Pointer<Press>>,
+    press: On<PointerPress>,
     capture: Res<ShortcutCapture>,
     handles: Query<&WindowResizeHandle>,
     targets: PointerTargets,
@@ -351,7 +351,7 @@ fn begin_resize_handle(
 }
 
 fn close_window(
-    mut click: On<Pointer<Click>>,
+    mut click: On<PointerClick>,
     capture: Res<ShortcutCapture>,
     handles: Query<(), With<WindowCloseHandle>>,
     targets: PointerTargets,

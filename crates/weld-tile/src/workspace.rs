@@ -361,7 +361,7 @@ pub(crate) fn move_window(
 }
 
 pub(crate) fn removed(
-    event: On<Remove, TileWorkspace>,
+    event: On<Remove<TileWorkspace>>,
     mut editor: TreeEditor,
     owners: Query<(Entity, &ManagedBy)>,
 ) {

@@ -165,6 +165,7 @@ fn map_synthetic_client(shell: &mut benchmark::AppShell) {
         kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
             parent: None,
             decoration: WindowDecoration::ServerSide,
+            hints: Default::default(),
         })),
     }));
     std::hint::black_box(
@@ -255,6 +256,7 @@ fn pointer_events(count: usize) -> Vec<RawSeatEvent> {
                         400.0 + index as f64 * 0.25,
                         300.0 + index as f64 * 0.125,
                     ),
+                    relative: None,
                 },
                 u32::try_from(index).unwrap_or(u32::MAX),
             )
@@ -271,6 +273,7 @@ fn interleaved_pointer_events(motions: usize) -> Vec<RawSeatEvent> {
                     400.0 + index as f64 * 0.25,
                     300.0 + index as f64 * 0.125,
                 ),
+                relative: None,
             },
             u32::try_from(index.saturating_mul(2)).unwrap_or(u32::MAX),
         ));

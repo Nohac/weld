@@ -27,6 +27,7 @@ use weld_client::{ClientPointerRoute, InputPosition, MAX_TOUCH_CONTACTS, TouchEv
 #[derive(Resource)]
 struct Receiver(Session);
 #[derive(Resource, Clone, ExtractResource)]
+#[extract_app(RenderApp)]
 struct Stream {
     shared: Arc<Shared>,
     image: Handle<Image>,

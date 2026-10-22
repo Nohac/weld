@@ -6,9 +6,8 @@ description: Author or migrate Weld's Bevy 0.20 BSN scenes and UI composition. U
 # Compose Weld UI with BSN
 
 Read `CONTRIBUTING.md` and [bevy-020](../bevy-020/SKILL.md) first. Check the
-resolved Bevy version: the syntax below targets 0.20, while the repository
-remains on 0.19.1 until the dependency migration. Use the matching tagged
-examples for pre-migration maintenance.
+resolved Bevy version: the repository and syntax below target 0.20. Use the
+matching tagged examples when checking upstream APIs.
 
 ## Workflow
 
@@ -115,6 +114,9 @@ requirements of shared controls.
   `RemSize`; `em`/`rem` are useful for controls whose spacing follows typography.
 - Render-world paint hooks must account for retained nodes and invalidation;
   read the migration audit before changing the border-underlap hook.
+- Use `weld-svg::SvgImage` for SVG artwork. Its resvg raster cache follows the
+  node's physical size; use `Svg::parse_icon` and `ImageNode::color` for tintable
+  monochrome assets, or ordinary SVG loading to preserve artwork colors.
 
 ## Ownership and review
 

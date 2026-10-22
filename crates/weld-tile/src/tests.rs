@@ -678,7 +678,7 @@ fn border_press_drives_shared_motion_and_only_its_release_ends_resize() {
         ecs::hierarchy::ChildOf,
         picking::{
             backend::HitData,
-            events::{Pointer, Press},
+            events::{Pointer, PointerPress},
             pointer::{Location, PointerButton, PointerId},
         },
     };
@@ -706,22 +706,22 @@ fn border_press_drives_shared_motion_and_only_its_release_ends_resize() {
         state: ButtonState::Pressed,
         window: Entity::PLACEHOLDER,
     });
-    app.world_mut().trigger(Pointer::new(
-        PointerId::Mouse,
-        Location {
-            target: NormalizedRenderTarget::None {
-                width: 800,
-                height: 600,
+    app.world_mut().trigger(PointerPress {
+        entity: handle,
+        pointer: Pointer::new(
+            PointerId::Mouse,
+            Location {
+                target: NormalizedRenderTarget::None {
+                    width: 800,
+                    height: 600,
+                },
+                position: Vec2::new(400.0, 200.0),
             },
-            position: Vec2::new(400.0, 200.0),
-        },
-        Press {
-            button: PointerButton::Primary,
-            hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
-            count: 1,
-        },
-        handle,
-    ));
+        ),
+        button: PointerButton::Primary,
+        hit: HitData::new(Entity::PLACEHOLDER, 0.0, None, None),
+        count: 1,
+    });
     app.update();
     app.world_mut().write_message(MouseMotion {
         delta: Vec2::new(60.0, 0.0),
