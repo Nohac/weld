@@ -1,12 +1,17 @@
 use super::*;
+use bevy::{asset::AssetApp, scene::ScenePlugin, window::RequestRedraw};
 use weld_app::{
-    output::{OutputGeometry, OutputId, PrimaryOutput, WeldOutput},
-    surface::{ClientSource, ClientToplevel, MappedSurface, SurfaceActionQueue},
+    output::{OutputGeometry, OutputId, OutputPosition, PrimaryOutput, WeldOutput},
+    surface::{
+        ClientDecorated, ClientSource, ClientToplevel, MappedSurface, SurfaceActionQueue,
+        SurfacePlugin,
+    },
 };
 use weld_client::{ClientProvenance, ClientSurfaceMetadata};
 use weld_i3_quirks::{I3QuirksPlugin, workspace::I3WorkspaceRequest};
 use weld_window::{
-    FocusedWindow, ManagedBy, OccupiesWindow, WindowPlugin, workspace::WorkspaceMember,
+    FocusedWindow, ManagedBy, OccupiesWindow, PrimaryWindowPresentation, WindowHeaderRequested,
+    WindowOccupant, WindowOutput, WindowPlugin, workspace::WorkspaceMember,
 };
 
 fn fixture() -> (App, mpsc::SyncSender<LaunchMessage>) {
@@ -177,6 +182,122 @@ fn headless_launch_stays_out_of_layout_and_dismiss_keeps_occupancy() {
         app.world().get::<WindowVisibility>(window),
         Some(&WindowVisibility::Hidden)
     );
+}
+
+#[test]
+fn headless_presentations_follow_peek_dismiss_and_output_availability() {
+    for controlled_header in [false, true] {
+        let (mut app, sender) = fixture();
+        app.add_plugins((
+            bevy::app::TaskPoolPlugin::default(),
+            AssetPlugin::default(),
+            ScenePlugin,
+        ))
+        .init_asset::<bevy::shader::Shader>()
+        .insert_resource(Assets::<Image>::default())
+        .insert_resource(UiScale(1.0))
+        .add_message::<RequestRedraw>()
+        .add_plugins((
+            SurfacePlugin,
+            weld_window_ui::WindowUiPlugin,
+            weld_ssd::SsdPlugin,
+        ));
+        prepare_launch(
+            &mut app,
+            &sender,
+            LaunchOptions {
+                headless: true,
+                control: true,
+                ..Default::default()
+            },
+        );
+        let window = map(&mut app, 2, Some(17));
+        let occupant = app
+            .world()
+            .get::<WindowOccupant>(window)
+            .expect("occupant")
+            .entity();
+        app.world_mut().entity_mut(occupant).insert(ClientDecorated);
+        if controlled_header {
+            app.world_mut()
+                .entity_mut(window)
+                .insert(WindowHeaderRequested);
+        }
+        app.update();
+        let root = app
+            .world()
+            .get::<PrimaryWindowPresentation>(window)
+            .expect("presentation")
+            .entity();
+        assert!(app.world().get::<WindowOutput>(window).is_none());
+        assert_eq!(
+            app.world()
+                .get::<Node>(root)
+                .expect("initial frame")
+                .display,
+            Display::None
+        );
+
+        for _ in 0..2 {
+            app.world_mut()
+                .entity_mut(window)
+                .remove::<WindowManagementHold>();
+            app.world_mut().trigger(I3WindowWorkspaceRequest {
+                window,
+                target: WorkspaceTarget::Current,
+            });
+            app.update();
+            assert_eq!(
+                app.world().get::<Node>(root).expect("peek frame").display,
+                Display::Flex
+            );
+            let output = app.world().get::<WindowOutput>(window).expect("output").0;
+            app.world_mut()
+                .entity_mut(output)
+                .remove::<OutputPosition>();
+            app.update();
+            assert_eq!(
+                app.world()
+                    .get::<Node>(root)
+                    .expect("unavailable output")
+                    .display,
+                Display::None
+            );
+            app.world_mut()
+                .entity_mut(output)
+                .insert(OutputPosition::default());
+            app.update();
+            assert_eq!(
+                app.world()
+                    .get::<Node>(root)
+                    .expect("restored output")
+                    .display,
+                Display::Flex
+            );
+
+            app.world_mut().trigger(weld_window::WindowCommand {
+                window,
+                kind: weld_window::WindowCommandKind::Close,
+            });
+            app.update();
+            assert!(app.world().get::<WindowOutput>(window).is_none());
+            assert!(app.world().get::<ManagedBy>(window).is_none());
+            assert_eq!(
+                app.world()
+                    .get::<Node>(root)
+                    .expect("dismissed frame")
+                    .display,
+                Display::None
+            );
+            assert_eq!(
+                app.world()
+                    .get::<WindowOccupant>(window)
+                    .expect("retained app")
+                    .entity(),
+                occupant
+            );
+        }
+    }
 }
 
 #[test]

@@ -61,6 +61,10 @@ header. Its local frame clips the independent application viewport. Closing or
 hiding that peek removes the local view while the application and control ID survive.
 Repeated peek/hide operations preserve the viewport.
 
+Local frames start hidden and become drawable after window/output reconciliation.
+Removing their output assignment or losing output geometry hides the complete
+presentation, including its decorations and surface content.
+
 A matching persistent slot retains its placement and becomes the local peek,
 including for a headless launch. Its existing close-and-placeholder behavior applies.
 Manual permission changes remain effective; automatic admission runs once per
@@ -107,6 +111,9 @@ Logs live under `target/validation/control-launch-*`.
 The attributed test exercises a launcher exiting before its child connects,
 background-workspace placement, owner/launch filtering, automatic headless control,
 keyboard delivery, resize, pixel capture, repeat peek/dismiss and global revocation.
+The launch/UI regression also checks actual frame visibility for client- and
+server-decorated windows through initial headless admission, repeated peek/close,
+and output-geometry loss/restoration.
 Policy tests additionally cover switching away after capturing `workspace current`,
 multiple connections, and keeping a revoked launch disabled for delayed windows.
 

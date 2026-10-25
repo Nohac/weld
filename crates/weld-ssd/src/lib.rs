@@ -690,6 +690,7 @@ fn window_scene(content: impl SceneList, style: FrameGeometry) -> impl Scene {
         #FrameRoot
         BorderUnderlap(#Body)
         Node {
+            display: Display::None,
             position_type: PositionType::Absolute,
             flex_direction: FlexDirection::Column,
             border: UiRect::all(px(style.border.width())),

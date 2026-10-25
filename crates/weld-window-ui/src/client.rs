@@ -4,7 +4,7 @@ use bevy::{
     color::Color,
     ecs::{component::Component, template::template},
     picking::Pickable,
-    prelude::{BoxShadow, Children, Node, PositionType, Scene, px},
+    prelude::{BoxShadow, Children, Display, Node, PositionType, Scene, px},
     scene::bsn,
 };
 use weld_app::surface::{SurfaceId, SurfaceView};
@@ -17,7 +17,7 @@ pub(crate) struct ClientWindowPresentation;
 pub(crate) fn scene(surface: SurfaceId) -> impl Scene {
     let content = surface_content(surface, SurfaceView::FullSurface);
     bsn! {
-        Node { position_type: PositionType::Absolute }
+        Node { display: Display::None, position_type: PositionType::Absolute }
         Pickable::IGNORE
         template(|_| Ok(fallback_shadow()))
         Children [{content}]

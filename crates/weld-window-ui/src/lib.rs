@@ -14,6 +14,7 @@ pub use mount::{surface_content, surface_content_with_node};
 use bevy::{
     app::{App, Plugin, PreUpdate},
     ecs::{
+        change_detection::DetectChangesMut,
         component::Component,
         entity::Entity,
         hierarchy::ChildOf,
@@ -424,12 +425,18 @@ fn sync_window_roots(
         let Ok((geometry, home, visibility, window_z, vacancy, occupant, occluded, persistent)) =
             windows.get(projection.window())
         else {
+            changed |= node
+                .map_unchanged(|node| &mut node.display)
+                .set_if_neq(Display::None);
             continue;
         };
         let (Ok(home_position), Ok(target_position)) = (
             output_positions.get(home.0),
             output_positions.get(projection.output()),
         ) else {
+            changed |= node
+                .map_unchanged(|node| &mut node.display)
+                .set_if_neq(Display::None);
             continue;
         };
         let presentable = occupant.map_or(
