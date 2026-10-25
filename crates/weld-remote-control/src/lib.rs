@@ -202,6 +202,16 @@ impl ViewPermission {
 }
 
 impl Grant {
+    /// Whether local interaction has released this live grant's input.
+    pub fn remote_input_available(&self) -> bool {
+        self.active()
+            && self
+                .state
+                .input_epoch
+                .load(Ordering::Acquire)
+                .is_multiple_of(2)
+    }
+
     /// The native relay has drained held remote input for the current local takeover.
     pub fn local_input_ready(&self) -> bool {
         let epoch = self.state.input_epoch.load(Ordering::Acquire);

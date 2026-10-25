@@ -274,6 +274,7 @@ def check_windows(ctl, control, host, run, display, accessibility_app, text_app,
                 "window_scale",
                 "window_type_text",
                 "window_input",
+                "window_request_control",
                 "window_accessibility",
                 "window_peek",
             }

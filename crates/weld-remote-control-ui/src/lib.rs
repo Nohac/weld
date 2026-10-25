@@ -28,6 +28,12 @@ pub struct RemoteControlPanel(pub Capabilities);
 #[derive(Component)]
 pub struct LocalInteractionActive;
 
+/// A remote controller is waiting for the local user to release input.
+#[derive(Component, Default)]
+pub struct ControlRequested;
+
+const REQUEST_COLOR: Color = Color::srgb(0.94, 0.20, 0.20);
+
 /// User request to toggle one permission; the control owner validates the live grant.
 #[derive(Event)]
 pub struct ToggleCapability {
@@ -95,7 +101,7 @@ struct ControlButton {
 }
 
 #[derive(Component, Clone, Default)]
-struct PermissionLabel(Option<bool>);
+struct PermissionLabel(Option<(bool, bool)>);
 
 #[derive(Component)]
 struct HeaderTitle(Entity);
@@ -347,7 +353,11 @@ fn sync_titles(
 
 fn sync_buttons(
     mut commands: Commands,
-    controls: Query<(&RemoteControlPanel, Has<LocalInteractionActive>)>,
+    controls: Query<(
+        &RemoteControlPanel,
+        Has<LocalInteractionActive>,
+        Has<ControlRequested>,
+    )>,
     palette: WindowFrameColors,
     mut buttons: Query<(
         Entity,
@@ -358,31 +368,37 @@ fn sync_buttons(
     )>,
 ) {
     for (entity, button, mut border, mut background, mut label) in &mut buttons {
-        let Ok((control, local)) = controls.get(button.window) else {
+        let Ok((control, local, requested)) = controls.get(button.window) else {
             continue;
         };
         let enabled = button.action.enabled(control.0, local);
+        let requested = requested && matches!(button.action, Action::Interact);
         let colors = palette.palette(button.window);
-        background.set_if_neq(BackgroundColor(
-            if matches!(button.action, Action::Interact) && local {
-                colors.indicator.with_alpha(0.25)
-            } else {
-                Color::NONE
-            },
-        ));
-        border.set_if_neq(BorderColor::all(if enabled {
+        background.set_if_neq(BackgroundColor(if requested {
+            REQUEST_COLOR.with_alpha(0.25)
+        } else if matches!(button.action, Action::Interact) && local {
+            colors.indicator.with_alpha(0.25)
+        } else {
+            Color::NONE
+        }));
+        border.set_if_neq(BorderColor::all(if requested {
+            REQUEST_COLOR
+        } else if enabled {
             colors.indicator
         } else {
             Color::NONE
         }));
         let suffix = if enabled { "enabled" } else { "disabled" };
-        if label.0 == Some(enabled) {
+        if label.0 == Some((enabled, requested)) {
             continue;
         }
-        label.0 = Some(enabled);
+        label.0 = Some((enabled, requested));
         let value = match button.action {
             Action::Toggle(_) => format!("Remote {}: {}", button.action.label(), suffix),
             Action::TakeBack => "Take back control".into(),
+            Action::Interact if requested => {
+                "Remote control requested: release local interaction to hand over".into()
+            }
             Action::Interact => format!("Local interaction: {suffix}"),
             Action::Fit => "Fit app to frame".into(),
             Action::Copy => "Copy remote control ID".into(),
@@ -404,19 +420,27 @@ type Foregrounds<'w, 's> = Query<
 >;
 
 fn sync_foregrounds(
-    controls: Query<(&RemoteControlPanel, Has<LocalInteractionActive>)>,
+    controls: Query<(
+        &RemoteControlPanel,
+        Has<LocalInteractionActive>,
+        Has<ControlRequested>,
+    )>,
     palette: WindowFrameColors,
     settings: Res<SsdSettings>,
     geometry: Query<&WindowGeometry>,
     mut foregrounds: Foregrounds,
 ) {
     for (ButtonForeground(button), image, color, font, mut node) in &mut foregrounds {
-        let Ok((control, local)) = controls.get(button.window) else {
+        let Ok((control, local, requested)) = controls.get(button.window) else {
             continue;
         };
         let enabled = matches!(button.action, Action::TakeBack | Action::Fit | Action::Copy)
             || button.action.enabled(control.0, local);
-        let tint = foreground(palette.palette(button.window), enabled);
+        let tint = if requested && matches!(button.action, Action::Interact) {
+            REQUEST_COLOR
+        } else {
+            foreground(palette.palette(button.window), enabled)
+        };
         if let Some(mut image) = image
             && image.color != tint
         {
@@ -580,6 +604,43 @@ mod tests {
                 active
             );
         }
+        app.world_mut()
+            .entity_mut(window)
+            .insert((LocalInteractionActive, ControlRequested));
+        app.update();
+        assert_eq!(
+            app.world().get::<BorderColor>(interact),
+            Some(&BorderColor::all(REQUEST_COLOR))
+        );
+        assert_eq!(
+            app.world().get::<BackgroundColor>(interact),
+            Some(&BackgroundColor(REQUEST_COLOR.with_alpha(0.25)))
+        );
+        assert!(
+            app.world()
+                .get::<AccessibleLabel>(interact)
+                .expect("request label")
+                .0
+                .contains("requested")
+        );
+        assert!(
+            app.world().get::<LocalInteractionActive>(window).is_some(),
+            "notification preserves local ownership"
+        );
+        app.world_mut()
+            .entity_mut(window)
+            .remove::<ControlRequested>();
+        app.update();
+        assert_eq!(
+            app.world()
+                .get::<AccessibleLabel>(interact)
+                .expect("normal label")
+                .0,
+            "Local interaction: enabled"
+        );
+        app.world_mut()
+            .entity_mut(window)
+            .remove::<LocalInteractionActive>();
         app.world_mut()
             .entity_mut(window)
             .insert(RemoteControlPanel(Capabilities::default()));

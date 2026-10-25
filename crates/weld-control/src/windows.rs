@@ -1,12 +1,19 @@
 //! Native window queries shared by generated RPC dispatch and the command client.
 
+#[cfg(test)]
+mod tests;
+
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
 use std::{
     fmt,
     path::PathBuf,
-    sync::{Arc, Mutex, mpsc},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering},
+        mpsc,
+    },
     time::{Duration, Instant},
 };
 use tokio::sync::{Semaphore, watch};
@@ -74,7 +81,12 @@ pub struct WindowService {
     accessibility_calls: Arc<Semaphore>,
 }
 
-type Administrator = Arc<dyn Fn(String, ControlAction) -> Result<(), String> + Send + Sync>;
+type Administrator = Arc<dyn Fn(ControlCommand, Duration) -> Result<(), String> + Send + Sync>;
+
+pub enum ControlCommand {
+    Configure { id: String, action: ControlAction },
+    RequestInput { control: String },
+}
 
 #[derive(Clone, Copy)]
 pub enum ControlAction {
@@ -85,10 +97,36 @@ pub enum ControlAction {
 }
 
 pub struct ControlRequest {
-    pub id: String,
-    pub action: ControlAction,
+    pub command: ControlCommand,
     pub deadline: Instant,
+    pub cancelled: Arc<AtomicBool>,
     pub completion: mpsc::SyncSender<Result<(), String>>,
+}
+
+fn administration_channel(
+    wake: impl Fn() + Send + Sync + 'static,
+) -> (Administrator, mpsc::Receiver<ControlRequest>) {
+    let (sender, requests) = mpsc::sync_channel(16);
+    let administrator: Administrator = Arc::new(move |command, timeout| {
+        let (completion, response) = mpsc::sync_channel(1);
+        let cancelled = Arc::new(AtomicBool::new(false));
+        sender
+            .try_send(ControlRequest {
+                command,
+                deadline: Instant::now() + timeout,
+                cancelled: cancelled.clone(),
+                completion,
+            })
+            .map_err(|_| "window administration busy or unavailable")?;
+        wake();
+        let result = response.recv_timeout(timeout);
+        if result.is_err() {
+            cancelled.store(true, Ordering::Release);
+            wake();
+        }
+        result.map_err(|_| "window control request timed out or closed")?
+    });
+    (administrator, requests)
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, JsonSchema)]
@@ -123,7 +161,6 @@ impl WindowService {
         controller: RemoteControlClient,
         wake: impl Fn() + Send + Sync + 'static,
     ) -> Result<mpsc::Receiver<ControlRequest>, String> {
-        let (sender, requests) = mpsc::sync_channel(16);
         if let Err(error) = std::thread::Builder::new()
             .name("weld-accessibility-enable".into())
             .spawn(|| {
@@ -143,25 +180,11 @@ impl WindowService {
             .controller
             .lock()
             .map_err(|_| "controller service unavailable")? = Some(controller);
+        let (administrator, requests) = administration_channel(wake);
         *self
             .administrator
             .lock()
-            .map_err(|_| "controller administration unavailable")? =
-            Some(Arc::new(move |id, action| {
-                let (completion, response) = mpsc::sync_channel(1);
-                sender
-                    .try_send(ControlRequest {
-                        id,
-                        action,
-                        deadline: Instant::now() + Duration::from_secs(3),
-                        completion,
-                    })
-                    .map_err(|_| "window administration busy or unavailable")?;
-                wake();
-                response
-                    .recv_timeout(Duration::from_secs(4))
-                    .map_err(|_| "window administration timed out")?
-            }));
+            .map_err(|_| "controller administration unavailable")? = Some(administrator);
         Ok(requests)
     }
 
@@ -210,14 +233,25 @@ impl WindowService {
     }
 
     fn administer(&self, id: String, action: ControlAction) -> Result<String, String> {
+        self.send_administration(
+            ControlCommand::Configure { id, action },
+            Duration::from_secs(3),
+        )?;
+        Ok("accepted".into())
+    }
+
+    fn send_administration(
+        &self,
+        command: ControlCommand,
+        timeout: Duration,
+    ) -> Result<(), String> {
         let administrator = self
             .administrator
             .lock()
             .map_err(|_| "control administration unavailable")?
             .clone()
             .ok_or("remote control unavailable")?;
-        administrator(id, action)?;
-        Ok("accepted".into())
+        administrator(command, timeout)
     }
 
     pub(crate) fn close(&self) {
@@ -254,6 +288,24 @@ impl WindowService {
 
 #[server_less::jsonrpc]
 impl WindowService {
+    /// Ask the local user to release an existing control grant's input. Waits until available or timeout (default/max 30000ms). Permissions and ownership remain under local control.
+    pub fn request_control(
+        &self,
+        control: String,
+        timeout_ms: Option<u32>,
+    ) -> Result<String, String> {
+        let timeout = timeout_ms.unwrap_or(30_000);
+        if !(1..=30_000).contains(&timeout) {
+            return Err("timeout_ms must be between 1 and 30000".into());
+        }
+        let control = self.resolve_control(control)?;
+        self.send_administration(
+            ControlCommand::RequestInput { control },
+            Duration::from_millis(u64::from(timeout)),
+        )?;
+        Ok("remote input available".into())
+    }
+
     /// Enable or revoke remote control through the local administrative CLI.
     pub fn control(&self, id: String, enabled: bool) -> Result<String, String> {
         self.administer(
@@ -695,6 +747,17 @@ impl WindowClient {
     /// Type a full Unicode string (1–4096 UTF-8 bytes) into a native Wayland window without changing the clipboard. Newlines press Enter; tabs press Tab. No implicit Enter is added. Release held remote keys first. XWayland is unsupported.
     pub fn type_text(&self, control: String, text: String) -> Result<InputReceipt, String> {
         self.request("type_text", json!({"control":control,"text":text}))
+    }
+    /// Ask the local user to release input for an existing control ID or slot shorthand. Highlights Interact and waits up to timeout_ms (default/max 30000), returning immediately when remote input becomes available. Timeout, revocation or occupant replacement ends the wait. Local ownership and permissions change only through the user's existing controls.
+    pub fn request_control(
+        &self,
+        control: String,
+        timeout_ms: Option<u32>,
+    ) -> Result<String, String> {
+        self.request(
+            "request_control",
+            json!({"control":control,"timeout_ms":timeout_ms}),
+        )
     }
     /// Run 1–64 compact rows: ["p",keys,hold_ms?,gap_ms?] presses/releases; ["d",keys,gap_ms?] holds; ["u",keys,gap_ms?] releases; ["w",ms] waits; ["t",text] types. keys is one evdev number/XKB name or a list of up to 16; groups dispatch together. Omitted/null timings use key_hold_ms/key_interval_ms; typing_interval_ms paces text characters. Global timings are 0–1000ms, default 0. Use a nonzero hold for frame-polled games. Total planned duration ≤25s, text ≤4096 bytes. Balance downs/ups within the call and release before text. Interruption retires held remote input. Text requires native Wayland; keys also support XWayland. Returns completed progress; inspect application reactions separately.
     pub fn input(

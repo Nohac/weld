@@ -1,4 +1,8 @@
 use super::*;
+use std::{
+    sync::{Arc, atomic::AtomicBool},
+    time::Duration,
+};
 use weld_access::AccessAuthority;
 use weld_app::surface::{
     ClientDecorated, ClientSource, ClientWindowMetadata, SurfaceActionQueue, SurfaceId,
@@ -49,11 +53,200 @@ fn fixture() -> (App, ClientAdapterRegistration) {
         )
         .add_systems(
             PreUpdate,
-            (sync_local_interaction, block_local_input)
+            (
+                sync_local_interaction,
+                block_local_input,
+                request::complete_requests,
+            )
                 .chain()
                 .after(WindowSystems::UiReconcile),
         );
     (app, adapter)
+}
+
+#[test]
+fn control_request_waits_for_user_handoff_without_changing_permissions() {
+    let (mut app, _adapter) = fixture();
+    let sender = control_request_channel(&mut app);
+    let (_, window) = occupant(&mut app, 930);
+    app.world_mut().trigger(ToggleControl(window));
+    app.update();
+    app.world_mut().trigger(ToggleLocalInteraction(window));
+    app.update();
+    let control = app
+        .world()
+        .get::<ControlledWindow>(window)
+        .expect("grant")
+        .0
+        .id()
+        .to_owned();
+    let (completion, response) = mpsc::sync_channel(1);
+    assert!(
+        sender
+            .try_send(ControlRequest {
+                command: ControlCommand::RequestInput {
+                    control: control.clone()
+                },
+                deadline: Instant::now() + std::time::Duration::from_secs(5),
+                cancelled: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+                completion,
+            })
+            .is_ok()
+    );
+    app.update();
+    assert!(matches!(
+        response.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+    assert!(app.world().get::<ControlRequested>(window).is_some());
+    assert!(
+        app.world()
+            .get::<ControlPolicy>(window)
+            .expect("policy")
+            .local
+    );
+    assert_eq!(
+        app.world()
+            .get::<ControlledWindow>(window)
+            .expect("grant")
+            .0
+            .capabilities(),
+        Capabilities::ALL
+    );
+    let duplicate = request_input(&sender, &control, Arc::new(AtomicBool::new(false)));
+    app.update();
+    assert!(
+        duplicate
+            .try_recv()
+            .expect("duplicate response")
+            .expect_err("already pending")
+            .contains("already pending")
+    );
+    assert!(matches!(
+        response.try_recv(),
+        Err(mpsc::TryRecvError::Empty)
+    ));
+    app.world_mut().trigger(ToggleLocalInteraction(window));
+    app.update();
+    response
+        .try_recv()
+        .expect("immediate handoff notification")
+        .expect("available");
+    assert!(app.world().get::<ControlRequested>(window).is_none());
+    assert_eq!(
+        app.world()
+            .get::<ControlledWindow>(window)
+            .expect("same grant")
+            .0
+            .id(),
+        control
+    );
+    let available = request_input(&sender, &control, Arc::new(AtomicBool::new(false)));
+    app.update();
+    available
+        .try_recv()
+        .expect("already available")
+        .expect("success");
+    assert!(app.world().get::<ControlRequested>(window).is_none());
+    app.world_mut().trigger(TakeBack(window));
+    app.update();
+    let stale = request_input(&sender, &control, Arc::new(AtomicBool::new(false)));
+    app.update();
+    assert!(stale.try_recv().expect("stale response").is_err());
+    assert!(app.world().get::<ControlledWindow>(window).is_none());
+}
+
+enum RequestInterruption {
+    Cancelled,
+    Replaced,
+    Revoked,
+    Destroyed,
+}
+
+#[test]
+fn control_request_cancellation_replacement_and_revocation_remove_attention() {
+    for interruption in [
+        RequestInterruption::Cancelled,
+        RequestInterruption::Replaced,
+        RequestInterruption::Revoked,
+        RequestInterruption::Destroyed,
+    ] {
+        let (mut app, _adapter) = fixture();
+        let sender = control_request_channel(&mut app);
+        let (_, window) = occupant(&mut app, 931);
+        app.world_mut().trigger(ToggleControl(window));
+        app.update();
+        app.world_mut().trigger(ToggleLocalInteraction(window));
+        app.update();
+        let control = app
+            .world()
+            .get::<ControlledWindow>(window)
+            .expect("grant")
+            .0
+            .id()
+            .to_owned();
+        let cancelled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let (completion, response) = mpsc::sync_channel(1);
+        assert!(
+            sender
+                .try_send(ControlRequest {
+                    command: ControlCommand::RequestInput { control },
+                    deadline: Instant::now() + std::time::Duration::from_secs(5),
+                    cancelled: cancelled.clone(),
+                    completion,
+                })
+                .is_ok()
+        );
+        app.update();
+        assert!(app.world().get::<ControlRequested>(window).is_some());
+        match interruption {
+            RequestInterruption::Cancelled => cancelled.store(true, Ordering::Release),
+            RequestInterruption::Replaced => app.world_mut().trigger(ToggleCapability {
+                window,
+                capability: Capability::Resize,
+            }),
+            RequestInterruption::Revoked => app.world_mut().trigger(TakeBack(window)),
+            RequestInterruption::Destroyed => {
+                app.world_mut().despawn(window);
+            }
+        }
+        app.update();
+        assert!(response.try_recv().expect("request resolved").is_err());
+        assert!(app.world().get::<ControlRequested>(window).is_none());
+    }
+}
+
+fn request_input(
+    sender: &mpsc::SyncSender<ControlRequest>,
+    control: &str,
+    cancelled: Arc<AtomicBool>,
+) -> mpsc::Receiver<Result<(), String>> {
+    let (completion, response) = mpsc::sync_channel(1);
+    assert!(
+        sender
+            .try_send(ControlRequest {
+                command: ControlCommand::RequestInput {
+                    control: control.into()
+                },
+                deadline: Instant::now() + Duration::from_secs(5),
+                cancelled,
+                completion,
+            })
+            .is_ok()
+    );
+    response
+}
+
+fn control_request_channel(app: &mut App) -> mpsc::SyncSender<ControlRequest> {
+    let (sender, requests) = mpsc::sync_channel(16);
+    app.insert_resource(Administration(Mutex::new(requests)))
+        .add_systems(
+            PreUpdate,
+            administer
+                .after(reconcile)
+                .before(WindowSystems::PresentationRevoke),
+        );
+    sender
 }
 
 #[test]

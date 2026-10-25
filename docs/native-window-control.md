@@ -258,6 +258,29 @@ checkpoints per controlled application are available. Retired or expired checkpo
 fail explicitly. Expired operations fail, and callers must not automatically retry
 uncertain input.
 
+### Requesting local handoff
+
+An agent with an existing control ID can call `window_request_control` with
+`{"control":"CONTROL_ID"}`. The call waits for remote input availability for up
+to 30 seconds, returning immediately when the local user releases interaction.
+`timeout_ms` selects a shorter wait (1–30000 ms). The CLI uses the same path:
+
+```sh
+weldctl window request-control --control CONTROL_ID --timeout-ms 30000
+```
+
+While waiting, **Interact** has a red border, background accent and icon/text.
+The user hands over with the normal interaction toggle or by releasing the quick
+interaction chord. The request preserves permissions, focus and viewport ownership.
+An already-available grant returns immediately. Each window accepts one pending
+wait; duplicate requests return a busy error.
+
+Timeout, revocation, permission/grant replacement or window destruction ends the
+wait and clears the indicator. Persistent-slot shorthands resolve once to the
+current control incarnation. Expiry wakes the compositor for cleanup; idle
+requests use no repaint timer. All subsequent input retains the normal live
+permission and ownership checks. Workspace/tab urgency is a follow-up integration.
+
 ## Native testing loop
 
 For automatic authorization, use `weldctl run --control --owner agent --headless -- PROGRAM ...`

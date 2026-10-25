@@ -49,6 +49,11 @@ Weld is a workspace of reusable layers and one standard distribution:
   On-demand native GPU snapshots reuse source composition and asynchronous
   readback, retaining input leases until sampling completes. See
   [Native window control](native-window-control.md).
+  Local handoff requests pass through the bounded control administration channel.
+  The distribution owns an occupant-scoped pending response and completes it when
+  local input is released. RPC timeout cancels the request and wakes policy cleanup;
+  dropping a pending window request completes its waiter. The UI consumes a
+  `ControlRequested` marker for the Interact-button attention state.
 - `weld-remote-control-ui` mounts capability controls into SSD's `FrameHeader`
   using child relationships. The distribution publishes the active grant's
   permissions and handles UI requests; the native control owner enforces them.

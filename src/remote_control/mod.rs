@@ -1,5 +1,6 @@
 //! Remote control grants bind native input/capture to an occupied desktop slot.
 
+mod request;
 #[cfg(test)]
 mod tests;
 
@@ -8,8 +9,9 @@ use anyhow::{Context as ContextExt, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use bevy::{ecs::system::SystemParam, picking::PickingSystems, prelude::*};
 use std::{
+    collections::HashSet,
     path::PathBuf,
-    sync::{Mutex, mpsc},
+    sync::{Mutex, atomic::Ordering, mpsc},
     time::Instant,
 };
 use weld_app::{
@@ -21,7 +23,7 @@ use weld_app::{
     },
 };
 use weld_client::{ClientSourceId, ComposedBuffer, ToplevelLayout};
-use weld_control::windows::{ControlAction, ControlRequest, WindowService};
+use weld_control::windows::{ControlAction, ControlCommand, ControlRequest, WindowService};
 use weld_core::{
     WAYLAND_CLIENT_SOURCE,
     dmabuf::composition::{SourceCapture, SourceCaptureTask},
@@ -31,8 +33,8 @@ use weld_hoist::HoistedWindow;
 use weld_remote_control::{Capabilities, Capture, CaptureJob, Grant, RemoteControlClient};
 pub(crate) use weld_remote_control_ui::ToggleLocalInteraction;
 use weld_remote_control_ui::{
-    CopyControlKey, FitToFrame, LocalInteractionActive, RemoteControlPanel, TakeBack,
-    ToggleCapability,
+    ControlRequested, CopyControlKey, FitToFrame, LocalInteractionActive, RemoteControlPanel,
+    TakeBack, ToggleCapability,
 };
 use weld_window::{
     FocusedWindow, ManagedWindow, PresentationInsets, PrimaryWindowPresentation,
@@ -119,7 +121,11 @@ pub(crate) fn install(app: &mut WeldApp, service: &WindowService) -> Result<()> 
         )
         .add_systems(
             PreUpdate,
-            (sync_local_interaction, block_local_input)
+            (
+                sync_local_interaction,
+                block_local_input,
+                request::complete_requests,
+            )
                 .chain()
                 .after(WindowSystems::UiReconcile)
                 .before(PickingSystems::Backend),
@@ -356,24 +362,67 @@ fn take_back(event: On<TakeBack>, mut grants: Grants) {
 fn administer(
     requests: Res<Administration>,
     windows: Query<(Entity, &ManagedWindow)>,
+    controlled: Query<(Entity, &ControlledWindow)>,
+    pending: Query<(), With<request::PendingInputRequest>>,
     mut grants: Grants,
+    mut redraw: MessageWriter<bevy::window::RequestRedraw>,
 ) {
     let Ok(requests) = requests.0.lock() else {
         return;
     };
+    let mut admitted = HashSet::new();
     for request in requests.try_iter().take(16) {
-        let result = if request.deadline <= Instant::now() {
+        let result = if request.deadline <= Instant::now()
+            || request.cancelled.load(Ordering::Acquire)
+        {
             Err(anyhow::anyhow!("window administration expired"))
         } else {
-            windows
-                .iter()
-                .find(|(_, window)| window.id.raw().to_string() == request.id)
-                .context("window unavailable")
-                .and_then(|(entity, _)| grants.set(entity, request.action))
+            match request.command {
+                ControlCommand::Configure { id, action } => windows
+                    .iter()
+                    .find(|(_, window)| window.id.raw().to_string() == id)
+                    .context("window unavailable")
+                    .and_then(|(entity, _)| grants.set(entity, action)),
+                ControlCommand::RequestInput { control } => {
+                    let target = controlled
+                        .iter()
+                        .find(|(_, grant)| grant.0.id() == control && grant.0.active());
+                    match target {
+                        None => Err(anyhow::anyhow!(
+                            "window control is unavailable or was replaced"
+                        )),
+                        Some((window, _))
+                            if pending.contains(window) || !admitted.insert(window) =>
+                        {
+                            Err(anyhow::anyhow!(
+                                "a control request is already pending for this window"
+                            ))
+                        }
+                        Some((window, grant)) => {
+                            let permissions = grant.0.capabilities();
+                            if !(permissions.keyboard || permissions.pointer || permissions.resize)
+                            {
+                                Err(anyhow::anyhow!("window has no remote input permissions"))
+                            } else {
+                                grants.commands.entity(window).insert(
+                                    request::PendingInputRequest::new(
+                                        control,
+                                        request.deadline,
+                                        request.cancelled,
+                                        request.completion,
+                                    ),
+                                );
+                                redraw.write(bevy::window::RequestRedraw);
+                                continue;
+                            }
+                        }
+                    }
+                }
+            }
         };
         let _ = request
             .completion
-            .send(result.map_err(|error| error.to_string()));
+            .try_send(result.map_err(|error| error.to_string()));
     }
 }
 
