@@ -411,8 +411,8 @@ fn local_takeover_releases_remote_holds_and_rejects_work_queued_before_resume() 
     let key = pending(
         &client,
         &grant.state,
-        Operation::Key {
-            keycode: 30,
+        Operation::Keys {
+            keycodes: vec![30],
             pressed: true,
         },
     );
@@ -434,8 +434,8 @@ fn local_takeover_releases_remote_holds_and_rejects_work_queued_before_resume() 
     let stale = pending(
         &client,
         &grant.state,
-        Operation::Key {
-            keycode: 31,
+        Operation::Keys {
+            keycodes: vec![31],
             pressed: true,
         },
     );
@@ -444,8 +444,8 @@ fn local_takeover_releases_remote_holds_and_rejects_work_queued_before_resume() 
         client
             .request(
                 grant.id(),
-                Operation::Key {
-                    keycode: 32,
+                Operation::Keys {
+                    keycodes: vec![32],
                     pressed: true
                 }
             )
@@ -459,8 +459,8 @@ fn local_takeover_releases_remote_holds_and_rejects_work_queued_before_resume() 
     let paused = pending(
         &client,
         &grant.state,
-        Operation::Key {
-            keycode: 33,
+        Operation::Keys {
+            keycodes: vec![33],
             pressed: true,
         },
     );
@@ -470,8 +470,8 @@ fn local_takeover_releases_remote_holds_and_rejects_work_queued_before_resume() 
     let resumed = pending(
         &client,
         &grant.state,
-        Operation::Key {
-            keycode: 34,
+        Operation::Keys {
+            keycodes: vec![34],
             pressed: true,
         },
     );
@@ -507,11 +507,16 @@ fn paced_sequence_stops_on_takeover_and_key_resolution_precedes_all_input() {
         Operation::Sequence {
             actions: vec![
                 crate::InputAction::Text("prefix".into()),
-                crate::InputAction::Key {
-                    key: "missing".into(),
+                crate::InputAction::Keys {
+                    keys: vec!["missing".into()],
+                    state: crate::KeyState::Press,
+                    delay_ms: None,
+                    hold_ms: None,
                 },
             ],
             typing_interval_ms: 0,
+            key_interval_ms: 0,
+            key_hold_ms: 0,
         },
     );
     adapter.drain_events(&mut events);
@@ -535,11 +540,15 @@ fn paced_sequence_stops_on_takeover_and_key_resolution_precedes_all_input() {
         Operation::Sequence {
             actions: vec![crate::InputAction::Text("é🦀".into())],
             typing_interval_ms: 1000,
+            key_interval_ms: 0,
+            key_hold_ms: 0,
         },
     );
     let before = Instant::now();
     adapter.drain_events(&mut events);
     adapter.drain_effects(&mut effects);
+    assert!(adapter.next_deadline().expect("receipt poll") < before + Duration::from_millis(1000));
+    adapter.drain_events(&mut events);
     assert!(
         adapter.next_deadline().expect("typing deadline") >= before + Duration::from_millis(1000)
     );
@@ -603,8 +612,8 @@ fn restricted_grants_reject_operations_at_both_request_boundaries() {
     adapter.drain_events(&mut events);
     for operation in [
         Operation::Capture,
-        Operation::Key {
-            keycode: 30,
+        Operation::Keys {
+            keycodes: vec![30],
             pressed: true,
         },
         Operation::Pointer { x: 1.0, y: 2.0 },
@@ -642,6 +651,164 @@ fn restricted_grants_reject_operations_at_both_request_boundaries() {
         adapter.drain_events(&mut events);
         assert!(queued.try_recv().expect("rejection").is_err());
     }
+}
+
+struct SequenceFixture {
+    _authority: AccessAuthority,
+    adapter: Box<dyn ClientAdapter>,
+    client: RemoteControlClient,
+    grant: crate::Grant,
+}
+
+impl SequenceFixture {
+    fn new() -> Self {
+        let upstream = ClientSourceId::new(0);
+        let surface = ClientSurfaceId::new(ClientId::new(upstream, 1), 1);
+        let authority = AccessAuthority::new(|| {});
+        let (registration, client) =
+            registration(upstream, ClientSourceId::new(3), || {}, NoCapture);
+        let mut adapter = registration.into_parts().runtime.driver;
+        map(&mut *adapter, surface);
+        let grant = client
+            .grant(
+                surface,
+                authority.open("sequence test".into()).expect("permit"),
+                Capabilities::ALL,
+            )
+            .expect("grant");
+        adapter.drain_events(&mut ClientEventQueue::default());
+        adapter.drain_effects(&mut Vec::new());
+        Self {
+            _authority: authority,
+            adapter,
+            client,
+            grant,
+        }
+    }
+}
+
+fn drive_sequence(
+    adapter: &mut dyn ClientAdapter,
+    response: mpsc::Receiver<Result<Reply, String>>,
+) -> (crate::InputSequenceResult, Vec<(Instant, ClientInputEvent)>) {
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let mut inputs = Vec::new();
+    let mut events = ClientEventQueue::default();
+    loop {
+        adapter.drain_events(&mut events);
+        let mut effects = Vec::new();
+        adapter.drain_effects(&mut effects);
+        let now = Instant::now();
+        for effect in effects {
+            if let ClientAdapterEffect::Input(input) = effect
+                && matches!(input.event, InputEventKind::Keyboard { .. })
+            {
+                inputs.push((now, input));
+            }
+        }
+        if let Ok(reply) = response.try_recv() {
+            let Reply::Sequence(result) = reply.expect("sequence response") else {
+                panic!("expected sequence result")
+            };
+            return (result, inputs);
+        }
+        assert!(now < deadline, "sequence did not complete");
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
+#[test]
+fn sequence_groups_share_a_dispatch_and_hold_gap_wait_timing_reaches_native_effects() {
+    let mut fixture = SequenceFixture::new();
+    let response = pending(
+        &fixture.client,
+        &fixture.grant.state,
+        Operation::Sequence {
+            actions: serde_json::from_str(
+                r#"[["d",[29,30],0],["p",57,5,7],["w",8],["u",[30,29],0],["p",57]]"#,
+            )
+            .expect("actions"),
+            typing_interval_ms: 0,
+            key_interval_ms: 9,
+            key_hold_ms: 11,
+        },
+    );
+    let (result, inputs) = drive_sequence(&mut *fixture.adapter, response);
+    assert!(result.complete, "{:?}", result.error);
+    assert_eq!(result.completed_actions, 5);
+    assert!(result.receipt.is_some());
+    let keys: Vec<_> = inputs
+        .iter()
+        .map(|(_, input)| match input.event {
+            InputEventKind::Keyboard { keycode, state } => {
+                (keycode.0, state == KeyboardKeyState::Pressed)
+            }
+            _ => panic!("expected key"),
+        })
+        .collect();
+    assert_eq!(
+        keys,
+        [
+            (29, true),
+            (30, true),
+            (57, true),
+            (57, false),
+            (30, false),
+            (29, false),
+            (57, true),
+            (57, false)
+        ]
+    );
+    assert_eq!(inputs[0].0, inputs[1].0, "grouped downs drain together");
+    assert_eq!(inputs[0].1.time, inputs[1].1.time);
+    assert_eq!(inputs[4].0, inputs[5].0, "grouped ups drain together");
+    assert!(inputs[3].0.duration_since(inputs[2].0) >= Duration::from_millis(5));
+    assert!(inputs[4].0.duration_since(inputs[3].0) >= Duration::from_millis(15));
+    assert!(inputs[7].0.duration_since(inputs[6].0) >= Duration::from_millis(11));
+}
+
+#[test]
+fn sequence_timeout_retires_held_keys_and_accepts_the_next_sequence() {
+    let mut fixture = SequenceFixture::new();
+    let response = pending_until(
+        &fixture.client,
+        &fixture.grant.state,
+        Operation::Sequence {
+            actions: serde_json::from_str(r#"[["d",[29,30]],["w",1000],["u",[30,29]]]"#)
+                .expect("actions"),
+            typing_interval_ms: 0,
+            key_interval_ms: 0,
+            key_hold_ms: 0,
+        },
+        Instant::now() + Duration::from_millis(30),
+    );
+    let (result, inputs) = drive_sequence(&mut *fixture.adapter, response);
+    assert!(!result.complete);
+    assert_eq!(
+        result.completed_actions, 1,
+        "unfinished pause is not a completed action"
+    );
+    assert!(result.error.expect("timeout").contains("timed out"));
+    for key in [29, 30] {
+        assert!(inputs.iter().any(|(_, input)| matches!(input.event,
+            InputEventKind::Keyboard { keycode: LinuxKeycode(code), state: KeyboardKeyState::Released } if code == key)));
+    }
+    let response = pending(
+        &fixture.client,
+        &fixture.grant.state,
+        Operation::Sequence {
+            actions: serde_json::from_str(r#"[["p",57]]"#).expect("actions"),
+            typing_interval_ms: 0,
+            key_interval_ms: 0,
+            key_hold_ms: 5,
+        },
+    );
+    let (result, _) = drive_sequence(&mut *fixture.adapter, response);
+    assert!(
+        result.complete,
+        "held state must be retired: {:?}",
+        result.error
+    );
 }
 
 fn pending(
@@ -766,8 +933,8 @@ fn revoke_rejects_queued_input_and_releases_held_keys_before_a_new_grant() {
     let pressed = pending(
         &client,
         &grant.state,
-        Operation::Key {
-            keycode: 29,
+        Operation::Keys {
+            keycodes: vec![29],
             pressed: true,
         },
     );
@@ -792,8 +959,8 @@ fn revoke_rejects_queued_input_and_releases_held_keys_before_a_new_grant() {
     let queued = pending(
         &client,
         &grant.state,
-        Operation::Key {
-            keycode: 30,
+        Operation::Keys {
+            keycodes: vec![30],
             pressed: true,
         },
     );

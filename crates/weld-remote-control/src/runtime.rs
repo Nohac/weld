@@ -454,27 +454,39 @@ impl Adapter {
                     },
                 ));
             }
-            Operation::Key { keycode, pressed } => {
-                ensure!(keycode > 0 && keycode <= 767, "invalid Linux keycode");
+            Operation::Keys { keycodes, pressed } => {
+                ensure!(
+                    !keycodes.is_empty() && keycodes.len() <= 16,
+                    "key action needs 1 to 16 keys"
+                );
+                let mut unique = HashSet::new();
+                ensure!(
+                    keycodes
+                        .iter()
+                        .all(|key| (1..=767).contains(key) && unique.insert(*key)),
+                    "invalid or duplicate Linux keycode"
+                );
                 if pressed {
                     messages.push(focus);
                 }
-                messages.push(event(
-                    ClientInputTarget::Keyboard { surface },
-                    InputEventKind::Keyboard {
-                        keycode: LinuxKeycode(keycode),
-                        state: if pressed {
-                            KeyboardKeyState::Pressed
-                        } else {
-                            KeyboardKeyState::Released
-                        },
-                    },
-                ));
                 let held = self.held_keys.entry(surface).or_default();
-                if pressed {
-                    held.insert(keycode);
-                } else {
-                    held.remove(&keycode);
+                for keycode in keycodes {
+                    messages.push(event(
+                        ClientInputTarget::Keyboard { surface },
+                        InputEventKind::Keyboard {
+                            keycode: LinuxKeycode(keycode),
+                            state: if pressed {
+                                KeyboardKeyState::Pressed
+                            } else {
+                                KeyboardKeyState::Released
+                            },
+                        },
+                    ));
+                    if pressed {
+                        held.insert(keycode);
+                    } else {
+                        held.remove(&keycode);
+                    }
                 }
             }
             Operation::Chord { keycodes } => {

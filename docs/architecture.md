@@ -39,7 +39,10 @@ Weld is a workspace of reusable layers and one standard distribution:
   Native Wayland delivery translates it into Smithay's temporary keysym batches,
   preserving clipboard selections and the seat's physical keymap state.
   `weld-remote-control` validates keyboard sequences, resolves named keys through
-  source-scoped native queries, and schedules paced text with adapter deadlines.
+  source-scoped native queries, and schedules paced text, grouped key transitions
+  and waits with adapter deadlines. Compact positional action rows decode into
+  typed plans; whole-plan validation checks key balance and the timing budget.
+  Interrupted held-key sequences reuse the relay's native input retirement.
   Every step retains the initial grant and ownership epoch; receipts track
   completed progress across interruption. CLI/RPC/MCP share the action union,
   with Schemars supplying its mixed string/object MCP schema.

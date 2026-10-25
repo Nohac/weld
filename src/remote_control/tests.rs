@@ -266,8 +266,8 @@ fn local_interaction_preserves_remote_permissions_and_independent_viewport() {
     assert_eq!(grant.capabilities(), Capabilities::ALL);
     let result = app.world().resource::<Controller>().0.request(
         grant.id(),
-        weld_remote_control::Operation::Key {
-            keycode: 30,
+        weld_remote_control::Operation::Keys {
+            keycodes: vec![30],
             pressed: true,
         },
     );

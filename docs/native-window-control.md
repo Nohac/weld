@@ -139,21 +139,36 @@ key/chord operations remain available for X11.
 
 ### Input sequences
 
-`window_input` combines text and complete named keypresses/chords in one call:
+`window_input` runs a compact array of action rows in one call:
 
 ```json
 {
   "control": "w6",
-  "actions": ["some text", {"key": "Return"}, "more text", {"key": "BackSpace"}, {"chord": ["Control", "a"]}],
-  "typing_interval_ms": 25
+  "actions": [["p",59], ["p",14], ["p",57], ["p",57], ["d",[29,30]], ["w",150], ["u",[30,29]]],
+  "key_hold_ms": 50,
+  "key_interval_ms": 80
 }
 ```
 
 CLI equivalent:
 
 ```sh
-weldctl --session weld-0 window input --params-json '{"control":"w6","actions":["hello",{"key":"Return"}],"typing_interval_ms":25}' --json
+weldctl --session weld-0 window input --params-json '{"control":"w6","actions":[["t","hello"],["p","Return"]],"typing_interval_ms":25}' --json
 ```
+
+| Row | Behavior |
+| --- | --- |
+| `["p", keys, hold_ms?, gap_ms?]` | Press keys together, hold, then release in reverse order. |
+| `["d", keys, gap_ms?]` | Press and keep keys held across subsequent rows. |
+| `["u", keys, gap_ms?]` | Release keys in the supplied order. |
+| `["w", milliseconds]` | Pause without sending input. |
+| `["t", "text"]` | Type literal Unicode text. |
+
+`keys` is an evdev number, an XKB name, or a list of up to 16 of either.
+Grouped transitions are queued in one native batch with one timestamp.
+Omitted or `null` timing fields use the global defaults; explicit zero overrides
+them. For example `["p",57,100,250]` holds Space for 100 ms, then pauses 250 ms.
+For games that poll keyboard state once per frame, use a nonzero hold duration.
 
 All actions are validated before execution, including native key-name resolution
 and text-backend eligibility. Named keys use XKB names, with aliases `Control`/
@@ -162,19 +177,26 @@ controller's configured layout at admission, so Caps/Ctrl remapping is respected
 Chord modifiers are explicit; use text strings for exact character casing.
 Key-only sequences also work with XWayland.
 
-The interval defaults to zero and applies between Unicode scalar values within
-each text action. It accepts 0–1000 ms, up to 64 actions and 4096 combined UTF-8
-text bytes, with at most 25 seconds of planned typing. The host schedules each
-step through native deadlines and gives the whole request a 30-second deadline.
-Each chord releases its keys before another step or delay. A delayed host resumes
-from the current time, preserving spacing instead of sending overdue characters
-in a burst. `type-text` uses this same executor at zero interval.
+Global `key_hold_ms`, `key_interval_ms` and `typing_interval_ms` default to zero
+and accept 0–1000 ms. The typing interval applies between Unicode scalar values
+within each text row. Hold time starts after the down effects are acknowledged;
+the key interval follows each completed key row, including the final one.
+There are at most 64 rows and 4096 combined UTF-8 text bytes, with at most 25
+seconds of planned holds, gaps and waits. Per-row timings may use that budget.
+The host schedules steps through native deadlines with a 30-second request
+deadline. A delayed host resumes from the current acknowledgement time,
+preserving spacing. `type-text` uses this executor at zero interval.
+
+Explicit downs and ups must balance within a sequence. Duplicate downs,
+unmatched ups, presses of already-held keys and text while keys are held are
+rejected before input is sent, including aliases that resolve to the same key.
 
 The response reports `complete`, `completed_actions`, `typed_characters`, the last
 `receipt`, and an optional `error`. Counts describe the prefix acknowledged by the
 relay. `in_flight` marks a dispatched step whose completion is uncertain; inspect
 the app before retrying interrupted work. Revocation, local takeover, replacement
-or expiry stops remaining actions. The request retains its original occupant
+or expiry stops remaining actions and retires held remote input. A timed press
+counts as completed after release; a wait counts after its deadline. The request retains its original occupant
 even when addressed through a persistent-slot shorthand.
 
 One sequence owns the remote controller at a time. Other remote mutations return

@@ -3,7 +3,7 @@
 use super::{Adapter, Execution};
 use crate::{
     InputAction, InputSequenceResult, Operation, Pending, Reply,
-    sequence::{Plan, Step},
+    sequence::{InputStep, Plan, Step},
 };
 use anyhow::{Result, ensure};
 use std::{
@@ -18,7 +18,8 @@ pub(super) struct Batch {
     plan: Option<Plan>,
     resolving: Option<mpsc::Receiver<Result<Vec<LinuxKeycode>, String>>>,
     steps: VecDeque<Step>,
-    flight: Option<(mpsc::Receiver<Result<Reply, String>>, Step)>,
+    flight: Option<(mpsc::Receiver<Result<Reply, String>>, InputStep)>,
+    waiting: bool,
     result: InputSequenceResult,
     next: Instant,
 }
@@ -57,15 +58,22 @@ impl Adapter {
                 self.held_keys.values().all(HashSet::is_empty),
                 "release held remote keys before starting an input sequence"
             );
-            let (actions, interval) = match &pending.operation {
+            let (actions, interval, key_interval, key_hold) = match &pending.operation {
                 Operation::Sequence {
                     actions,
                     typing_interval_ms,
-                } => (actions.clone(), *typing_interval_ms),
-                Operation::TypeText { text } => (vec![InputAction::Text(text.clone())], 0),
+                    key_interval_ms,
+                    key_hold_ms,
+                } => (
+                    actions.clone(),
+                    *typing_interval_ms,
+                    *key_interval_ms,
+                    *key_hold_ms,
+                ),
+                Operation::TypeText { text } => (vec![InputAction::Text(text.clone())], 0, 0, 0),
                 _ => anyhow::bail!("expected an input sequence"),
             };
-            let plan = Plan::new(actions, interval)?;
+            let plan = Plan::new(actions, interval, key_interval, key_hold)?;
             ensure!(
                 !plan.has_text || self.text_surfaces.contains(&pending.grant.surface),
                 "whole-text input requires a native Wayland window; XWayland needs a separate text delivery backend"
@@ -96,6 +104,7 @@ impl Adapter {
             resolving,
             steps: VecDeque::new(),
             flight: None,
+            waiting: false,
             result: InputSequenceResult {
                 completed_actions: 0,
                 typed_characters: 0,
@@ -118,6 +127,7 @@ impl Adapter {
                     batch.result.receipt = Some(receipt);
                     batch.result.completed_actions += usize::from(step.ends_action);
                     batch.result.typed_characters += step.characters;
+                    batch.next = now + step.delay_after;
                 }
                 Err(mpsc::TryRecvError::Empty) => {
                     batch.flight = Some((response, step));
@@ -128,13 +138,13 @@ impl Adapter {
                         Ok(Err(error)) => error,
                         _ => "input step completion unavailable".into(),
                     };
-                    batch.finish(Some(error));
+                    self.abort_sequence(batch, error);
                     return;
                 }
             }
         }
         if let Err(error) = self.validate_pending(&batch.pending) {
-            batch.finish(Some(error.to_string()));
+            self.abort_sequence(batch, error.to_string());
             return;
         }
         if batch.flight.is_some() {
@@ -145,6 +155,10 @@ impl Adapter {
         if now < batch.next && batch.plan.is_none() {
             self.batch = Some(batch);
             return;
+        }
+        if batch.waiting {
+            batch.waiting = false;
+            batch.result.completed_actions += 1;
         }
         if let Some(plan) = batch.plan.take() {
             let codes = match batch.resolving.as_ref().map(mpsc::Receiver::try_recv) {
@@ -178,6 +192,15 @@ impl Adapter {
             batch.finish(None);
             return;
         };
+        let step = match step {
+            Step::Input(step) => step,
+            Step::Wait(duration) => {
+                batch.next = now + duration;
+                batch.waiting = true;
+                self.batch = Some(batch);
+                return;
+            }
+        };
         let (reply, response) = mpsc::sync_channel(1);
         let pending = Pending {
             grant: batch.pending.grant.clone(),
@@ -189,12 +212,27 @@ impl Adapter {
         match self.execute(&pending) {
             Ok(Execution::Effects) => {
                 self.state.borrow_mut().accepted.push(pending);
-                batch.next = now + step.delay_after;
+                // Observe the relay acknowledgement promptly, then start the requested gap.
+                batch.next = now + Duration::from_millis(1);
                 batch.flight = Some((response, step));
                 self.batch = Some(batch);
             }
-            Err(error) => batch.finish(Some(error.to_string())),
-            _ => batch.finish(Some("input step produced unexpected work".into())),
+            Err(error) => self.abort_sequence(batch, error.to_string()),
+            _ => self.abort_sequence(batch, "input step produced unexpected work".into()),
         }
+    }
+
+    fn abort_sequence(&mut self, batch: Batch, error: String) {
+        let surface = batch.pending.grant.surface;
+        if self
+            .held_keys
+            .remove(&surface)
+            .is_some_and(|keys| !keys.is_empty())
+        {
+            let state = self.state.borrow();
+            self.relay
+                .release_input(|member| state.views.root(member) == Some(surface));
+        }
+        batch.finish(Some(error));
     }
 }

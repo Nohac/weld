@@ -197,7 +197,7 @@ def check_attributed(ctl, control, host, run):
     assert not window["visible"] and not window["focused"] and window["workspace"] is None, window
     handle = window["control"]
     wait_for(host, lambda: (probe / "input.bin").exists(), "terminal program ready")
-    invoke("input", control=handle, actions=["headless-input", {"key": "Return"}])
+    invoke("input", control=handle, actions=[["t", "headless-input"], ["p", "Return"]])
     wait_for(host, lambda: b"headless-input\r" in (probe / "input.bin").read_bytes(), "headless keyboard delivery")
     invoke("resize", control=handle, width=960, height=540)
     wait_for(host, lambda: (controlled()["application_viewport"] or {}).get("logical_width") == 960, "headless resize")
@@ -211,7 +211,7 @@ def check_attributed(ctl, control, host, run):
     invoke("peek", control=handle, visible=False)
     wait_for(host, lambda: controlled() and not controlled()["visible"], "peek dismissal")
     assert controlled()["control"] == handle
-    invoke("input", control=handle, actions=["after-dismiss"])
+    invoke("input", control=handle, actions=[["t", "after-dismiss"]])
     wait_for(host, lambda: b"after-dismiss" in (probe / "input.bin").read_bytes(), "input after dismiss")
     invoke("peek", control=handle)
     wait_for(host, lambda: controlled()["visible"], "repeat peek")
@@ -263,7 +263,8 @@ def check_windows(ctl, control, host, run, display, accessibility_app, text_app,
             list_tool = next(tool for tool in tools if tool["name"] == "window_list")
             input_tool = next(tool for tool in tools if tool["name"] == "window_input")
             action_schema = input_tool["inputSchema"]["properties"]["actions"]["items"]
-            assert len(action_schema["anyOf"]) == 3, action_schema
+            assert len(action_schema["anyOf"]) == 5, action_schema
+            assert all(row["type"] == "array" for row in action_schema["anyOf"]), action_schema
             assert "all_windows" in list_tool["inputSchema"]["properties"], list_tool
             assert {tool["name"] for tool in tools} == {
                 "window_list", "window_get", "window_wait", "window_pointer", "window_click",
@@ -382,10 +383,10 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
     assert "error" in rpc("type_text", {"control": key, "text": "must not be typed"})
     invoke("key", control=handle, keycode=42, pressed=False)
     assert received.read_bytes() == before_invalid, "rejected text emitted partial input"
-    for actions in [["must not type", {"key": "NotAKey"}], ["must not type", {"chord": ["Ctrl", "Control"]}]]:
+    for actions in [[["t", "must not type"], ["p", "NotAKey"]], [["t", "must not type"], ["p", ["Ctrl", "Control"]]]]:
         assert "error" in rpc("input", {"control": key, "actions": actions})
     assert received.read_bytes() == before_invalid, "invalid tail emitted earlier actions"
-    actions = ["seq", {"key": "Return"}, "abc", {"key": "BackSpace"}, {"chord": ["Control", "a"]}, {"key": "Return"}]
+    actions = [["t", "seq"], ["p", "Return"], ["t", "abc"], ["p", "BackSpace"], ["p", ["Control", "a"]], ["p", "Return"]]
     result = mcp(182, "tools/call", {"name": "window_input", "arguments": {"control": key, "actions": actions}})
     assert not result.get("isError"), result
     progress = result["structuredContent"]
@@ -393,7 +394,7 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
     assert progress["receipt"]["stage"] == "effects_queued", progress
     wait_for(host, lambda: b"seq\rabc\x7f\x01\r" in received.read_bytes(), "named keys and remapped Control chord")
     started = time.monotonic()
-    progress = invoke("input", control=key, actions=["paced"], typing_interval_ms=40)
+    progress = invoke("input", control=key, actions=[["t", "paced"]], typing_interval_ms=40)
     assert progress["complete"] and time.monotonic() - started >= 0.15, progress
     wait_for(host, lambda: received.read_bytes().endswith(b"paced"), "paced text")
     invoke("click", control=handle, x=100, y=100, button=272)
@@ -475,7 +476,7 @@ def check_text_entry(ctl, rpc, host, run, program, backend):
     if backend == "x11":
         assert result.returncode != 0 and "native Wayland" in json.loads(result.stdout)["error"], result
         # Confirm refusal leaves the field empty and normal key input usable.
-        assert "result" in rpc("input", {"control": control, "actions": [{"key": "a"}]})
+        assert "result" in rpc("input", {"control": control, "actions": [["p", "a"]]})
         text = "a"
     else:
         assert result.returncode == 0, result.stderr

@@ -322,7 +322,13 @@ impl WindowService {
         keycode: u32,
         pressed: bool,
     ) -> Result<InputReceipt, String> {
-        self.send_input(control, Operation::Key { keycode, pressed })
+        self.send_input(
+            control,
+            Operation::Keys {
+                keycodes: vec![keycode],
+                pressed,
+            },
+        )
     }
     /// Press and release one evdev key in a single native operation.
     pub fn press_key(&self, control: String, keycode: u32) -> Result<InputReceipt, String> {
@@ -341,18 +347,22 @@ impl WindowService {
     pub fn type_text(&self, control: String, text: String) -> Result<InputReceipt, String> {
         self.send_input(control, Operation::TypeText { text })
     }
-    /// Run ordered text strings, named keypresses and chords. Optional typing_interval_ms paces text; default zero. Returns completed progress and a final receipt.
+    /// Run compact action rows. Global key_hold_ms, key_interval_ms and typing_interval_ms default to zero; row timings override them. Returns completed progress and a final receipt.
     pub fn input(
         &self,
         control: String,
         actions: Vec<InputAction>,
         typing_interval_ms: Option<u32>,
+        key_interval_ms: Option<u32>,
+        key_hold_ms: Option<u32>,
     ) -> Result<InputSequenceResult, String> {
         match self.operate(
             control,
             Operation::Sequence {
                 actions,
                 typing_interval_ms: typing_interval_ms.unwrap_or(0),
+                key_interval_ms: key_interval_ms.unwrap_or(0),
+                key_hold_ms: key_hold_ms.unwrap_or(0),
             },
         )? {
             Reply::Sequence(result) => Ok(result),
@@ -686,16 +696,18 @@ impl WindowClient {
     pub fn type_text(&self, control: String, text: String) -> Result<InputReceipt, String> {
         self.request("type_text", json!({"control":control,"text":text}))
     }
-    /// Run 1–64 actions: text strings, {"key":"Return"}, or {"chord":["Control","a"]}. Keys use the configured layout. Optional typing_interval_ms (0–1000, default 0) paces Unicode characters; planned typing is limited to 25s and 4096 text bytes. Text requires native Wayland. Reports completed progress; no automatic retry after interruption. Wait/inspect separately for application reactions.
+    /// Run 1–64 compact rows: ["p",keys,hold_ms?,gap_ms?] presses/releases; ["d",keys,gap_ms?] holds; ["u",keys,gap_ms?] releases; ["w",ms] waits; ["t",text] types. keys is one evdev number/XKB name or a list of up to 16; groups dispatch together. Omitted/null timings use key_hold_ms/key_interval_ms; typing_interval_ms paces text characters. Global timings are 0–1000ms, default 0. Use a nonzero hold for frame-polled games. Total planned duration ≤25s, text ≤4096 bytes. Balance downs/ups within the call and release before text. Interruption retires held remote input. Text requires native Wayland; keys also support XWayland. Returns completed progress; inspect application reactions separately.
     pub fn input(
         &self,
         control: String,
         actions: Vec<InputAction>,
         typing_interval_ms: Option<u32>,
+        key_interval_ms: Option<u32>,
+        key_hold_ms: Option<u32>,
     ) -> Result<InputSequenceResult, String> {
         self.request(
             "input",
-            json!({"control":control,"actions":actions,"typing_interval_ms":typing_interval_ms}),
+            json!({"control":control,"actions":actions,"typing_interval_ms":typing_interval_ms,"key_interval_ms":key_interval_ms,"key_hold_ms":key_hold_ms}),
         )
     }
     /// Scroll at logical x/y. With --wheel, deltas are notches; otherwise logical pixels in one completed finger gesture. Positive is right/down.

@@ -5,7 +5,7 @@ mod runtime;
 mod sequence;
 pub use permissions::{Capabilities, Capability};
 pub use runtime::registration;
-pub use sequence::{InputAction, InputSequenceResult};
+pub use sequence::{InputAction, InputKey, InputSequenceResult, KeyState};
 
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -109,6 +109,8 @@ pub enum Operation {
     Sequence {
         actions: Vec<InputAction>,
         typing_interval_ms: u32,
+        key_interval_ms: u32,
+        key_hold_ms: u32,
     },
     Pointer {
         x: f64,
@@ -123,8 +125,8 @@ pub enum Operation {
         y: f64,
         button: u32,
     },
-    Key {
-        keycode: u32,
+    Keys {
+        keycodes: Vec<u32>,
         pressed: bool,
     },
     Chord {
