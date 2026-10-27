@@ -10,14 +10,16 @@ use bevy::{
         change_detection::DetectChanges,
         component::Component,
         entity::Entity,
+        hierarchy::ChildOf,
         lifecycle::RemovedComponents,
         message::MessageWriter,
         observer::On,
-        query::{Changed, Or, QueryData, With},
+        query::{Changed, Or, QueryData, With, Without},
         schedule::IntoScheduleConfigs,
         system::{Commands, Query, Res, SystemParam},
         template::template,
     },
+    math::Vec2,
     picking::{Pickable, events::PointerPress, pointer::PointerButton},
     prelude::{
         AccessibleLabel, AlignItems, BackgroundColor, BorderColor, BorderRadius, Children,
@@ -50,13 +52,32 @@ struct HeaderTarget {
 
 #[derive(Component, Clone, PartialEq)]
 struct HeaderVisual {
+    parent: Entity,
     geometry: WindowGeometry,
+    backdrop_size: Vec2,
+    radius: f32,
     camera: Entity,
     title: String,
     font: TextFont,
     colors: FrameColors,
-    radius: BorderRadius,
     divider: bool,
+}
+
+#[derive(Component, Default, Clone, Copy)]
+struct HeaderBackdrop;
+
+// Crop a group-sized rounded background to each header's rectangle. Resolving
+// the radius on this full-sized node keeps short rows on the frame's curve.
+fn backdrop_node(visual: &HeaderVisual) -> Node {
+    Node {
+        position_type: PositionType::Absolute,
+        left: px(-visual.geometry.position.x),
+        top: px(-visual.geometry.position.y),
+        width: px(visual.backdrop_size.x),
+        height: px(visual.backdrop_size.y),
+        border_radius: BorderRadius::all(px(visual.radius)),
+        ..Default::default()
+    }
 }
 
 /// Installs clickable headers with the distribution's decoration palette.
@@ -86,21 +107,17 @@ impl Plugin for TileUiPlugin {
                 PreUpdate,
                 frame::publish_metrics.before(weld_tile::TileSystems::Prepare),
             )
-            .add_systems(
-                PreUpdate,
-                frame::reconcile.in_set(WindowSystems::UiReconcile),
-            )
-            .add_systems(
-                PreUpdate,
-                frame::reconcile
-                    .after(weld_tile::TileSystems::LateLayout)
-                    .before(WindowSystems::FinalReconcile),
-            )
             .add_observer(press_header)
-            .add_systems(PreUpdate, reconcile.in_set(WindowSystems::UiReconcile))
             .add_systems(
                 PreUpdate,
-                reconcile
+                (frame::reconcile, reconcile)
+                    .chain()
+                    .in_set(WindowSystems::UiReconcile),
+            )
+            .add_systems(
+                PreUpdate,
+                (frame::reconcile, reconcile)
+                    .chain()
                     .after(weld_tile::TileSystems::LateLayout)
                     .before(WindowSystems::FinalReconcile),
             );
@@ -143,7 +160,6 @@ fn header_node(visual: &HeaderVisual) -> Node {
             right: px(if visual.divider { 1 } else { 0 }),
             ..Default::default()
         },
-        border_radius: visual.radius,
         padding: UiRect::horizontal(px(7)),
         align_items: AlignItems::Center,
         overflow: Overflow::clip(),
@@ -157,18 +173,24 @@ fn header_scene(target: HeaderTarget, visual: HeaderVisual) -> impl Scene {
     let colors = visual.colors;
     let font = visual.font.clone();
     let node = header_node(&visual);
+    let backdrop = backdrop_node(&visual);
     bsn! {
         template(move |_| Ok(node.clone()))
         template(move |_| Ok(target))
         template(move |_| Ok(UiTargetCamera(visual.camera)))
+        ChildOf({visual.parent})
         GlobalZIndex(0)
         Button
-        BackgroundColor({colors.background})
         BorderColor::all(colors.border)
         AccessibleLabel::new(accessible)
         template(move |_| Ok(CursorIcon::System(SystemCursorIcon::Default)))
         template(move |_| Ok(visual.clone()))
         Children [
+            HeaderBackdrop
+            template(move |_| Ok(backdrop.clone()))
+            BackgroundColor({colors.background})
+            Pickable::IGNORE
+            --
             Text::new(label)
             template(move |_| Ok(font.clone()))
             TextLayout::no_wrap()
@@ -333,10 +355,32 @@ struct HeaderView {
     target: &'static HeaderTarget,
     visual: &'static mut HeaderVisual,
     node: &'static mut Node,
-    background: &'static mut BackgroundColor,
     border: &'static mut BorderColor,
     camera: &'static mut UiTargetCamera,
     children: &'static Children,
+}
+
+#[derive(QueryData)]
+#[query_data(mutable)]
+struct HeaderBackdropView {
+    node: &'static mut Node,
+    color: &'static mut BackgroundColor,
+    marker: &'static HeaderBackdrop,
+}
+
+#[derive(SystemParam)]
+struct HeaderViews<'w, 's> {
+    roots: Query<'w, 's, HeaderView>,
+    labels: Query<
+        'w,
+        's,
+        (
+            &'static mut Text,
+            &'static mut TextColor,
+            &'static mut TextFont,
+        ),
+    >,
+    backdrops: Query<'w, 's, HeaderBackdropView, Without<HeaderTarget>>,
 }
 
 type HeaderChanges = Or<(
@@ -388,8 +432,8 @@ fn reconcile(
     mut commands: Commands,
     tree: HeaderTree,
     headers: Query<(Entity, &TileHeaders)>,
-    mut views: Query<HeaderView>,
-    mut labels: Query<(&mut Text, &mut TextColor, &mut TextFont)>,
+    frames: Query<(Entity, &frame::GroupFrame)>,
+    mut views: HeaderViews,
     mut redraw: MessageWriter<RequestRedraw>,
     mut invalidations: Invalidations,
 ) {
@@ -412,10 +456,20 @@ fn reconcile(
             .containers
             .get(container)
             .is_ok_and(|container| container.layout() == TileLayout::Tabbed);
-        let radius = if tree.in_group(container) || tree.edge_to_edge(container) {
-            0.0
-        } else {
-            (f32::from(tree.style.corner_radius.min(64)) - tree.style.tiled.width()).max(0.0)
+        let mut ancestor = container;
+        let mut frame = None;
+        for _ in 0..=weld_tile::MAX_DEPTH {
+            frame = frames.iter().find(|(_, frame)| frame.container == ancestor);
+            if frame.is_some() {
+                break;
+            }
+            let Ok(parent) = tree.parents.get(ancestor) else {
+                break;
+            };
+            ancestor = parent.entity();
+        }
+        let Some((parent, frame)) = frame else {
+            continue;
         };
         for (index, header) in headers.0.iter().enumerate() {
             let group_selected = tree
@@ -432,27 +486,28 @@ fn reconcile(
                     child: header.child,
                 },
                 HeaderVisual {
-                    geometry: header.geometry,
+                    parent,
+                    geometry: WindowGeometry {
+                        position: header.geometry.position
+                            - frame.geometry.position
+                            - Vec2::splat(frame.width),
+                        ..header.geometry
+                    },
+                    backdrop_size: (frame.geometry.size - Vec2::splat(2.0 * frame.width))
+                        .max(Vec2::ZERO),
+                    radius: (frame.radius.min(frame.geometry.size.min_element() * 0.5)
+                        - frame.width)
+                        .max(0.0),
                     camera,
                     title: tree.title(header.child),
                     font: tree.style.title_font.text_font(),
                     colors,
-                    radius: BorderRadius::px(
-                        if index == 0 { radius } else { 0.0 },
-                        if (tabbed && index + 1 == headers.0.len()) || (!tabbed && index == 0) {
-                            radius
-                        } else {
-                            0.0
-                        },
-                        0.0,
-                        0.0,
-                    ),
                     divider: tabbed && index + 1 < headers.0.len(),
                 },
             );
         }
     }
-    for mut view in &mut views {
+    for mut view in &mut views.roots {
         let Some(next) = desired.remove(view.target) else {
             commands.entity(view.entity).despawn();
             redraw.write(RequestRedraw);
@@ -462,14 +517,17 @@ fn reconcile(
             continue;
         }
         *view.node = header_node(&next);
-        *view.background = BackgroundColor(next.colors.background);
         *view.border = BorderColor::all(next.colors.border);
         *view.camera = UiTargetCamera(next.camera);
         commands
             .entity(view.entity)
-            .insert(AccessibleLabel(next.title.clone()));
+            .insert((ChildOf(next.parent), AccessibleLabel(next.title.clone())));
         for child in view.children {
-            if let Ok((mut text, mut color, mut font)) = labels.get_mut(*child) {
+            if let Ok(mut backdrop) = views.backdrops.get_mut(*child) {
+                *backdrop.node = backdrop_node(&next);
+                *backdrop.color = BackgroundColor(next.colors.background);
+            }
+            if let Ok((mut text, mut color, mut font)) = views.labels.get_mut(*child) {
                 **text = next.title.clone();
                 *color = TextColor(next.colors.foreground);
                 if *font != next.font {

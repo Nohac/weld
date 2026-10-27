@@ -13,8 +13,8 @@ use bevy::{
     },
     picking::Pickable,
     prelude::{
-        BackgroundColor, BorderColor, BorderRadius, BoxShadow, GlobalZIndex, Node, PositionType,
-        Scene, UiRect, UiTargetCamera, px,
+        BackgroundColor, BorderColor, BorderRadius, BoxShadow, GlobalZIndex, Node, Overflow,
+        PositionType, Scene, UiRect, UiTargetCamera, px,
     },
     scene::{CommandsSceneExt, bsn},
     window::RequestRedraw,
@@ -47,12 +47,12 @@ pub(super) fn publish_metrics(
 
 #[derive(Component, Clone, PartialEq)]
 pub(super) struct GroupFrame {
-    container: Entity,
-    geometry: WindowGeometry,
+    pub(super) container: Entity,
+    pub(super) geometry: WindowGeometry,
     camera: Entity,
     colors: FrameColors,
-    width: f32,
-    radius: f32,
+    pub(super) width: f32,
+    pub(super) radius: f32,
     z: i32,
     edge_to_edge: bool,
 }
@@ -74,6 +74,7 @@ fn frame_node(frame: &GroupFrame) -> Node {
         height: px(frame.geometry.size.y),
         border: UiRect::all(px(frame.width)),
         border_radius: BorderRadius::all(px(frame.radius)),
+        overflow: Overflow::clip(),
         ..Default::default()
     }
 }

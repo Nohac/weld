@@ -73,6 +73,9 @@ struct WindowBody;
 #[derive(Component, Clone, Copy, Default)]
 pub struct FrameHeader;
 
+#[derive(Component, Clone, Copy, Default)]
+struct FrameHeaderBackdrop;
+
 #[derive(Component, FromTemplate)]
 #[relationship(relationship_target = FrameColorNodes)]
 struct FrameColorOwner(Entity);
@@ -593,7 +596,7 @@ fn request_style_refresh(
 fn sync_focus_style(
     colors: WindowFrameColors,
     mut roots: FrameStyleRoots,
-    mut nodes: Query<&mut BackgroundColor, With<FrameHeader>>,
+    mut nodes: Query<&mut BackgroundColor, With<FrameHeaderBackdrop>>,
     mut redraw: bevy::ecs::message::MessageWriter<RequestRedraw>,
 ) {
     let mut changed = false;
@@ -681,6 +684,9 @@ fn scene(surface: SurfaceId, style: FrameGeometry) -> impl Scene {
 }
 
 fn window_scene(content: impl SceneList, style: FrameGeometry) -> impl Scene {
+    // The header crops this backing to its row. Keeping the backing tall
+    // preserves the frame radius when the row is shorter than its diameter.
+    let header_backdrop_height = style.header().max(2.0 * style.inner_radius());
     let resize_handles = resize_handles(if style.joined_top {
         BorderStyle::Pixel(0)
     } else {
@@ -724,7 +730,6 @@ fn window_scene(content: impl SceneList, style: FrameGeometry) -> impl Scene {
             Children [
                 WindowMoveHandle
                 FrameHeader
-                FrameColorOwner(#FrameRoot)
                 Node {
                     display: {if style.header() > 0.0 { Display::Flex } else { Display::None }},
                     width: percent(100),
@@ -732,14 +737,25 @@ fn window_scene(content: impl SceneList, style: FrameGeometry) -> impl Scene {
                     flex_shrink: 0.0,
                     align_items: AlignItems::Center,
                     justify_content: JustifyContent::FlexEnd,
-                    border_radius: BorderRadius::px(
-                        style.inner_radius(),
-                        style.inner_radius(),
-                        0.0,
-                        0.0,
-                    ),
+                    overflow: Overflow::clip(),
                 }
-                BackgroundColor(Color::srgb(0.14, 0.17, 0.22))
+                Children [
+                    FrameHeaderBackdrop
+                    FrameColorOwner(#FrameRoot)
+                    Node {
+                        position_type: PositionType::Absolute,
+                        left: px(0), top: px(0), width: percent(100),
+                        height: px(header_backdrop_height),
+                        border_radius: BorderRadius::px(
+                            if style.joined_top { 0.0 } else { style.inner_radius() },
+                            if style.joined_top { 0.0 } else { style.inner_radius() },
+                            0.0, 0.0,
+                        ),
+                    }
+                    BackgroundColor(Color::srgb(0.14, 0.17, 0.22))
+                    ZIndex(-1)
+                    bevy::picking::Pickable::IGNORE
+                ]
                 --
                 RoundedSurfaceClip
                 Node {
@@ -906,7 +922,7 @@ mod tests {
             events::{Pointer, PointerPress},
             pointer::{Location, PointerButton, PointerId},
         },
-        scene::ScenePlugin,
+        scene::{ScenePlugin, WorldSceneExt},
         ui::{Display, UiScale},
         window::RequestRedraw,
     };
@@ -1198,6 +1214,177 @@ mod tests {
             )
             .expect("workspace setup");
         app
+    }
+
+    #[test]
+    fn persistent_placeholder_fullscreens_and_restores_without_an_occupant() {
+        use weld_window::fullscreen::{
+            FullscreenAction, FullscreenMode, FullscreenOccluded, FullscreenOutput,
+            FullscreenPlugin, FullscreenRequest,
+        };
+        use weld_window::persistence::{
+            PersistenceAction, PersistenceMatch, WindowPersistenceRequest,
+        };
+
+        for (layout, floating) in [
+            (None, false),
+            (None, true),
+            (Some(weld_tile::TileLayout::Tabbed), false),
+            (Some(weld_tile::TileLayout::Stacked), false),
+        ] {
+            let mut app = if floating {
+                test_app()
+            } else {
+                tiled_test_app()
+            };
+            app.add_plugins(FullscreenPlugin);
+            let surface = SurfaceId::for_test(726);
+            enqueue_surface_event(app.world_mut(), role(surface, WindowDecoration::ServerSide));
+            enqueue_surface_event(app.world_mut(), frame(surface, 320, 240));
+            app.update();
+            let (client, window) = app
+                .world_mut()
+                .query::<(Entity, &OccupiesWindow)>()
+                .iter(app.world())
+                .map(|(client, slot)| (client, slot.0))
+                .next()
+                .expect("occupant");
+            app.world_mut()
+                .entity_mut(client)
+                .insert(weld_app::surface::ClientWindowMetadata(
+                    weld_client::ClientSurfaceMetadata::new("preview".into(), "Preview".into())
+                        .expect("metadata"),
+                ));
+            app.world_mut().trigger(WindowPersistenceRequest {
+                window: Some(window),
+                action: PersistenceAction::Enable(PersistenceMatch::Auto),
+            });
+            let other_surface = SurfaceId::for_test(727);
+            enqueue_surface_event(
+                app.world_mut(),
+                role(other_surface, WindowDecoration::ServerSide),
+            );
+            enqueue_surface_event(app.world_mut(), frame(other_surface, 320, 240));
+            app.update();
+            if let Some(layout) = layout {
+                let container = app
+                    .world()
+                    .get::<weld_tile::TileParent>(window)
+                    .expect("parent")
+                    .entity();
+                app.world_mut()
+                    .trigger(weld_tile::TileSetLayout { container, layout });
+            }
+            enqueue_surface_event(
+                app.world_mut(),
+                HostSurfaceEvent {
+                    surface,
+                    kind: HostSurfaceEventKind::Destroyed,
+                },
+            );
+            if floating {
+                app.world_mut().trigger(WindowCommand {
+                    window,
+                    kind: WindowCommandKind::Focus,
+                });
+            } else {
+                app.world_mut().trigger(weld_tile::TileSelect(window));
+            }
+            app.update();
+            app.update();
+            assert_eq!(
+                app.world().get::<WindowVacancy>(window),
+                Some(&WindowVacancy::Remove)
+            );
+            assert!(
+                app.world()
+                    .get::<weld_window::WindowOccupant>(window)
+                    .is_none()
+            );
+            let original = *app
+                .world()
+                .get::<WindowGeometry>(window)
+                .expect("original geometry");
+            let output = app.world().get::<WindowOutput>(window).expect("output").0;
+            for mode in [FullscreenMode::Normal, FullscreenMode::Exclusive] {
+                app.world_mut().trigger(FullscreenRequest {
+                    window: Some(window),
+                    action: FullscreenAction::Enable(mode),
+                });
+                app.update();
+                let expected = WindowGeometry {
+                    position: Vec2::ZERO,
+                    size: Vec2::new(1000.0, 800.0),
+                };
+                assert_eq!(app.world().get::<WindowGeometry>(window), Some(&expected));
+                assert!(app.world().get::<FullscreenOutput>(output).is_some());
+                assert!(
+                    app.world_mut()
+                        .query::<&FullscreenOccluded>()
+                        .iter(app.world())
+                        .count()
+                        > 0
+                );
+                let root = app
+                    .world()
+                    .get::<PrimaryWindowPresentation>(window)
+                    .expect("placeholder")
+                    .entity();
+                let node = app.world().get::<Node>(root).expect("frame");
+                assert_eq!(
+                    (node.left, node.top, node.width, node.height),
+                    (px(0), px(0), px(1000), px(800))
+                );
+                assert_eq!(node.border_radius, BorderRadius::all(px(0)));
+                assert_eq!(node.border, UiRect::all(px(0)));
+                assert!(app.world().get::<VacantSsdPresentation>(root).is_some());
+                app.world_mut().trigger(FullscreenRequest {
+                    window: Some(window),
+                    action: FullscreenAction::Disable,
+                });
+                app.update();
+                assert_eq!(app.world().get::<WindowGeometry>(window), Some(&original));
+                assert!(app.world().get::<FullscreenOutput>(output).is_none());
+            }
+        }
+    }
+
+    #[test]
+    fn header_backdrop_preserves_outer_corners_and_keeps_group_joins_square() {
+        for joined_top in [false, true] {
+            let mut app = base_test_app();
+            let style = FrameGeometry {
+                radius: 40.0,
+                joined_top,
+                requested_header: Some(28.0),
+                ..FrameGeometry::new(&SsdSettings::default(), false, None)
+            };
+            app.world_mut()
+                .spawn_scene(window_scene(bsn! { Node }, style))
+                .expect("frame scene");
+            let (header, parent) = app
+                .world_mut()
+                .query_filtered::<(&Node, &ChildOf), With<FrameHeader>>()
+                .single(app.world())
+                .expect("header");
+            assert_eq!(header.border_radius, BorderRadius::ZERO);
+            let body = app.world().get::<Node>(parent.parent()).expect("body");
+            assert_eq!(body.overflow, Overflow::clip());
+            assert_eq!(
+                body.border_radius.top_left,
+                px(if joined_top { 0.0 } else { 37.0 }).into()
+            );
+            let paint = app
+                .world_mut()
+                .query_filtered::<&Node, With<FrameHeaderBackdrop>>()
+                .single(app.world())
+                .expect("header paint");
+            assert_eq!(paint.height, px(74));
+            assert_eq!(
+                paint.border_radius.top_left,
+                px(if joined_top { 0.0 } else { 37.0 }).into()
+            );
+        }
     }
 
     #[test]
@@ -2486,7 +2673,7 @@ mod tests {
         );
         assert!(
             app.world_mut()
-                .query_filtered::<&BackgroundColor, With<FrameHeader>>()
+                .query_filtered::<&BackgroundColor, With<FrameHeaderBackdrop>>()
                 .iter(app.world())
                 .all(|color| color.0 == colors.background)
         );

@@ -13,7 +13,7 @@ use bevy::{
         event::Event,
         message::MessageWriter,
         observer::On,
-        query::{QueryData, With},
+        query::{Has, QueryData, With},
         resource::Resource,
         schedule::IntoScheduleConfigs,
         system::{Commands, Query, Res, ResMut},
@@ -281,6 +281,7 @@ struct PresentedWindow {
     visibility: &'static WindowVisibility,
     occupant: Option<&'static WindowOccupant>,
     vacancy: &'static WindowVacancy,
+    persistent: Has<crate::persistence::PersistentWindow>,
     fullscreen: Option<&'static WindowFullscreen>,
     occluded: Option<&'static FullscreenOccluded>,
 }
@@ -342,7 +343,7 @@ fn reconcile(
         let presentable = if window.occupant.is_some() {
             clients.mapped_client(window.entity).is_some()
         } else {
-            *window.vacancy == WindowVacancy::Retain
+            *window.vacancy == WindowVacancy::Retain || window.persistent
         };
         if !presentable {
             continue;

@@ -374,7 +374,7 @@ fn assert_solo_group(app: &mut App, header_count: usize) {
         .iter(app.world())
     {
         count += 1;
-        assert_eq!(node.border_radius, BorderRadius::all(px(0)));
+        assert_eq!(node.border_radius, BorderRadius::ZERO);
         assert!(app.world().get::<WindowInSoloFrame>(header.child).is_some());
         let body = app
             .world()
@@ -413,7 +413,11 @@ fn tab_and_stack_titles_use_system_fonts_and_follow_client_metadata() {
                 .query::<(&HeaderTarget, &Children)>()
                 .iter(app.world())
                 .find(|(target, _)| target.child == first)
-                .and_then(|(_, children)| children.first())
+                .and_then(|(_, children)| {
+                    children
+                        .iter()
+                        .find(|child| app.world().get::<Text>(**child).is_some())
+                })
                 .copied()
                 .expect("title label");
             assert_eq!(app.world().get::<Text>(label).expect("text").0, expected);
@@ -460,7 +464,12 @@ fn font_reload_updates_header_text_and_reserved_height_together() {
         assert_eq!(node.height, px(f32::from(height)));
         let font = app
             .world()
-            .get::<TextFont>(*children.first().expect("label"))
+            .get::<TextFont>(
+                *children
+                    .iter()
+                    .find(|child| app.world().get::<TextFont>(**child).is_some())
+                    .expect("label"),
+            )
             .expect("font");
         assert_eq!(font.font, FontSource::serif());
         assert_eq!(font.font_size, bevy::text::FontSize::Px(24.0));
@@ -660,23 +669,23 @@ fn post_picking_selection_updates_visibility_and_headers_in_the_same_frame() {
     let focused_color = app.world().resource::<SsdSettings>().focused.background;
     let header = app
         .world_mut()
-        .query::<(&HeaderTarget, &BackgroundColor)>()
+        .query::<(&HeaderTarget, &HeaderVisual)>()
         .iter(app.world())
         .find(|(target, _)| target.child == first)
         .expect("header");
-    assert_eq!(header.1.0, focused_color);
+    assert_eq!(header.1.colors.background, focused_color);
     let unfocused_color = app.world().resource::<SsdSettings>().unfocused.background;
     let other = app
         .world_mut()
-        .query::<(&HeaderTarget, &BackgroundColor)>()
+        .query::<(&HeaderTarget, &HeaderVisual)>()
         .iter(app.world())
         .find(|(target, _)| target.child == second)
         .expect("other header");
-    assert_eq!(other.1.0, unfocused_color);
+    assert_eq!(other.1.colors.background, unfocused_color);
 }
 
 #[test]
-fn group_frame_reserves_one_perimeter_and_rounds_only_outer_header_corners() {
+fn group_frame_clips_headers_to_its_shared_inner_radius() {
     let (mut app, first, second) = setup();
     let group = app
         .world()
@@ -708,10 +717,8 @@ fn group_frame_reserves_one_perimeter_and_rounds_only_outer_header_corners() {
         .find(|(target, _)| target.child == second)
         .expect("second")
         .1;
-    assert_ne!(first_header.border_radius.top_left, px(0).into());
-    assert_eq!(first_header.border_radius.top_right, px(0).into());
-    assert_eq!(last_header.border_radius.top_left, px(0).into());
-    assert_ne!(last_header.border_radius.top_right, px(0).into());
+    assert_eq!(first_header.border_radius, BorderRadius::ZERO);
+    assert_eq!(last_header.border_radius, BorderRadius::ZERO);
     app.world_mut()
         .trigger(I3LayoutRequest::Set(TileLayout::Stacked));
     app.update();
@@ -731,10 +738,43 @@ fn group_frame_reserves_one_perimeter_and_rounds_only_outer_header_corners() {
         .find(|(target, _)| target.child == second)
         .expect("second")
         .1;
-    assert_ne!(first_header.border_radius.top_left, px(0).into());
-    assert_ne!(first_header.border_radius.top_right, px(0).into());
-    assert_eq!(last_header.border_radius.top_left, px(0).into());
-    assert_eq!(last_header.border_radius.top_right, px(0).into());
+    assert_eq!(first_header.border_radius, BorderRadius::ZERO);
+    assert_eq!(last_header.border_radius, BorderRadius::ZERO);
+
+    // A radius larger than half a header's height is resolved by the full frame.
+    app.world_mut().resource_mut::<SsdSettings>().corner_radius = 40;
+    app.update();
+    let (frame, node) = app
+        .world_mut()
+        .query_filtered::<(Entity, &Node), With<frame::GroupFrame>>()
+        .single(app.world())
+        .expect("frame");
+    assert_eq!(node.border_radius, BorderRadius::all(px(40)));
+    assert_eq!(node.overflow, Overflow::clip());
+    for (target, parent, node) in app
+        .world_mut()
+        .query::<(&HeaderTarget, &ChildOf, &Node)>()
+        .iter(app.world())
+    {
+        assert_eq!(parent.parent(), frame);
+        assert_eq!(node.border_radius, BorderRadius::ZERO);
+        let header = app
+            .world()
+            .get::<TileHeaders>(target.container)
+            .expect("headers")
+            .0
+            .iter()
+            .find(|header| header.child == target.child)
+            .expect("header");
+        assert_eq!(
+            node.left,
+            px(header.geometry.position.x - bounds.position.x - border)
+        );
+        assert_eq!(
+            node.top,
+            px(header.geometry.position.y - bounds.position.y - border)
+        );
+    }
 }
 
 #[test]
@@ -793,7 +833,7 @@ fn nested_tab_and_stack_combinations_share_one_frame_and_keep_independent_header
                 .iter(app.world())
             {
                 if target.container == inner {
-                    assert_eq!(node.border_radius, BorderRadius::all(px(0)));
+                    assert_eq!(node.border_radius, BorderRadius::ZERO);
                 }
             }
             let inner_bounds = app.world().get::<TileGeometry>(inner).expect("bounds").0;
@@ -828,10 +868,13 @@ fn nested_tab_and_stack_combinations_share_one_frame_and_keep_independent_header
             );
             assert!(
                 app.world_mut()
-                    .query::<(&HeaderTarget, &Node)>()
+                    .query::<(&HeaderTarget, &ChildOf)>()
                     .iter(app.world())
-                    .any(|(target, node)| target.container == inner
-                        && node.border_radius.top_left != px(0).into())
+                    .any(|(target, parent)| target.container == inner
+                        && app
+                            .world()
+                            .get::<frame::GroupFrame>(parent.parent())
+                            .is_some_and(|frame| frame.container == inner))
             );
         }
     }
