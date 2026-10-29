@@ -221,13 +221,13 @@ fn workspace_transfer_keeps_tab_layout_and_active_child() {
     app.world_mut().trigger(TileSelect(group));
     app.update();
     app.world_mut()
-        .trigger(I3WorkspaceRequest::MoveWindow(WorkspaceTarget::Name(
+        .trigger(I3WorkspaceRequest::move_window(WorkspaceTarget::Name(
             "2".into(),
         )));
     app.update();
     assert!(!visible(&app, first) && !visible(&app, second));
     app.world_mut()
-        .trigger(I3WorkspaceRequest::Switch(WorkspaceTarget::Name(
+        .trigger(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
             "2".into(),
         )));
     app.update();

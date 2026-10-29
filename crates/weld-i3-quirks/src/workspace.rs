@@ -42,16 +42,54 @@ pub struct WorkspaceSettings {
     pub assignments: Vec<WorkspaceAssignment>,
     /// Workspace names from switch bindings, in configuration order.
     pub initial_names: Vec<String>,
+    /// A named switch/move targeting the selected workspace goes to the previous one.
+    pub auto_back_and_forth: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WorkspaceNavigation {
+    Switch,
+    MoveWindow,
 }
 
 #[derive(Event, Clone, Debug, Eq, PartialEq)]
 pub enum I3WorkspaceRequest {
-    Switch(WorkspaceTarget),
-    MoveWindow(WorkspaceTarget),
+    Navigate {
+        target: WorkspaceTarget,
+        operation: WorkspaceNavigation,
+        allow_auto_back_and_forth: bool,
+    },
     Rename {
         source: Option<String>,
         name: String,
     },
+}
+
+impl I3WorkspaceRequest {
+    pub fn switch(target: WorkspaceTarget) -> Self {
+        Self::Navigate {
+            target,
+            operation: WorkspaceNavigation::Switch,
+            allow_auto_back_and_forth: true,
+        }
+    }
+    pub fn move_window(target: WorkspaceTarget) -> Self {
+        Self::Navigate {
+            target,
+            operation: WorkspaceNavigation::MoveWindow,
+            allow_auto_back_and_forth: true,
+        }
+    }
+    pub fn without_auto_back_and_forth(mut self) -> Self {
+        if let Self::Navigate {
+            allow_auto_back_and_forth,
+            ..
+        } = &mut self
+        {
+            *allow_auto_back_and_forth = false;
+        }
+        self
+    }
 }
 
 /// Assign or transfer one explicit window without following it to the target.
@@ -275,8 +313,12 @@ pub(crate) fn request(
         let _ = pending.defer(event.event().clone());
         return;
     }
-    let target = match event.event() {
-        I3WorkspaceRequest::Switch(target) | I3WorkspaceRequest::MoveWindow(target) => target,
+    let (target, operation, allow_auto) = match event.event() {
+        I3WorkspaceRequest::Navigate {
+            target,
+            operation,
+            allow_auto_back_and_forth,
+        } => (target, *operation, *allow_auto_back_and_forth),
         I3WorkspaceRequest::Rename { source, name } => {
             let workspace = source.as_ref().map_or(view.selected.entity(), |source| {
                 view.find(&WorkspaceTarget::Name(source.clone()))
@@ -294,12 +336,25 @@ pub(crate) fn request(
             return;
         }
     };
-    if matches!(event.event(), I3WorkspaceRequest::MoveWindow(_)) && focus.entity().is_none() {
+    if operation == WorkspaceNavigation::MoveWindow && focus.entity().is_none() {
         return;
     }
+    let automatic = allow_auto
+        && view.settings.auto_back_and_forth
+        && matches!(
+            target,
+            WorkspaceTarget::Name(_) | WorkspaceTarget::Number(_)
+        )
+        && view.selected.entity().is_some()
+        && view.find(target) == view.selected.entity();
+    let target = if automatic {
+        &WorkspaceTarget::BackAndForth
+    } else {
+        target
+    };
     let workspace = view.resolve(target, &mut creation);
     let Some(workspace) = workspace else { return };
-    if matches!(event.event(), I3WorkspaceRequest::Switch(_)) {
+    if operation == WorkspaceNavigation::Switch {
         commands.trigger(Resolved::Switch(workspace));
     } else if let Some(window) = selection.target(&focus) {
         commands.trigger(Resolved::Move { window, workspace });

@@ -432,8 +432,16 @@ test to exercise a changed assignment. Master publishes workspace names, active
 states and output membership through `ext-workspace-v1`, including click-to-switch
 activation. See [desktop layer surfaces](layer-shell.md#workspace-controls).
 Workspace-list IPC, pointer warping, blank-output pointer focus, `focus output`,
-`move workspace to output` and the automatic back-and-forth
-setting remain follow-ups.
+`move workspace to output` remain follow-ups.
+
+`workspace_auto_back_and_forth yes|no` defaults to `no`. When enabled, a named or
+numbered switch to the selected workspace returns to the previous workspace;
+moving to that same target instead moves the selection to the previous workspace
+without following it. `workspace --no-auto-back-and-forth NAME` and
+`move --no-auto-back-and-forth container to workspace NAME` override the setting
+for one command. `number NAME` works in both forms. Explicit `back_and_forth`
+continues to work independently, including recreating an empty previous workspace.
+Waybar activation and assignment rules select their exact target.
 
 `rename workspace [OLD_NAME] to NEW_NAME` renames an existing workspace. Omitting
 the old name uses the selected workspace. Quote multiword names. Identity, layout,

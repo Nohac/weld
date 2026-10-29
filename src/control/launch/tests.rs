@@ -107,7 +107,7 @@ fn launch_destination_survives_workspace_switch_and_multiple_connections() {
         },
     );
     app.world_mut()
-        .trigger(I3WorkspaceRequest::Switch(WorkspaceTarget::Name(
+        .trigger(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
             "other".into(),
         )));
     app.update();

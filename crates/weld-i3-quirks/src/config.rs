@@ -2,7 +2,8 @@
 
 use crate::FocusWrapping;
 use crate::workspace::{
-    I3WorkspaceRequest, WorkspaceAssignment, WorkspaceSettings, WorkspaceTarget, number,
+    I3WorkspaceRequest, WorkspaceAssignment, WorkspaceNavigation, WorkspaceSettings,
+    WorkspaceTarget, number,
 };
 use anyhow::{Context, Result, bail, ensure};
 use bevy::color::{Color, Srgba};
@@ -131,9 +132,11 @@ pub fn parse_with_policy<Extension>(
         &extension,
         &mut config.warnings,
     )? {
-        if let Action::Workspace(I3WorkspaceRequest::Switch(
-            WorkspaceTarget::Name(name) | WorkspaceTarget::Number(name),
-        )) = &action
+        if let Action::Workspace(I3WorkspaceRequest::Navigate {
+            target: WorkspaceTarget::Name(name) | WorkspaceTarget::Number(name),
+            operation: WorkspaceNavigation::Switch,
+            ..
+        }) = &action
             && !config.workspaces.initial_names.contains(name)
         {
             config.workspaces.initial_names.push(name.clone());
@@ -320,6 +323,9 @@ fn apply<Extension>(config: &mut Configuration<Extension>, statement: &Statement
                 workspace: name.to_owned(),
                 outputs,
             });
+        }
+        ("workspace_auto_back_and_forth", [value @ ("yes" | "no")]) => {
+            config.workspaces.auto_back_and_forth = *value == "yes";
         }
         ("gaps", [kind @ ("inner" | "outer"), value]) => {
             let gap = value
@@ -607,8 +613,25 @@ fn action<Extension>(
                 words.join(" ")
             )));
         }
+        ["workspace", "--no-auto-back-and-forth", target @ ..] => Action::Workspace(
+            I3WorkspaceRequest::switch(workspace_target(target)?).without_auto_back_and_forth(),
+        ),
+        ["move", "--no-auto-back-and-forth", rest @ ..] => {
+            let rest = match rest {
+                ["window" | "container", rest @ ..] => rest,
+                _ => rest,
+            };
+            let rest = rest.strip_prefix(&["to"]).unwrap_or(rest);
+            let ["workspace", target @ ..] = rest else {
+                bail!("--no-auto-back-and-forth requires a workspace move")
+            };
+            Action::Workspace(
+                I3WorkspaceRequest::move_window(workspace_target(target)?)
+                    .without_auto_back_and_forth(),
+            )
+        }
         ["workspace", target @ ..] => {
-            Action::Workspace(I3WorkspaceRequest::Switch(workspace_target(target)?))
+            Action::Workspace(I3WorkspaceRequest::switch(workspace_target(target)?))
         }
         ["rename", "workspace", rest @ ..] => {
             let separator = rest
@@ -630,7 +653,7 @@ fn action<Extension>(
         ]
         | ["move", "to", "workspace", target @ ..]
         | ["move", "workspace", target @ ..] => {
-            Action::Workspace(I3WorkspaceRequest::MoveWindow(workspace_target(target)?))
+            Action::Workspace(I3WorkspaceRequest::move_window(workspace_target(target)?))
         }
         ["exec" | "exec_always", command @ ..] => {
             // Shell syntax remains unexpanded here. It executes only when this
@@ -1018,7 +1041,7 @@ mod tests {
         .expect("quoted punctuation");
         assert_eq!(
             quoted.bindings[0].1,
-            Action::Workspace(I3WorkspaceRequest::Switch(WorkspaceTarget::Name(
+            Action::Workspace(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
                 "1: work, play; rest".to_owned()
             )))
         );
@@ -1043,25 +1066,25 @@ mod tests {
         );
         assert_eq!(
             config.bindings[0].1,
-            Action::Workspace(I3WorkspaceRequest::Switch(WorkspaceTarget::Number(
+            Action::Workspace(I3WorkspaceRequest::switch(WorkspaceTarget::Number(
                 "3: work".to_owned()
             )))
         );
         assert_eq!(
             config.bindings[1].1,
-            Action::Workspace(I3WorkspaceRequest::MoveWindow(WorkspaceTarget::Number(
+            Action::Workspace(I3WorkspaceRequest::move_window(WorkspaceTarget::Number(
                 "3".to_owned()
             )))
         );
         assert_eq!(
             config.bindings[2].1,
-            Action::Workspace(I3WorkspaceRequest::Switch(WorkspaceTarget::Name(
+            Action::Workspace(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
                 "next".to_owned()
             )))
         );
         assert_eq!(
             config.bindings[3].1,
-            Action::Workspace(I3WorkspaceRequest::Switch(WorkspaceTarget::NextOnOutput))
+            Action::Workspace(I3WorkspaceRequest::switch(WorkspaceTarget::NextOnOutput))
         );
         for source in [
             "workspace 1 output",

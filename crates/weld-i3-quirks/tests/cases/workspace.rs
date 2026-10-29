@@ -20,6 +20,65 @@ fn parse_config(name: &str, source: &str) -> anyhow::Result<config::Configuratio
 }
 
 #[test]
+fn automatic_back_and_forth_respects_command_overrides_moves_and_reload() {
+    let source = indoc! {r#"
+        workspace_auto_back_and_forth yes
+        bindsym Mod4+2 workspace --no-auto-back-and-forth number 2
+        bindsym Mod4+Shift+2 move --no-auto-back-and-forth container to workspace number 2
+    "#};
+    let config = parse_config("automatic", source).expect("config");
+    let (mut app, _) = configured("workspace_auto_back_and_forth yes", 1);
+    let first = window(&mut app, 1);
+    show(&mut app, "1");
+    assert_eq!(selected(&app), first, "no previous workspace is a no-op");
+    show(&mut app, "2");
+    let second = window(&mut app, 2);
+    switch(&mut app, WorkspaceTarget::Number("2".into()));
+    assert_eq!(current(&app), "1");
+    assert_eq!(selected(&app), first);
+    show(&mut app, "2");
+    for (_, action) in &config.bindings {
+        let config::Action::Workspace(request) = action else {
+            panic!("workspace command")
+        };
+        app.world_mut().trigger(request.clone());
+        app.update();
+        assert_eq!(current(&app), "2");
+        assert_eq!(selected(&app), second);
+    }
+    move_to(&mut app, "2");
+    assert_eq!(current(&app), "2", "moving does not follow the window");
+    let one = workspace(&mut app, "1").expect("previous workspace");
+    assert_eq!(
+        app.world().get::<WorkspaceMember>(second),
+        Some(&WorkspaceMember(one))
+    );
+    app.insert_resource(
+        parse_config("reload", "workspace_auto_back_and_forth no")
+            .expect("config")
+            .workspaces,
+    );
+    show(&mut app, "2");
+    assert_eq!(current(&app), "2");
+    switch(&mut app, WorkspaceTarget::BackAndForth);
+    assert_eq!(
+        current(&app),
+        "1",
+        "explicit back-and-forth works with automatic behavior disabled"
+    );
+    app.insert_resource(config.workspaces);
+    show(&mut app, "3");
+    show(&mut app, "1");
+    assert!(workspace(&mut app, "3").is_none());
+    show(&mut app, "1");
+    assert_eq!(
+        current(&app),
+        "3",
+        "automatic back-and-forth recreates an empty previous workspace"
+    );
+}
+
+#[test]
 fn rename_preserves_workspace_identity_layout_and_previous_workspace_history() {
     let (mut app, _) = configured("", 1);
     let first = window(&mut app, 1);
@@ -217,7 +276,7 @@ fn current(app: &App) -> String {
 }
 
 fn switch(app: &mut App, target: WorkspaceTarget) {
-    app.world_mut().trigger(I3WorkspaceRequest::Switch(target));
+    app.world_mut().trigger(I3WorkspaceRequest::switch(target));
     app.update();
 }
 
@@ -227,7 +286,7 @@ fn show(app: &mut App, name: &str) {
 
 fn move_to(app: &mut App, name: &str) {
     app.world_mut()
-        .trigger(I3WorkspaceRequest::MoveWindow(WorkspaceTarget::Name(
+        .trigger(I3WorkspaceRequest::move_window(WorkspaceTarget::Name(
             name.to_owned(),
         )));
     app.update();
@@ -536,7 +595,7 @@ fn ordered_switch_move_and_switch_see_published_memberships() {
     let window = window(&mut app, 1);
     app.world_mut()
         .run_system_once(|mut commands: Commands| {
-        commands.trigger(I3WorkspaceRequest::MoveWindow(WorkspaceTarget::Name(
+        commands.trigger(I3WorkspaceRequest::move_window(WorkspaceTarget::Name(
             "2".to_owned(),
         )));
         commands.queue(|world: &mut bevy::ecs::world::World| {
@@ -544,7 +603,7 @@ fn ordered_switch_move_and_switch_see_published_memberships() {
             assert!(query.iter(world).all(|(geometry, _)| geometry.size.min_element() > 1.0),
                 "a move into a newly created workspace publishes usable geometry before the next action");
         });
-            commands.trigger(I3WorkspaceRequest::Switch(WorkspaceTarget::Name(
+            commands.trigger(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
                 "2".to_owned(),
             )));
             commands.trigger(TileRequest::Focused(TileOperation::Split(
@@ -713,7 +772,7 @@ fn startup_workspace_switches_share_order_with_tiling_commands() {
         I3QuirksPlugin,
     ));
     app.world_mut()
-        .trigger(I3WorkspaceRequest::Switch(WorkspaceTarget::Name(
+        .trigger(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
             "3".to_owned(),
         )));
     let window = app

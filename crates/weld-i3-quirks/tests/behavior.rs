@@ -55,12 +55,12 @@ fn floating_plane_focus_and_workspace_roundtrip_preserve_selection() {
     app.update();
     assert_eq!(selected(&app), floating);
     app.world_mut()
-        .trigger(I3WorkspaceRequest::Switch(WorkspaceTarget::Name(
+        .trigger(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
             "2".into(),
         )));
     app.update();
     app.world_mut()
-        .trigger(I3WorkspaceRequest::Switch(WorkspaceTarget::Name(
+        .trigger(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
             "1".into(),
         )));
     app.update();
@@ -81,7 +81,7 @@ fn floating_window_transfer_updates_workspace_without_adding_a_tile() {
     });
     app.update();
     app.world_mut()
-        .trigger(I3WorkspaceRequest::MoveWindow(WorkspaceTarget::Name(
+        .trigger(I3WorkspaceRequest::move_window(WorkspaceTarget::Name(
             "2".into(),
         )));
     app.update();
@@ -91,7 +91,7 @@ fn floating_window_transfer_updates_workspace_without_adding_a_tile() {
         Some(&weld_window::WindowVisibility::Hidden)
     );
     app.world_mut()
-        .trigger(I3WorkspaceRequest::Switch(WorkspaceTarget::Name(
+        .trigger(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
             "2".into(),
         )));
     app.update();

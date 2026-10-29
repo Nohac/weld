@@ -167,7 +167,7 @@ fn mode_toggle_from_a_group_selects_the_floating_window_then_the_remembered_leaf
 
 fn show(app: &mut App, name: &str) {
     app.world_mut()
-        .trigger(I3WorkspaceRequest::Switch(WorkspaceTarget::Name(
+        .trigger(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
             name.into(),
         )));
     app.update();
@@ -262,7 +262,7 @@ fn moving_a_selected_group_to_another_workspace_preserves_internal_structure() {
     let source = app.world().get::<WorkspaceMember>(first).expect("source").0;
     hierarchy(&mut app, I3FocusHierarchy::Parent);
     app.world_mut()
-        .trigger(I3WorkspaceRequest::MoveWindow(WorkspaceTarget::Name(
+        .trigger(I3WorkspaceRequest::move_window(WorkspaceTarget::Name(
             "2".into(),
         )));
     app.update();
@@ -322,7 +322,7 @@ fn moving_the_workspace_selection_transfers_its_tiles_as_a_group() {
     hierarchy(&mut app, I3FocusHierarchy::Parent);
     assert_eq!(group(&app), Some(source));
     app.world_mut()
-        .trigger(I3WorkspaceRequest::MoveWindow(WorkspaceTarget::Name(
+        .trigger(I3WorkspaceRequest::move_window(WorkspaceTarget::Name(
             "2".into(),
         )));
     app.update();
@@ -389,7 +389,7 @@ fn selecting_both_windows_of_a_single_split_can_move_them_together() {
     hierarchy(&mut app, I3FocusHierarchy::Parent);
     assert_eq!(group(&app), Some(source));
     app.world_mut()
-        .trigger(I3WorkspaceRequest::MoveWindow(WorkspaceTarget::Name(
+        .trigger(I3WorkspaceRequest::move_window(WorkspaceTarget::Name(
             "2".into(),
         )));
     app.update();
@@ -437,7 +437,7 @@ fn moving_workspace_tiles_into_a_populated_workspace_leaves_floating_windows_beh
     hierarchy(&mut app, I3FocusHierarchy::Parent);
     assert_eq!(group(&app), Some(source));
     app.world_mut()
-        .trigger(I3WorkspaceRequest::MoveWindow(WorkspaceTarget::Name(
+        .trigger(I3WorkspaceRequest::move_window(WorkspaceTarget::Name(
             "2".into(),
         )));
     app.update();

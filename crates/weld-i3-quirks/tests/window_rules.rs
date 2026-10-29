@@ -71,7 +71,7 @@ fn persistence_rule_retains_slot_geometry_and_workspace_then_rebinds_a_new_occup
     assert!(app.world().get_entity(neighbor).is_ok());
 
     app.world_mut()
-        .trigger(I3WorkspaceRequest::Switch(WorkspaceTarget::Name(
+        .trigger(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
             "2".into(),
         )));
     app.update();
@@ -540,7 +540,7 @@ fn rule_sequence_places_background_window_before_first_publication() {
         Vec2::new(40.0, 60.0)
     );
     app.world_mut()
-        .trigger(I3WorkspaceRequest::Switch(WorkspaceTarget::Number(
+        .trigger(I3WorkspaceRequest::switch(WorkspaceTarget::Number(
             "3".into(),
         )));
     app.update();
@@ -614,7 +614,7 @@ fn assignments_use_first_match_and_preserve_numbered_workspace_identity() {
     "#});
     app.update();
     app.world_mut()
-        .trigger(I3WorkspaceRequest::Switch(WorkspaceTarget::Name(
+        .trigger(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
             "3:tools".into(),
         )));
     app.update();
