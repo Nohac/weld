@@ -72,6 +72,7 @@ impl Plugin for I3QuirksPlugin {
             .add_observer(workspace::finish_switch)
             .add_observer(sticky::request)
             .add_observer(workspace::remember)
+            .add_observer(workspace::renamed)
             .add_observer(workspace::bootstrap)
             .add_observer(workspace::after_move)
             .init_resource::<focus::FocusPath>()

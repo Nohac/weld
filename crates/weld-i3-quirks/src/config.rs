@@ -610,6 +610,17 @@ fn action<Extension>(
         ["workspace", target @ ..] => {
             Action::Workspace(I3WorkspaceRequest::Switch(workspace_target(target)?))
         }
+        ["rename", "workspace", rest @ ..] => {
+            let separator = rest
+                .iter()
+                .position(|word| *word == "to")
+                .context("rename workspace requires to NEW_NAME")?;
+            let source = (separator > 0)
+                .then(|| workspace_name(&rest[..separator]))
+                .transpose()?;
+            let name = workspace_name(&rest[separator + 1..])?;
+            Action::Workspace(I3WorkspaceRequest::Rename { source, name })
+        }
         [
             "move",
             "container" | "window",

@@ -20,6 +20,64 @@ fn parse_config(name: &str, source: &str) -> anyhow::Result<config::Configuratio
 }
 
 #[test]
+fn rename_preserves_workspace_identity_layout_and_previous_workspace_history() {
+    let (mut app, _) = configured("", 1);
+    let first = window(&mut app, 1);
+    let one = workspace(&mut app, "1").expect("workspace");
+    let id = app.world().get::<Workspace>(one).expect("state").id();
+    let geometry = *app.world().get::<WindowGeometry>(first).expect("geometry");
+    let config = parse_config(
+        "rename",
+        indoc! {r#"
+        bindsym Mod4+r rename workspace to "1: editing"
+        bindsym Mod4+t rename workspace "1: editing" to "3: code"
+    "#},
+    )
+    .expect("config");
+    let apply = |app: &mut App, index: usize| {
+        let config::Action::Workspace(request) = &config.bindings[index].1 else {
+            panic!("workspace command")
+        };
+        app.world_mut().trigger(request.clone());
+        app.update();
+    };
+    apply(&mut app, 0);
+    assert_eq!(current(&app), "1: editing");
+    assert_eq!(workspace(&mut app, "1: editing"), Some(one));
+    assert_eq!(app.world().get::<Workspace>(one).expect("state").id(), id);
+    assert_eq!(app.world().get::<WindowGeometry>(first), Some(&geometry));
+    assert_eq!(
+        app.world().get::<WorkspaceMember>(first),
+        Some(&WorkspaceMember(one))
+    );
+    show(&mut app, "2");
+    let second = window(&mut app, 2);
+    apply(&mut app, 1);
+    assert_eq!(current(&app), "2");
+    assert_eq!(selected(&app), second);
+    switch(&mut app, WorkspaceTarget::BackAndForth);
+    assert_eq!(current(&app), "3: code");
+    assert_eq!(selected(&app), first);
+    app.world_mut().trigger(I3WorkspaceRequest::Rename {
+        source: None,
+        name: "2".into(),
+    });
+    app.update();
+    assert_eq!(
+        current(&app),
+        "3: code",
+        "rename must not merge existing workspaces"
+    );
+    show(&mut app, "1");
+    assert_ne!(
+        workspace(&mut app, "1"),
+        Some(one),
+        "old name can be allocated again"
+    );
+    assert_eq!(app.world().get::<Workspace>(one).expect("state").id(), id);
+}
+
+#[test]
 fn sticky_window_stays_on_its_output_when_focus_moves_to_another_monitor() {
     let (mut app, outputs) = configured("workspace 3 output fake-1", 2);
     let sticky = window(&mut app, 1);

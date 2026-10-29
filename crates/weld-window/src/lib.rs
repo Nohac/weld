@@ -912,6 +912,7 @@ impl Plugin for WindowPlugin {
             .init_resource::<workspace::WorkspaceIds>()
             .init_resource::<workspace::FocusedWorkspace>()
             .add_observer(workspace::request)
+            .add_observer(workspace::rename)
             .add_observer(workspace::remember_focus)
             .add_observer(workspace::removed)
             .add_observer(workspace::member_moved)

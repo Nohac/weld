@@ -48,6 +48,10 @@ pub struct WorkspaceSettings {
 pub enum I3WorkspaceRequest {
     Switch(WorkspaceTarget),
     MoveWindow(WorkspaceTarget),
+    Rename {
+        source: Option<String>,
+        name: String,
+    },
 }
 
 /// Assign or transfer one explicit window without following it to the target.
@@ -273,19 +277,32 @@ pub(crate) fn request(
     }
     let target = match event.event() {
         I3WorkspaceRequest::Switch(target) | I3WorkspaceRequest::MoveWindow(target) => target,
+        I3WorkspaceRequest::Rename { source, name } => {
+            let workspace = source.as_ref().map_or(view.selected.entity(), |source| {
+                view.find(&WorkspaceTarget::Name(source.clone()))
+            });
+            if let Some(workspace) = workspace
+                && !view.workspaces.iter().any(|(other, state, _)| {
+                    other != workspace && state.name().eq_ignore_ascii_case(name)
+                })
+            {
+                commands.trigger(weld_window::workspace::WorkspaceRename {
+                    workspace,
+                    name: name.clone(),
+                });
+            }
+            return;
+        }
     };
     if matches!(event.event(), I3WorkspaceRequest::MoveWindow(_)) && focus.entity().is_none() {
         return;
     }
     let workspace = view.resolve(target, &mut creation);
     let Some(workspace) = workspace else { return };
-    match event.event() {
-        I3WorkspaceRequest::Switch(_) => commands.trigger(Resolved::Switch(workspace)),
-        I3WorkspaceRequest::MoveWindow(_) => {
-            if let Some(window) = selection.target(&focus) {
-                commands.trigger(Resolved::Move { window, workspace });
-            }
-        }
+    if matches!(event.event(), I3WorkspaceRequest::Switch(_)) {
+        commands.trigger(Resolved::Switch(workspace));
+    } else if let Some(window) = selection.target(&focus) {
+        commands.trigger(Resolved::Move { window, workspace });
     }
 }
 
@@ -499,6 +516,18 @@ pub(crate) fn remember(
         .and_then(|entity| workspaces.get(entity).ok())
     {
         previous.0 = Some(old.name().to_owned());
+    }
+}
+
+pub(crate) fn renamed(
+    event: On<weld_window::workspace::WorkspaceRenamed>,
+    workspaces: Query<&Workspace>,
+    mut previous: ResMut<PreviousWorkspace>,
+) {
+    if previous.0.as_deref() == Some(event.previous_name.as_str())
+        && let Ok(workspace) = workspaces.get(event.workspace)
+    {
+        previous.0 = Some(workspace.name().to_owned());
     }
 }
 

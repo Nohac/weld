@@ -432,8 +432,14 @@ test to exercise a changed assignment. Master publishes workspace names, active
 states and output membership through `ext-workspace-v1`, including click-to-switch
 activation. See [desktop layer surfaces](layer-shell.md#workspace-controls).
 Workspace-list IPC, pointer warping, blank-output pointer focus, `focus output`,
-`move workspace to output`, workspace rename, and the automatic back-and-forth
+`move workspace to output` and the automatic back-and-forth
 setting remain follow-ups.
+
+`rename workspace [OLD_NAME] to NEW_NAME` renames an existing workspace. Omitting
+the old name uses the selected workspace. Quote multiword names. Identity, layout,
+output, selection and membership survive; Waybar's workspace inventory and the IPC
+tree publish the new name. Renaming an inactive previous workspace updates
+back-and-forth history. A name already used by another workspace is rejected.
 
 Example:
 

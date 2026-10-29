@@ -143,6 +143,43 @@ impl WorkspaceCreation<'_, '_> {
 #[derive(Event, Clone, Copy, Debug)]
 pub struct WorkspaceCreated(pub Entity);
 
+/// Rename an existing workspace while preserving its identity and membership.
+#[derive(Event, Clone, Debug)]
+pub struct WorkspaceRename {
+    pub workspace: Entity,
+    pub name: String,
+}
+
+/// Published after a workspace name and its allocation index change together.
+#[derive(Event, Clone, Debug)]
+pub struct WorkspaceRenamed {
+    pub workspace: Entity,
+    pub previous_name: String,
+}
+
+pub(crate) fn rename(
+    event: On<WorkspaceRename>,
+    mut workspaces: Query<&mut Workspace>,
+    mut ids: ResMut<WorkspaceIds>,
+    mut commands: Commands,
+    mut redraw: MessageWriter<RequestRedraw>,
+) {
+    if event.name.is_empty() || ids.names.contains(&event.name) {
+        return;
+    }
+    let Ok(mut workspace) = workspaces.get_mut(event.workspace) else {
+        return;
+    };
+    let previous_name = std::mem::replace(&mut workspace.name, event.name.clone());
+    ids.names.remove(&previous_name);
+    ids.names.insert(event.name.clone());
+    commands.trigger(WorkspaceRenamed {
+        workspace: event.workspace,
+        previous_name,
+    });
+    redraw.write(RequestRedraw);
+}
+
 /// Native workspace operations. Policies choose which peers to hide or display.
 #[derive(Event, Clone, Copy, Debug)]
 pub enum WorkspaceRequest {
