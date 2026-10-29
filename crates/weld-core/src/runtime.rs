@@ -2,6 +2,7 @@
 
 mod assembly;
 pub(crate) mod callbacks;
+pub mod drag;
 pub(crate) mod gpu;
 pub mod launch;
 pub(crate) mod native;

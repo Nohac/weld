@@ -126,6 +126,7 @@ pub(crate) struct NativeRuntime<Event: 'static> {
     pub event_loop: EventLoop<'static, ServerState>,
     pub state: HostState<Event>,
     launches: Option<super::launch::LaunchQueue>,
+    drags: Option<super::drag::DragQueue>,
 }
 
 impl<Event: 'static> NativeRuntime<Event> {
@@ -163,6 +164,7 @@ impl<Event: 'static> NativeRuntime<Event> {
         Ok(Self {
             event_loop,
             launches: None,
+            drags: None,
             state: HostState {
                 data: LoopData { server, events },
                 clients,
@@ -184,6 +186,17 @@ impl<Event: 'static> NativeRuntime<Event> {
         let (queue, source) = requests.into_parts();
         register_client_wake_sources(&self.event_loop.handle(), vec![source])?;
         self.launches = Some(queue);
+        Ok(())
+    }
+
+    pub(crate) fn add_drag_requests(&mut self, requests: super::drag::DragRequests) -> Result<()> {
+        anyhow::ensure!(
+            self.drags.is_none(),
+            "native drag service already installed"
+        );
+        let (queue, source) = requests.into_parts();
+        register_client_wake_sources(&self.event_loop.handle(), vec![source])?;
+        self.drags = Some(queue);
         Ok(())
     }
 
@@ -239,6 +252,9 @@ impl<Event: 'static> NativeRuntime<Event> {
                 |driver| driver.timeout(Instant::now()),
             );
             timeout = adapter_dispatch_timeout(&self.state.clients, timeout, Instant::now());
+            if let Some(deadline) = self.state.data.server.file_drag_timeout(Instant::now()) {
+                timeout = timeout.min(deadline);
+            }
             if let Some(deadline) = self
                 .state
                 .data
@@ -270,6 +286,9 @@ impl<Event: 'static> NativeRuntime<Event> {
                 break;
             }
             self.state.data.server.poll_output_captures();
+            if let Some(drags) = &self.drags {
+                drags.service(&mut self.state.data.server);
+            }
             if let Some(launches) = &mut self.launches {
                 launches.service(
                     &mut self.state.children,
@@ -450,6 +469,7 @@ pub(crate) fn apply_policy_requests<Event>(
     }
     state.data.server.apply_pending_client_work();
     for route in policy.take_pointer_route_updates() {
+        state.data.server.publish_file_drag_route(route);
         state.clients.publish_pointer_route(route);
     }
     state.data.server.apply_pending_client_work();

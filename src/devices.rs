@@ -63,6 +63,7 @@ pub(crate) fn install(
     options: DeviceOptions,
     host: Option<IrohHost>,
     launcher: crate::control::launch::Launcher,
+    drag: weld_core::runtime::drag::DragController,
     access: weld_access::AccessAuthority,
 ) -> Result<ControlService> {
     let policy = app.policy_wake()?;
@@ -82,7 +83,7 @@ pub(crate) fn install(
         host,
         sessions.clone(),
         access,
-        crate::control::launch_handler(launcher),
+        crate::control::native_operations(launcher, drag),
     )?;
     let capabilities = app.external_dmabuf_capabilities()?;
     let budget = weld_hoist_encoded::SharedBitrateBudget::new(8_000_000)?;

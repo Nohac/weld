@@ -156,6 +156,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for Observer {
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
+        super::file_drag_tests::device_event(&mut state.file_drag, &event);
         if let wl_data_device::Event::Selection { id } = event {
             state.selection.selected = id;
         }

@@ -175,6 +175,9 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
             if let Some(requests) = options.launch_requests {
                 runtime.add_launch_requests(requests)?;
             }
+            if let Some(requests) = options.drag_requests {
+                runtime.add_drag_requests(requests)?;
+            }
             let child_requested = runtime
                 .state
                 .children
@@ -278,6 +281,9 @@ impl NativeDriver<NestedEvent> for NestedDriver {
             let mut event_count = 0_usize;
             for event in self.host.input.drain() {
                 let event = state.data.server.resolve_input(event);
+                if state.data.server.dispatch_file_drag_input(&event) {
+                    continue;
+                }
                 let forward = shell.enqueue_input_event(event.clone());
                 state
                     .data

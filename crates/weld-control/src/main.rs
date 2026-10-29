@@ -23,6 +23,13 @@ struct Arguments {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Offer local files at the pointer; click to drop, Escape/right-click to cancel.
+    Drag {
+        #[arg(long, conflicts_with = "paths")]
+        cancel: bool,
+        #[arg(required_unless_present = "cancel", num_args = 1..)]
+        paths: Vec<PathBuf>,
+    },
     /// Serve window inspection tools to an MCP client over stdin/stdout.
     Mcp,
     /// Query the running host's managed windows.
@@ -143,6 +150,36 @@ fn main() -> Result<()> {
         )?,
     };
     match args.command {
+        Command::Drag { cancel, paths } => {
+            let request = if cancel {
+                weld_control::native::DragRequest::Cancel
+            } else {
+                let directory = std::env::current_dir()?;
+                weld_control::native::DragRequest::Files(
+                    paths
+                        .into_iter()
+                        .map(|path| {
+                            if path.is_absolute() {
+                                path
+                            } else {
+                                directory.join(path)
+                            }
+                        })
+                        .collect(),
+                )
+            };
+            match call(&path, &Request::Drag(request))? {
+                Response::Ok => println!(
+                    "{}",
+                    if cancel {
+                        "File drag cancelled."
+                    } else {
+                        "File drag ready. Click to drop; Escape or right-click cancels."
+                    }
+                ),
+                _ => anyhow::bail!("unexpected drag response"),
+            }
+        }
         Command::Mcp => weld_control::mcp::run(path)?,
         Command::Window { arguments } => {
             weld_control::windows::WindowClient::new(path)

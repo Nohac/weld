@@ -31,10 +31,14 @@ def main():
     parser.add_argument("--nested", action="store_true")
     parser.add_argument("--xwayland", action="store_true")
     parser.add_argument("--no-build", action="store_true")
+    parser.add_argument("--file-drag-parent", type=Path, help="Parent control socket for a headless-controlled nested probe")
+    parser.add_argument("--file-drag-owner", help="Unique launch owner assigned to this runner by the parent")
     parser.add_argument("--attributed", action="store_true", help="Test workspace attribution and headless control/peek (requires --nested)")
     parser.add_argument("--accessibility-app", metavar="ZENITY", help="Validate AT-SPI with this Zenity executable (requires --nested)")
     parser.add_argument("--text-app", metavar="ZENITY", help="Validate Unicode typing in a GTK entry on Wayland and, with --xwayland, X11")
     args = parser.parse_args()
+    if (args.file_drag_parent or args.file_drag_owner) and not (args.nested and args.file_drag_parent and args.file_drag_owner):
+        parser.error("file drag validation requires --nested, --file-drag-parent and --file-drag-owner")
     if args.attributed and not args.nested:
         parser.error("--attributed requires --nested")
     if args.accessibility_app and not args.nested:
@@ -106,6 +110,8 @@ def main():
                     tree = subprocess.check_output(["swaymsg", "-s", ipc, "-t", "get_tree", "-r"], text=True, timeout=5)
                     return name in tree
                 wait_for(host, lambda: mapped("weld-launch-probe"), "Foot admission through native launch")
+                if args.file_drag_parent:
+                    check_file_drag(ctl, control, host, run, args.file_drag_parent, args.file_drag_owner)
                 if args.attributed:
                     check_attributed(ctl, control, host, run)
                 else:
@@ -164,6 +170,58 @@ def window_rpc(control, method, params):
         response = json.loads(exact(length))["Window"]
         assert response["id"] == "validation", response
         return response
+
+
+def check_file_drag(ctl, control, host, run, parent, owner):
+    def invoke(socket_path, method, **params):
+        response = window_rpc(socket_path, method, params)
+        assert "result" in response, response
+        return response["result"]
+    def nested_window():
+        candidates = invoke(parent, "find", owner=owner)["windows"]
+        return next((window for window in candidates if window["wayland_process_id"] == host.pid
+                     and window["title"] == "Weld nested compositor" and window["control"]), None)
+    wait_for(host, nested_window, "owned headless nested window")
+    window = nested_window()
+    assert not window["visible"], "drag validation must stay off the user's desktop"
+    handle = window["control"]
+    invoke(parent, "pointer", control=handle, x=200, y=150)
+    for pressed in (True, False):
+        invoke(parent, "key", control=handle, keycode=42, pressed=pressed)
+    offered = run / "offered file.txt"
+    offered.write_text("Weld native file drag validation\n")
+    before = {window["id"] for window in invoke(control, "list")["windows"]}
+    def drag(*arguments):
+        return subprocess.run([*ctl, "drag", *map(str, arguments)], capture_output=True, text=True, timeout=8)
+    def started():
+        result = drag(offered)
+        if result.returncode == 0:
+            return True
+        assert "move the local pointer" in result.stderr, result.stderr
+        invoke(parent, "pointer", control=handle, x=201, y=151)
+        return False
+    wait_for(host, started, "native drag admission")
+    duplicate = drag(offered)
+    assert duplicate.returncode != 0 and "already active" in duplicate.stderr, duplicate
+    assert drag("--cancel").returncode == 0
+    assert drag(offered).returncode == 0
+    invoke(parent, "click", control=handle, x=200, y=150, button=272)
+    def dropped():
+        result = drag(offered)
+        if result.returncode == 0:
+            return True
+        assert "already active" in result.stderr, result.stderr
+        return False
+    wait_for(host, dropped, "click-to-drop cleanup")
+    assert drag("--cancel").returncode == 0
+    assert drag(offered).returncode == 0
+    for pressed in (True, False):
+        invoke(parent, "key", control=handle, keycode=1, pressed=pressed)
+    wait_for(host, dropped, "Escape cancellation")
+    assert drag("--cancel").returncode == 0
+    after = {window["id"] for window in invoke(control, "list")["windows"]}
+    assert before == after, "file dragging created an extra window"
+    print("PASS windowless file drag CLI, native click-to-drop, Escape and explicit cancellation", flush=True)
 
 
 def check_attributed(ctl, control, host, run):

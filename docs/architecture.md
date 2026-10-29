@@ -145,6 +145,11 @@ Weld is a workspace of reusable layers and one standard distribution:
 - `weld-core` owns Smithay, Wayland and XWayland protocol state, native input sources,
   backend event loops, DMA-BUF ownership, and native presentation adapters. It
   has no Bevy dependency.
+  Native file dragging owns a compositor-originated data source and local pointer
+  grab. A bounded administrative channel delivers prepared URI lists; shared
+  desktop hit-test routes select targets while the native grab consumes button
+  edges. An idle-sleeping transfer worker writes offered data outside the host
+  loop. See [Local file dragging](file-drag.md).
   Its output-capture host binds Smithay's image-copy-capture and output-source
   protocols. Presenters submit ordered copies of completed composition textures;
   a bounded worker owns GPU readback and optional PNG writing. The host validates

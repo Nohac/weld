@@ -28,6 +28,7 @@ use weld_client::{ClientPointerRouteUpdate, ClientRequest, ClientSurfaceEvent};
 #[derive(Default)]
 pub(crate) struct RunOptions {
     pub(crate) launch_requests: Option<crate::runtime::launch::LaunchRequests>,
+    pub(crate) drag_requests: Option<crate::runtime::drag::DragRequests>,
     pub(crate) client_environment: Vec<(OsString, OsString)>,
     pub(crate) client: Vec<OsString>,
     pub(crate) screenshot: Option<PathBuf>,
@@ -56,6 +57,10 @@ pub struct HostBuilder {
 }
 
 impl HostBuilder {
+    pub fn drag_requests(mut self, requests: crate::runtime::drag::DragRequests) -> Self {
+        self.options.drag_requests = Some(requests);
+        self
+    }
     /// Installs administrative process launch requests on this host's event loop.
     pub fn launch_requests(mut self, requests: crate::runtime::launch::LaunchRequests) -> Self {
         self.options.launch_requests = Some(requests);

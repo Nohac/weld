@@ -125,8 +125,10 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         .clone()
         .unwrap_or_else(|| "weld-0".into());
     let (launcher, launch_requests) = weld_core::runtime::launch::launch_channel()?;
+    let (drag, drag_requests) = weld_core::runtime::drag::drag_channel()?;
     let mut app = WeldApp::builder()
         .launch_requests(launch_requests)
+        .drag_requests(drag_requests)
         .client_environment(vec![
             (
                 "SWAYSOCK".into(),
@@ -389,6 +391,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
                 options,
                 device_host.clone(),
                 launcher.clone(),
+                drag.clone(),
                 access.clone(),
             )
         }) {
@@ -399,7 +402,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
                     &session_name,
                     device_host,
                     access,
-                    control::launch_handler(launcher),
+                    control::native_operations(launcher, drag),
                 )?
             }
         }
@@ -408,7 +411,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
             &session_name,
             device_host,
             access,
-            control::launch_handler(launcher),
+            control::native_operations(launcher, drag),
         )?
     };
     app.add_plugins(control::windows::NativeWindowPlugin(_controls.windows()));

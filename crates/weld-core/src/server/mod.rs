@@ -5,6 +5,7 @@ mod adapter;
 mod capture;
 mod cursor;
 mod dmabuf;
+mod file_drag;
 mod input_admission;
 mod input_seat;
 mod keyboard;
@@ -110,6 +111,7 @@ pub struct ServerState {
     capture: capture::OutputCapture,
     _presentation_time: smithay::wayland::presentation::PresentationState,
     session_lock: session_lock::SessionLock,
+    file_drag: file_drag::FileDragState,
     xdg_shell_state: XdgShellState,
     activation: smithay::wayland::xdg_activation::XdgActivationState,
     xwayland: xwayland::XwaylandState,
@@ -372,6 +374,7 @@ impl ServerState {
             capture,
             _presentation_time: presentation_time,
             session_lock,
+            file_drag: file_drag::FileDragState::default(),
             xdg_shell_state,
             activation,
             xwayland,
@@ -505,6 +508,7 @@ impl ServerState {
     }
 
     pub fn flush_clients(&mut self) {
+        self.poll_file_drag();
         self.cleanup_input_bindings();
         self.popup_manager.cleanup();
         let ended = self

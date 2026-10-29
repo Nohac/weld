@@ -4,6 +4,8 @@
 mod activation_tests;
 #[path = "cursor_tests.rs"]
 mod cursor_tests;
+#[path = "file_drag_tests.rs"]
+mod file_drag_tests;
 #[path = "input_binding_tests.rs"]
 mod input_binding_tests;
 #[path = "input_seat_tests.rs"]
@@ -70,6 +72,7 @@ struct Observer {
     selection: input_binding_tests::SelectionProbe,
     workspaces: workspace_tests::Probe,
     activation: activation_tests::Probe,
+    file_drag: file_drag_tests::Probe,
     layers: Option<
         wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1,
     >,

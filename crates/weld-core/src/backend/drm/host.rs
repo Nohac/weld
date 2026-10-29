@@ -275,6 +275,9 @@ pub(super) fn run(
     if let Some(requests) = options.launch_requests {
         runtime.add_launch_requests(requests)?;
     }
+    if let Some(requests) = options.drag_requests {
+        runtime.add_drag_requests(requests)?;
+    }
     let child_requested = runtime
         .state
         .children
@@ -427,9 +430,13 @@ impl NativeDriver<HostEvent> for DrmDriver {
                 HostEvent::Session(SessionEvent::PauseSession) => {
                     tracing::debug!(target: "weld_render_state", "DRM session paused; composing to owned targets");
                     self.target = SessionTarget::InactiveOwned;
+                    state.data.server.cancel_file_drag();
                     for event in self.input.cancel_active_input().into_iter().flatten() {
                         let event = state.data.server.resolve_input(event);
                         if state.data.server.dispatch_lock_input(&event) {
+                            continue;
+                        }
+                        if state.data.server.dispatch_file_drag_input(&event) {
                             continue;
                         }
                         let forward = application.enqueue_input_event(event.clone());
@@ -449,6 +456,7 @@ impl NativeDriver<HostEvent> for DrmDriver {
                         self.input.last_event_time_msec(),
                     );
                     let focus_lost = state.data.server.resolve_input(focus_lost);
+                    state.data.server.dispatch_file_drag_input(&focus_lost);
                     if !state.data.server.dispatch_lock_input(&focus_lost) {
                         let _ = application.enqueue_input_event(focus_lost.clone());
                         state
@@ -545,6 +553,9 @@ impl NativeDriver<HostEvent> for DrmDriver {
                             continue;
                         }
                         if state.data.server.dispatch_lock_input(&event) {
+                            continue;
+                        }
+                        if state.data.server.dispatch_file_drag_input(&event) {
                             continue;
                         }
                         if matches!(event.event, RawSeatEventKind::PointerMotion { .. }) {
@@ -1038,6 +1049,7 @@ impl OutputScaleUpdate<'_> {
         self.application.update_output_topology(self.current);
         if let Some(event) = self.input.update_output_topology(topology)
             && !self.server.dispatch_lock_input(&event)
+            && !self.server.dispatch_file_drag_input(&event)
             && self.application.enqueue_input_event(event.clone())
         {
             self.clients.dispatch_unconsumed_input(event.into_runtime());

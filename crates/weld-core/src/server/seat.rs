@@ -122,6 +122,9 @@ impl ServerState {
         }
     }
     pub(super) fn apply_client_input(&mut self, input: ClientInputEvent) {
+        if self.file_drag_active() && matches!(input.target, ClientInputTarget::Pointer { .. }) {
+            return;
+        }
         self.route_controller_input(None, input);
     }
 
@@ -910,6 +913,7 @@ impl ServerState {
     }
 
     pub(super) fn release_host_input(&mut self, time: u32) {
+        self.cancel_file_drag();
         self.release_controller_input(None, time);
     }
 

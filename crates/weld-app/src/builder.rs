@@ -69,6 +69,7 @@ impl WeldAppExt for App {
 #[derive(Default)]
 pub struct WeldAppBuilder {
     launch_requests: Option<weld_core::runtime::launch::LaunchRequests>,
+    drag_requests: Option<weld_core::runtime::drag::DragRequests>,
     client_environment: Vec<(OsString, OsString)>,
     backend: Backend,
     client: Vec<OsString>,
@@ -82,6 +83,10 @@ pub struct WeldAppBuilder {
 }
 
 impl WeldAppBuilder {
+    pub fn drag_requests(mut self, requests: weld_core::runtime::drag::DragRequests) -> Self {
+        self.drag_requests = Some(requests);
+        self
+    }
     /// Installs the native launch service used by trusted session administration.
     pub fn launch_requests(mut self, requests: weld_core::runtime::launch::LaunchRequests) -> Self {
         self.launch_requests = Some(requests);
@@ -181,6 +186,9 @@ impl WeldAppBuilder {
             .keyboard_repeat_mode(self.keyboard_repeat_mode);
         if let Some(requests) = self.launch_requests {
             host = host.launch_requests(requests);
+        }
+        if let Some(requests) = self.drag_requests {
+            host = host.drag_requests(requests);
         }
         let prepared = host.prepare()?;
 

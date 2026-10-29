@@ -1,5 +1,8 @@
 # Native application launch
 
+For windowless file offers using the local pointer, see
+[Local file dragging](file-drag.md).
+
 `weldctl` can start applications through an existing Weld host:
 
 ```sh

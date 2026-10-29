@@ -2,6 +2,7 @@
 
 use super::*;
 use crate::input::{KeyboardKeyState, LinuxKeycode, RawSeatEvent, RawSeatEventKind};
+use crate::runtime::drag::FileDragPayload;
 use wayland_protocols::ext::session_lock::v1::client::{
     ext_session_lock_manager_v1::ExtSessionLockManagerV1,
     ext_session_lock_surface_v1::{self, ExtSessionLockSurfaceV1},
@@ -88,9 +89,30 @@ fn session_lock_confirms_after_all_outputs_and_isolates_input_until_unlock() {
     f.sync();
     f.server.route_controller_focus(None, Some(normal_id));
 
+    let drag_files = tempfile::tempdir().expect("drag directory");
+    let drag = FileDragPayload::from_paths(&[drag_files.path().to_owned()]).expect("drag payload");
+    f.server.dispatch_file_drag_input(&RawSeatEvent::new(
+        RawSeatEventKind::PointerMotion {
+            position: weld_client::InputPosition::new(1.0, 1.0),
+            relative: None,
+        },
+        1,
+    ));
+    f.server
+        .begin_file_drag(drag.clone())
+        .expect("drag before lock");
+
     let owner = lock(&f, 1);
     f.sync();
     assert!(f.server.session_locked());
+    assert!(
+        !f.server.file_drag_active(),
+        "locking cancels the desktop drag"
+    );
+    assert!(
+        f.server.begin_file_drag(drag).is_err(),
+        "locked desktops reject file offers"
+    );
     assert!(
         smithay::wayland::image_copy_capture::ImageCopyCaptureHandler::capture_constraints(
             &mut f.server,

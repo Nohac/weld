@@ -124,12 +124,16 @@ impl ServerState {
     }
 
     pub(crate) fn take_cursor_image(&mut self, clients: &ClientRuntime) -> Option<CursorImage> {
-        let selected = select_cursor(
-            self.shell_cursor,
-            self.shell_cursor_override,
-            self.local_input.shell_owns_cursor.get(),
-            clients.pointer_cursor(),
-        );
+        let selected = if self.file_drag_active() {
+            CursorImage::Named(CursorIcon::Copy)
+        } else {
+            select_cursor(
+                self.shell_cursor,
+                self.shell_cursor_override,
+                self.local_input.shell_owns_cursor.get(),
+                clients.pointer_cursor(),
+            )
+        };
         if self.presented_cursor.as_ref() == Some(&selected) {
             return None;
         }

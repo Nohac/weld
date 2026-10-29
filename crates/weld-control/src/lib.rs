@@ -8,9 +8,11 @@ use weld_hoist_protocol::device::PairingCandidate;
 pub mod access;
 pub mod launch;
 pub mod mcp;
+pub mod native;
 pub mod windows;
 use anyhow::{Context, Result, ensure};
-use launch::{LaunchHandler, LaunchReceipt, LaunchRequest};
+use launch::{LaunchReceipt, LaunchRequest};
+use native::NativeOperations;
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use std::{
     fs,
@@ -35,6 +37,7 @@ pub enum Request {
     Window(serde_json::Value),
     Access(access::AccessRequest),
     Run(LaunchRequest),
+    Drag(native::DragRequest),
     DiagnosticSessions,
     DiagnosticReport(weld_diagnostics::SessionId),
     CollectDiagnostics(weld_diagnostics::SessionId),
@@ -148,7 +151,7 @@ impl ControlService {
         existing: Option<IrohHost>,
         desktop: SourceSessions<IrohSourcePeer>,
         access: AccessAuthority,
-        launch: impl FnMut(LaunchRequest) -> Result<LaunchReceipt> + Send + 'static,
+        native: impl Into<NativeOperations>,
     ) -> Result<Self> {
         let socket = socket_path(session)?;
         Self::start_at(
@@ -157,7 +160,7 @@ impl ControlService {
             existing,
             Some(PairingSetup { directory, desktop }),
             access,
-            Box::new(launch),
+            native.into(),
         )
     }
 
@@ -166,7 +169,7 @@ impl ControlService {
         session: &str,
         host: Option<IrohHost>,
         access: AccessAuthority,
-        launch: impl FnMut(LaunchRequest) -> Result<LaunchReceipt> + Send + 'static,
+        native: impl Into<NativeOperations>,
     ) -> Result<Self> {
         Self::start_at(
             socket_path(session)?,
@@ -174,7 +177,7 @@ impl ControlService {
             host,
             None,
             access,
-            Box::new(launch),
+            native.into(),
         )
     }
 
@@ -184,8 +187,9 @@ impl ControlService {
         existing: Option<IrohHost>,
         pairing: Option<PairingSetup>,
         access: AccessAuthority,
-        launch: LaunchHandler,
+        native: impl Into<NativeOperations>,
     ) -> Result<Self> {
+        let native = native.into();
         let parent = socket.parent().context("control socket parent absent")?;
         match fs::DirBuilder::new().mode(0o700).create(parent) {
             Ok(()) => {}
@@ -229,7 +233,7 @@ impl ControlService {
                     enabled: false,
                     pairing,
                     name: session,
-                    launch,
+                    native,
                     access: access.clone(),
                 };
                 if owner
@@ -354,7 +358,7 @@ struct PairingSetup {
 }
 struct Owner {
     access: AccessAuthority,
-    launch: LaunchHandler,
+    native: NativeOperations,
     host: Option<IrohHost>,
     enabled: bool,
     pairing: Option<PairingSetup>,
@@ -399,7 +403,11 @@ impl Owner {
         Ok(match request {
             Request::Window(_) => anyhow::bail!("window requests require the window service"),
             Request::Access(request) => request.execute(&self.access)?,
-            Request::Run(request) => Response::Launched((self.launch)(request)?),
+            Request::Run(request) => Response::Launched((self.native.launch)(request)?),
+            Request::Drag(request) => {
+                (self.native.drag)(request)?;
+                Response::Ok
+            }
             Request::DiagnosticSessions => Response::DiagnosticSessions(
                 self.host
                     .as_ref()
@@ -503,12 +511,56 @@ mod tests {
     }
 
     #[test]
+    fn drag_rpc_reaches_native_operations_and_reports_rejections() {
+        let directory = tempfile::tempdir().expect("directory");
+        fs::set_permissions(directory.path(), fs::Permissions::from_mode(0o700))
+            .expect("private directory");
+        let socket = directory.path().join("control.sock");
+        let offered = directory.path().join("file with spaces.txt");
+        let expected = offered.clone();
+        let native =
+            NativeOperations::from(unavailable_launch).with_drag(move |request| match request {
+                native::DragRequest::Files(paths) => {
+                    ensure!(paths == [expected.clone()], "unexpected paths");
+                    Ok(())
+                }
+                native::DragRequest::Cancel => anyhow::bail!("native cancellation failure"),
+            });
+        let service = ControlService::start_at(
+            socket.clone(),
+            "test",
+            None,
+            None,
+            AccessAuthority::new(|| {}),
+            native,
+        )
+        .expect("service");
+        assert!(matches!(
+            call(
+                &socket,
+                &Request::Drag(native::DragRequest::Files(vec![offered]))
+            )
+            .expect("drag"),
+            Response::Ok
+        ));
+        assert!(
+            call(&socket, &Request::Drag(native::DragRequest::Cancel))
+                .map(|_| ())
+                .expect_err("native error")
+                .to_string()
+                .contains("native cancellation failure")
+        );
+        drop(service);
+        assert!(!socket.exists());
+    }
+
+    #[test]
     fn diagnostic_queries_do_not_start_a_network_host_or_create_device_storage() {
         let directory = tempfile::tempdir().expect("directory");
         let storage = directory.path().join("devices");
         let mut owner = Owner {
             access: AccessAuthority::new(|| {}),
-            launch: Box::new(unavailable_launch),
+            native: NativeOperations::from(unavailable_launch),
             host: None,
             enabled: false,
             pairing: Some(PairingSetup {
@@ -635,7 +687,7 @@ mod tests {
             None,
             None,
             AccessAuthority::new(|| {}),
-            Box::new(move |request| {
+            Box::new(move |request: LaunchRequest| {
                 assert_eq!(request.directory, expected_directory);
                 assert_eq!(request.arguments, ["space in argument", "$(literal)"]);
                 ensure!(request.program == "available", "executable missing");
