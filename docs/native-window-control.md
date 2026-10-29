@@ -284,6 +284,20 @@ urgency: borders and tabs use `client.urgent`, and Waybar's `ext/workspaces`
 receives the workspace's urgent state. Focusing the window preserves this request;
 handoff, timeout, cancellation or revocation retires its attention claim.
 
+## Focus reporting
+
+Window results distinguish `desktop_focused` (local desktop selection) from
+`remote_keyboard_target` (the remote-control adapter's logical keyboard target).
+The latter is sampled live when listing or finding windows, like viewport metrics.
+Clicks and keyboard operations select that target; pointer motion alone leaves
+it unchanged. Local takeover, revoked/replaced grants and focus retirement clear
+it. Resuming remote input requires a new focusing operation.
+
+Logical controller routing can coexist with desktop selection on another window.
+Application-visible activation also depends on native seat binding and single-seat
+compatibility routing. Inventory revisions track desktop state; live routing fields
+are sampled independently of the inventory's change-wait revision.
+
 ## Native testing loop
 
 For automatic authorization, use `weldctl run --control --owner agent --headless -- PROGRAM ...`

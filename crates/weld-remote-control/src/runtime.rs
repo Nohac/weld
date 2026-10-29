@@ -868,7 +868,15 @@ impl ClientAdapter for Adapter {
         self.retire();
         self.synchronize_input_ownership();
         self.relay.drain_effects(effects);
-        for (surface, grant) in &self.state.borrow().grants {
+        let state = self.state.borrow();
+        let target = self
+            .relay
+            .remote_keyboard_target()
+            .and_then(|surface| state.views.root(surface));
+        for (surface, grant) in &state.grants {
+            grant
+                .remote_keyboard_target
+                .store(target == Some(*surface), Ordering::Release);
             if let Some(epoch) = self.input_epochs.get(surface) {
                 grant.input_epoch_applied.store(*epoch, Ordering::Release);
             }

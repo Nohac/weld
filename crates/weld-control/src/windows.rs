@@ -48,7 +48,10 @@ pub struct WindowInfo {
     /// Current captured application's independent viewport, once its first frame arrives.
     pub application_viewport: Option<Viewport>,
     pub occupied: bool,
-    pub focused: bool,
+    /// The window selected by local desktop navigation.
+    pub desktop_focused: bool,
+    /// The active remote-control adapter's logical keyboard target, sampled when queried.
+    pub remote_keyboard_target: bool,
     pub urgent: bool,
     pub visible: bool,
     pub floating: bool,
@@ -551,6 +554,10 @@ impl WindowService {
             .as_ref()
         {
             for window in &mut catalogue.windows {
+                window.remote_keyboard_target = window
+                    .control
+                    .as_deref()
+                    .is_some_and(|control| controller.is_keyboard_target(control));
                 window.application_viewport = window
                     .control
                     .as_deref()

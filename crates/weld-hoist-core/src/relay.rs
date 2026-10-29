@@ -175,6 +175,11 @@ pub struct SourceRelayAdapter {
 }
 
 impl SourceRelayAdapter {
+    /// Keyboard target selected by validated destination focus requests.
+    pub fn remote_keyboard_target(&self) -> Option<ClientSurfaceId> {
+        self.remote_input.keyboard_focus
+    }
+
     /// Release held input for a set of surfaces while retaining their presentation claims.
     pub fn release_input(&mut self, owns: impl Fn(ClientSurfaceId) -> bool) {
         self.effects.extend(

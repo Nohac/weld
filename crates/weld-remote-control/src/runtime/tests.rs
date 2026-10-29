@@ -18,6 +18,77 @@ impl Capture for NoCapture {
 }
 
 #[test]
+fn keyboard_target_tracks_remote_focus_and_clears_across_local_handoffs() {
+    let upstream = ClientSourceId::new(0);
+    let authority = AccessAuthority::new(|| {});
+    let (registration, client) = registration(upstream, ClientSourceId::new(3), || {}, NoCapture);
+    let mut adapter = registration.into_parts().runtime.driver;
+    let mut grants = Vec::new();
+    for id in 1..=2 {
+        let surface = ClientSurfaceId::new(ClientId::new(upstream, id), 1);
+        map(&mut *adapter, surface);
+        grants.push(
+            client
+                .grant(
+                    surface,
+                    authority.open("test".into()).expect("permit"),
+                    Capabilities::ALL,
+                )
+                .expect("grant"),
+        );
+    }
+    let mut events = ClientEventQueue::default();
+    let mut effects = Vec::new();
+    adapter.drain_events(&mut events);
+    adapter.drain_effects(&mut effects);
+    assert!(
+        grants
+            .iter()
+            .all(|grant| !client.is_keyboard_target(grant.id()))
+    );
+    for index in 0..2 {
+        let response = pending(
+            &client,
+            &grants[index].state,
+            Operation::Keys {
+                keycodes: vec![30],
+                pressed: true,
+            },
+        );
+        adapter.drain_events(&mut events);
+        adapter.drain_effects(&mut effects);
+        assert!(response.try_recv().expect("reply").is_ok());
+        assert!(client.is_keyboard_target(grants[index].id()));
+        assert!(!client.is_keyboard_target(grants[1 - index].id()));
+    }
+    let response = pending(
+        &client,
+        &grants[0].state,
+        Operation::Pointer { x: 2.0, y: 2.0 },
+    );
+    adapter.drain_events(&mut events);
+    adapter.drain_effects(&mut effects);
+    assert!(response.try_recv().expect("reply").is_ok());
+    assert!(
+        client.is_keyboard_target(grants[1].id()),
+        "pointer motion preserves keyboard focus"
+    );
+    grants[1].set_local_input(true);
+    assert!(!client.is_keyboard_target(grants[1].id()));
+    adapter.drain_events(&mut events);
+    adapter.drain_effects(&mut effects);
+    grants[1].set_local_input(false);
+    adapter.drain_events(&mut events);
+    adapter.drain_effects(&mut effects);
+    assert!(
+        !client.is_keyboard_target(grants[1].id()),
+        "returning input ownership does not silently focus a window"
+    );
+    grants[1].revoke();
+    assert!(!client.is_keyboard_target(grants[1].id()));
+}
+
+#[test]
 fn retained_view_permission_expires_with_its_incarnation() {
     let upstream = ClientSourceId::new(0);
     let surface = ClientSurfaceId::new(ClientId::new(upstream, 1), 1);

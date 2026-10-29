@@ -15,7 +15,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
         mpsc,
     },
     time::{Duration, Instant},
@@ -176,6 +176,7 @@ struct GrantState {
     // Odd epochs grant local input; each handoff invalidates queued remote mutations.
     input_epoch: AtomicU64,
     input_epoch_applied: AtomicU64,
+    remote_keyboard_target: AtomicBool,
     viewport: Mutex<Option<Viewport>>,
 }
 
@@ -320,6 +321,23 @@ impl RemoteControlClient {
         grant.viewport.lock().ok()?.clone()
     }
 
+    /// Live remote-control keyboard routing, scoped to the current grant incarnation.
+    pub fn is_keyboard_target(&self, control: &str) -> bool {
+        let Some(grant) = self
+            .grants
+            .lock()
+            .ok()
+            .and_then(|registry| registry.active.get(control).cloned())
+        else {
+            return false;
+        };
+        let epoch = grant.input_epoch.load(Ordering::Acquire);
+        grant.permit.is_authorized()
+            && epoch.is_multiple_of(2)
+            && grant.input_epoch_applied.load(Ordering::Acquire) == epoch
+            && grant.remote_keyboard_target.load(Ordering::Acquire)
+    }
+
     pub fn grant(
         &self,
         surface: ClientSurfaceId,
@@ -353,6 +371,7 @@ impl RemoteControlClient {
             capabilities,
             input_epoch: AtomicU64::new(0),
             input_epoch_applied: AtomicU64::new(0),
+            remote_keyboard_target: AtomicBool::new(false),
             viewport: Mutex::new(None),
         });
         self.sender

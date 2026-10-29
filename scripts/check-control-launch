@@ -182,7 +182,7 @@ def check_attributed(ctl, control, host, run):
     wait_for(host, lambda: any(window["app_id"] == "weld-delayed-probe" for window in windows()), "delayed attributed window")
     delayed_window = next(window for window in windows() if window["app_id"] == "weld-delayed-probe")
     assert delayed_window["workspace"] != original["workspace"], delayed_window
-    assert not delayed_window["visible"] and not delayed_window["focused"], delayed_window
+    assert not delayed_window["visible"] and not delayed_window["desktop_focused"], delayed_window
     assert delayed_window["launch_id"] == receipt["launch_id"], delayed_window
     assert len(invoke("find", owner="validation")["windows"]) == 1
     print("PASS delayed descendant placement and owner/launch filtering", flush=True)
@@ -194,7 +194,7 @@ def check_attributed(ctl, control, host, run):
         return next((window for window in windows() if window["launch_id"] == receipt["launch_id"] and window["control"]), None)
     wait_for(host, controlled, "headless automatic control")
     window = controlled()
-    assert not window["visible"] and not window["focused"] and window["workspace"] is None, window
+    assert not window["visible"] and not window["desktop_focused"] and window["workspace"] is None, window
     handle = window["control"]
     wait_for(host, lambda: (probe / "input.bin").exists(), "terminal program ready")
     invoke("input", control=handle, actions=[["t", "headless-input"], ["p", "Return"]])
@@ -321,11 +321,12 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
         assert "error" not in reply, reply
         return reply["result"]
     before = invoke("list")["windows"]
-    focused = [window["id"] for window in before if window["focused"]]
+    focused = [window["id"] for window in before if window["desktop_focused"]]
     geometry = next(window["desktop_slot"] for window in before if window["id"] == identifier)
     invoke("control", id=identifier, enabled=True)
     wait_for(host, lambda: invoke("get", id=identifier)["control"] is not None, "control grant")
     handle = invoke("get", id=identifier)["control"]
+    assert not invoke("get", id=identifier)["remote_keyboard_target"], "grant alone must not focus input"
     key = invoke("get", id=identifier)["control_key"]
     controlled = mcp(403, "tools/call", {"name": "window_list", "arguments": {}})
     assert [item["id"] for item in controlled["structuredContent"]["windows"]] == [identifier], controlled
@@ -403,7 +404,8 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
     invoke("scroll", control=handle, x=100, y=100, horizontal=0, vertical=1, wheel=True)
     wait_for(host, lambda: b"\x1b[<65;" in received.read_bytes(), "wheel input")
     after = invoke("list")["windows"]
-    assert [window["id"] for window in after if window["focused"]] == focused, "remote input stole desktop focus"
+    assert [window["id"] for window in after if window["desktop_focused"]] == focused, "remote input stole desktop focus"
+    wait_for(host, lambda: invoke("get", id=identifier)["remote_keyboard_target"], "remote keyboard target observation")
     receipt = invoke("press_key", control=handle, keycode=32)
     result = mcp(200, "tools/call", {"name": "window_capture_after", "arguments": {
         "control": key, "sequence": receipt["sequence"], "timeout_ms": 5000}})
@@ -437,6 +439,7 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
     invoke("key", control=handle, keycode=58, pressed=True)
     invoke("control", id=identifier, enabled=False)
     wait_for(host, lambda: invoke("get", id=identifier)["control"] is None, "control retirement")
+    assert not invoke("get", id=identifier)["remote_keyboard_target"]
     assert "error" in rpc("key", {"control": handle, "keycode": 30, "pressed": True})
     assert "error" in rpc("capture", {"control": handle})
     invoke("control", id=identifier, enabled=True)
@@ -445,8 +448,13 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
     assert invoke("resolve", key=key)["control"] == invoke("get", id=identifier)["control"]
     offset = len(received.read_bytes())
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-        typing = executor.submit(rpc, "input", {"control": key, "actions": ["Z" * 20], "typing_interval_ms": 100})
-        wait_for(host, lambda: len(received.read_bytes()) > offset, "paced input started")
+        typing = executor.submit(rpc, "input", {"control": key, "actions": [["t", "Z" * 20]], "typing_interval_ms": 100})
+        def started_typing():
+            if typing.done():
+                result = typing.result()
+                assert "error" not in result, result
+            return len(received.read_bytes()) > offset
+        wait_for(host, started_typing, "paced input started")
         assert invoke("get", id=identifier)["control"], "queries blocked during typing"
         invoke("control", id=identifier, enabled=False)
         progress = typing.result(timeout=5)["result"]
