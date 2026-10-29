@@ -32,7 +32,9 @@ use bevy::{
     ui_widgets::Button,
     window::{CursorIcon, RequestRedraw, SystemCursorIcon},
 };
-use weld_app::{output::OutputCompositionCamera, surface::ClientWindowMetadata};
+use weld_app::{
+    output::OutputCompositionCamera, pixel_snap::PixelSnapPaint, surface::ClientWindowMetadata,
+};
 use weld_ssd::{FrameColors, SsdSettings};
 use weld_tile::{
     TileContainer, TileFocusHistory, TileGeometry, TileHeaders, TileLayout, TileParent,
@@ -189,6 +191,7 @@ fn header_scene(target: HeaderTarget, visual: HeaderVisual) -> impl Scene {
         template(move |_| Ok(visual.clone()))
         Children [
             HeaderBackdrop
+            PixelSnapPaint
             template(move |_| Ok(backdrop.clone()))
             BackgroundColor({colors.background})
             Pickable::IGNORE

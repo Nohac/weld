@@ -196,6 +196,11 @@ Weld is a workspace of reusable layers and one standard distribution:
   ordinary Bevy child clipping supplies rectangular bounds, while the shared
   backing and surface materials supply the rounded contour. Geometry and palette
   changes invalidate retained presentation through the material node.
+  `PixelSnapPaint` aligns backing bounds and their rectangular clips after
+  layout while child text/control transforms remain continuous. Surface clips
+  use the same physical-pixel boundaries, keeping opaque joins between headers,
+  content and native layer-shell panels filled at fractional scales. Rounded
+  corner antialiasing remains in the existing shaders.
   Vacant persistent frames show the captured match with configured placeholder
   colors. Interactive persistence results feed a short, input-transparent notice;
   configured persistence palettes share ordinary smart-border and corner policy.

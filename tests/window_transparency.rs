@@ -371,3 +371,112 @@ fn frame_backing_fills_unused_space_and_hoist_content_preserves_rounded_corners(
         }
     }
 }
+
+#[test]
+fn opaque_content_joins_headers_and_adjacent_panels_without_transparent_seams() {
+    use bevy::math::Vec2;
+    use weld_window::WindowGeometry;
+
+    let scale = 1.25;
+    for (header, phase) in [false, true]
+        .into_iter()
+        .flat_map(|header| [0.0, 0.2, 0.4, 0.6].map(move |phase| (header, phase)))
+    {
+        let origin = 24.0 + phase;
+        let output = OutputId::new(1);
+        let configuration = OutputConfiguration::new(
+            output,
+            Extent::new(320, 320),
+            OutputScale::new(scale).expect("scale"),
+            LogicalPoint::ZERO,
+            true,
+            None,
+        )
+        .expect("output");
+        let (mut shell, _, device, queue) =
+            weld_app::benchmark::rendering_shell_with_outputs(vec![configuration], move |app| {
+                let colors = weld_ssd::FrameColors {
+                    background: Color::srgb(1.0, 0.0, 0.0),
+                    ..weld_ssd::FrameColors::from_border(Color::srgb(1.0, 0.0, 0.0))
+                };
+                app.insert_resource(SsdSettings {
+                    floating: if header {
+                        BorderStyle::Normal(0)
+                    } else {
+                        BorderStyle::None
+                    },
+                    focused: colors,
+                    unfocused: colors,
+                    placeholder: colors,
+                    ..Default::default()
+                });
+                app.add_plugins((
+                    WindowPlugin,
+                    WindowUiPlugin,
+                    SsdPlugin,
+                    weld_float::FloatPlugin,
+                ));
+                app.add_systems(Update, move |mut windows: Query<&mut WindowGeometry>| {
+                    for mut geometry in &mut windows {
+                        geometry.position = Vec2::splat(origin);
+                        geometry.size = Vec2::splat(160.0);
+                    }
+                });
+                app.world_mut().spawn((
+                    Node {
+                        width: percent(100),
+                        height: percent(100),
+                        ..Default::default()
+                    },
+                    BackgroundColor(Color::srgb(0.0, 0.0, 1.0)),
+                    GlobalZIndex(-10000),
+                ));
+            })
+            .expect("renderer");
+        let surface = SurfaceId::for_test(1);
+        shell.enqueue_client_event(ClientSurfaceEvent {
+            surface,
+            kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
+                parent: None,
+                decoration: WindowDecoration::ServerSide,
+                hints: Default::default(),
+            })),
+        });
+        publish(&mut shell, surface, 1, [0, 255, 0, 255], 200);
+        shell.enqueue_client_event(ClientSurfaceEvent {
+            surface: SurfaceId::for_test(2),
+            kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Layer(
+                weld_client::LayerSurfaceState {
+                    output: weld_client::ClientOutputId::new(1),
+                    position: LogicalPoint::new(origin, origin + 160.0),
+                    layer: weld_client::DesktopLayer::Top,
+                    keyboard: weld_client::LayerKeyboardInteractivity::None,
+                    stack_index: 0,
+                },
+            )),
+        });
+        publish(&mut shell, SurfaceId::for_test(2), 2, [0, 0, 255, 255], 160);
+        let request = [CompositionOutputRequest {
+            output,
+            destination: CompositionDestination::Owned,
+        }];
+        let mut frames = Vec::new();
+        for tick in 0..8 {
+            shell.advance_main(tick);
+            shell.render_outputs(&request, &mut frames).expect("render");
+        }
+        let pixels = weld_core::renderer::read_owned_frame_rgba(&device, &queue, &frames[0].frame)
+            .expect("pixels");
+        for join in [origin + 30.0, origin + 160.0] {
+            let center = (f64::from(join) * scale) as usize;
+            for y in center - 2..=center + 2 {
+                let offset = (y * 320 + 100) * 4;
+                let pixel = &pixels[offset..offset + 4];
+                assert!(
+                    pixel[2] < 10,
+                    "desktop visible at opaque join: phase={phase}, join={join}, y={y}, pixel={pixel:?}"
+                );
+            }
+        }
+    }
+}

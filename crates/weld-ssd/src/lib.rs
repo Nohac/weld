@@ -37,6 +37,7 @@ use bevy::{
 use weld_app::{
     border::BorderUnderlap,
     output::{OutputCompositionCamera, PrimaryOutput, WeldOutput},
+    pixel_snap::PixelSnapPaint,
     surface::{
         ClientProvenance, ClientToplevel, ClientToplevelParent, MappedSurface, RoundedSurfaceClip,
         ServerDecorated, SurfaceId, SurfaceView, ToplevelResizeEdge,
@@ -738,9 +739,9 @@ fn scene(surface: SurfaceId, style: FrameGeometry) -> impl Scene {
 }
 
 fn window_scene(content: impl SceneList, style: FrameGeometry) -> impl Scene {
-    // The header crops this backing to its row. Keeping the backing tall
-    // preserves the frame radius when the row is shorter than its diameter.
-    let header_backdrop_height = style.header().max(2.0 * style.inner_radius());
+    // The header crops this backing to its row. Extra height keeps its bottom
+    // antialias fringe past the join and preserves tall outer corner radii.
+    let header_backdrop_height = (style.header() + 1.0).max(2.0 * style.inner_radius());
     let resize_handles = resize_handles(if style.joined_top {
         BorderStyle::Pixel(0)
     } else {
@@ -794,6 +795,7 @@ fn window_scene(content: impl SceneList, style: FrameGeometry) -> impl Scene {
                 }
                 Children [
                     FrameHeaderBackdrop
+                    PixelSnapPaint
                     FrameColorOwner(#FrameRoot)
                     Node {
                         position_type: PositionType::Absolute,
@@ -811,6 +813,7 @@ fn window_scene(content: impl SceneList, style: FrameGeometry) -> impl Scene {
                 ]
                 --
                 FrameContent
+                PixelSnapPaint
                 RoundedSurfaceClip
                 Node {
                     width: percent(100),

@@ -9,7 +9,7 @@ use bevy::{
     ui_render::{UiMaterialPlugin, ui_material::UiMaterial},
     window::RequestRedraw,
 };
-use weld_app::{pixel_snap::PixelSnapSystems, surface::SurfaceNode};
+use weld_app::{pixel_snap::PixelSnapPaintSystems, surface::SurfaceNode};
 
 use crate::{FrameContent, SsdSettings};
 
@@ -36,7 +36,7 @@ pub(super) fn install(app: &mut App) {
         .add_systems(
             PostUpdate,
             sync.after(UiSystems::PostLayout)
-                .after(PixelSnapSystems)
+                .after(PixelSnapPaintSystems)
                 .before(bevy::asset::AssetEventSystems),
         );
 }

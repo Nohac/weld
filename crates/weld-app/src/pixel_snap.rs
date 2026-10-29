@@ -6,12 +6,12 @@ use bevy::{
         component::Component,
         entity::Entity,
         hierarchy::{ChildOf, Children},
-        query::{Has, With},
+        query::{Has, Or, With},
         schedule::{IntoScheduleConfigs, SystemSet},
         system::{Local, Query},
     },
     math::{Affine2, Vec2},
-    ui::{ComputedNode, Node, UiGlobalTransform, UiSystems},
+    ui::{CalculatedClip, ComputedNode, Node, UiGlobalTransform, UiSystems},
 };
 
 /// Aligns an axis-aligned UI node's top-left corner to physical display pixels.
@@ -23,6 +23,12 @@ use bevy::{
 #[require(Node)]
 pub struct PixelSnap;
 
+/// Aligns only this node's painted bounds and inherited clips after layout.
+/// Descendant text and controls retain their independently computed transforms.
+#[derive(Component, Clone, Copy, Debug, Default)]
+#[require(Node)]
+pub struct PixelSnapPaint;
+
 /// Exact physical extent supplied by a presenter that knows its raster dimensions.
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq)]
 pub(crate) struct PixelSnapSize(pub Option<Vec2>);
@@ -30,6 +36,10 @@ pub(crate) struct PixelSnapSize(pub Option<Vec2>);
 /// Post-layout snapping completes before Bevy calculates clipping rectangles.
 #[derive(SystemSet, Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub struct PixelSnapSystems;
+
+/// Paint bounds and clips are aligned before surface masks are resolved.
+#[derive(SystemSet, Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub struct PixelSnapPaintSystems;
 
 /// Installs screen-space snapping for [`PixelSnap`] nodes.
 pub struct PixelSnapPlugin;
@@ -42,8 +52,74 @@ impl Plugin for PixelSnapPlugin {
                 .in_set(PixelSnapSystems)
                 .after(UiSystems::Layout)
                 .before(UiSystems::PostLayout),
+        )
+        .add_systems(
+            PostUpdate,
+            snap_paint
+                .in_set(PixelSnapPaintSystems)
+                .after(UiSystems::PostLayout),
         );
     }
+}
+
+type SnappedClipNodes<'w, 's> =
+    Query<'w, 's, &'static mut CalculatedClip, Or<(With<PixelSnap>, With<PixelSnapPaint>)>>;
+
+fn snap_paint(
+    mut paints: Query<(&ComputedNode, &mut UiGlobalTransform), With<PixelSnapPaint>>,
+    mut clips: SnappedClipNodes,
+) {
+    for (node, mut transform) in &mut paints {
+        if let Some((minimum, maximum)) =
+            aligned_bounds(**transform, -0.5 * node.size(), 0.5 * node.size())
+        {
+            let next = snapped_transform(**transform, node.size(), Some(maximum - minimum));
+            if next != **transform {
+                *transform = next.into();
+            }
+        }
+    }
+    for mut clip in &mut clips {
+        let next = aligned_clip(&clip);
+        if next != *clip {
+            *clip = next;
+        }
+    }
+}
+
+pub(crate) fn aligned_clip(clip: &CalculatedClip) -> CalculatedClip {
+    let mut next = clip.clone();
+    if let CalculatedClip::Rects(rects) = &mut next {
+        for rect in rects {
+            if rect.world_to_clip_local.matrix2.determinant() == 0.0 {
+                continue;
+            }
+            let inverse = rect.world_to_clip_local.inverse();
+            if let Some((minimum, maximum)) = aligned_bounds(inverse, rect.rect.min, rect.rect.max)
+            {
+                rect.rect.min = rect.world_to_clip_local.transform_point2(minimum);
+                rect.rect.max = rect.world_to_clip_local.transform_point2(maximum);
+            }
+        }
+    }
+    next
+}
+
+fn aligned_bounds(transform: Affine2, minimum: Vec2, maximum: Vec2) -> Option<(Vec2, Vec2)> {
+    let matrix = transform.matrix2;
+    if !transform.is_finite()
+        || !minimum.is_finite()
+        || !maximum.is_finite()
+        || matrix.x_axis.y.abs() > f32::EPSILON
+        || matrix.y_axis.x.abs() > f32::EPSILON
+        || matrix.x_axis.x <= 0.0
+        || matrix.y_axis.y <= 0.0
+    {
+        return None;
+    }
+    let minimum = transform.transform_point2(minimum).round();
+    let maximum = transform.transform_point2(maximum).round();
+    ((maximum - minimum).min_element() > 0.0).then_some((minimum, maximum))
 }
 
 type SnapNodes<'w, 's> = Query<
@@ -130,6 +206,63 @@ mod tests {
         for (layout, mut transform) in &mut nodes {
             *transform = layout.0.into();
         }
+    }
+
+    #[test]
+    fn paint_alignment_preserves_child_transforms_and_is_stable_across_updates() {
+        let mut app = App::new();
+        app.add_plugins(PixelSnapPlugin)
+            .add_systems(PostUpdate, reset_layout.in_set(UiSystems::Layout));
+        let size = Vec2::new(101.5, 78.25);
+        let original = Affine2::from_translation(Vec2::new(13.75, 17.5) + size * 0.5);
+        let clip = CalculatedClip::default().with_rect(
+            bevy::math::Rect::from_corners(-0.5 * size, 0.5 * size),
+            &original.into(),
+        );
+        let paint = app
+            .world_mut()
+            .spawn((
+                PixelSnapPaint,
+                ComputedNode {
+                    size,
+                    ..Default::default()
+                },
+                LayoutTransform(original),
+                clip.clone(),
+            ))
+            .id();
+        let child_transform = Affine2::from_translation(Vec2::new(25.75, 29.5));
+        let child = app
+            .world_mut()
+            .spawn((
+                Node::default(),
+                LayoutTransform(child_transform),
+                ChildOf(paint),
+            ))
+            .id();
+        for _ in 0..3 {
+            app.update();
+            let painted = app.world().get::<UiGlobalTransform>(paint).expect("paint");
+            assert!(
+                painted
+                    .transform_point2(-0.5 * size)
+                    .abs_diff_eq(Vec2::new(14.0, 18.0), 0.0001)
+            );
+            assert!(
+                painted
+                    .transform_point2(0.5 * size)
+                    .abs_diff_eq(Vec2::new(115.0, 96.0), 0.0001)
+            );
+            assert_eq!(
+                **app.world().get::<UiGlobalTransform>(child).expect("child"),
+                child_transform
+            );
+            assert_eq!(
+                app.world().get::<CalculatedClip>(paint),
+                Some(&aligned_clip(&clip))
+            );
+        }
+        assert!(aligned_bounds(Affine2::from_angle(0.5), -size, size).is_none());
     }
 
     #[test]

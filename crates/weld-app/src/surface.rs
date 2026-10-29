@@ -534,6 +534,7 @@ impl Plugin for SurfacePlugin {
                 PostUpdate,
                 clip::sync
                     .after(bevy::ui::UiSystems::PostLayout)
+                    .after(crate::pixel_snap::PixelSnapPaintSystems)
                     .before(bevy::asset::AssetEventSystems),
             );
         if let Some(render_app) = app.get_sub_app_mut(RenderApp) {

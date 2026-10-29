@@ -11,7 +11,7 @@ use bevy::{
     },
     math::{Vec2, Vec4},
     render::render_resource::ShaderType,
-    ui::{ComputedNode, Node, UiGlobalTransform},
+    ui::{CalculatedClip, ComputedNode, Node, UiGlobalTransform},
     ui_render::ui_material::MaterialNode,
 };
 
@@ -73,19 +73,32 @@ impl ClipParameters {
     }
 }
 
-pub(super) fn sync(
-    surfaces: Query<(
+type SurfaceClipNodes<'w, 's> = Query<
+    'w,
+    's,
+    (
         Entity,
-        &MaterialNode<SurfaceUiMaterial>,
-        &ComputedNode,
-        &UiGlobalTransform,
-    )>,
+        &'static MaterialNode<SurfaceUiMaterial>,
+        &'static ComputedNode,
+        &'static UiGlobalTransform,
+        Option<&'static mut CalculatedClip>,
+    ),
+>;
+
+pub(super) fn sync(
+    mut surfaces: SurfaceClipNodes,
     parents: Query<&ChildOf>,
     clips: Query<(&ComputedNode, &UiGlobalTransform), With<RoundedSurfaceClip>>,
     mut materials: ResMut<Assets<SurfaceUiMaterial>>,
     mut selectors: ResMut<MaterialSelectorRegistry>,
 ) {
-    for (entity, handle, node, transform) in &surfaces {
+    for (entity, handle, node, transform, clip) in &mut surfaces {
+        if let Some(mut clip) = clip {
+            let expected = crate::pixel_snap::aligned_clip(&clip);
+            if *clip != expected {
+                *clip = expected;
+            }
+        }
         let mut ancestor = entity;
         let mut expected = ClipParameters::default();
         while let Ok(parent) = parents.get(ancestor) {
