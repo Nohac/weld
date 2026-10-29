@@ -29,6 +29,80 @@ use weld_window::{
 };
 
 #[test]
+fn header_scroll_accumulates_motion_wraps_and_resets_between_gestures() {
+    use bevy::{
+        input::{mouse::MouseScrollUnit, touch::TouchPhase},
+        picking::events::PointerScroll,
+    };
+    for layout in [TileLayout::Tabbed, TileLayout::Stacked] {
+        let (mut app, first, second) = setup();
+        app.world_mut().trigger(I3LayoutRequest::Set(layout));
+        app.update();
+        let header = app
+            .world_mut()
+            .query::<(Entity, &HeaderTarget)>()
+            .iter(app.world())
+            .find(|(_, target)| target.child == first)
+            .expect("header")
+            .0;
+        let camera = app.world().get::<UiTargetCamera>(header).expect("camera").0;
+        let scroll = |app: &mut App, unit, y, phase| {
+            app.world_mut().trigger(PointerScroll {
+                entity: header,
+                pointer: Pointer::new(
+                    PointerId::Mouse,
+                    Location {
+                        target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1)),
+                        position: Vec2::new(10.0, 10.0),
+                    },
+                ),
+                hit: HitData::new(camera, 0.0, None, None),
+                unit,
+                x: 0.0,
+                y,
+                phase,
+            });
+            app.update();
+        };
+        scroll(&mut app, MouseScrollUnit::Line, 0.5, TouchPhase::Moved);
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(second)
+        );
+        scroll(&mut app, MouseScrollUnit::Line, 0.5, TouchPhase::Moved);
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(first)
+        );
+        scroll(&mut app, MouseScrollUnit::Line, 1.0, TouchPhase::Moved);
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(second)
+        );
+        scroll(&mut app, MouseScrollUnit::Pixel, -60.0, TouchPhase::Started);
+        scroll(&mut app, MouseScrollUnit::Pixel, 0.0, TouchPhase::Ended);
+        scroll(&mut app, MouseScrollUnit::Pixel, -60.0, TouchPhase::Started);
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(second)
+        );
+        scroll(&mut app, MouseScrollUnit::Pixel, -40.0, TouchPhase::Moved);
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(first)
+        );
+        assert_eq!(
+            app.world().get::<WindowVisibility>(first),
+            Some(&WindowVisibility::Visible)
+        );
+        assert_eq!(
+            app.world().get::<WindowVisibility>(second),
+            Some(&WindowVisibility::Hidden)
+        );
+    }
+}
+
+#[test]
 fn persistent_palette_updates_the_group_frame_and_headers_together() {
     for layout in [TileLayout::Tabbed, TileLayout::Stacked] {
         let (mut app, first, second) = setup();

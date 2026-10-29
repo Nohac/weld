@@ -77,7 +77,10 @@ Headers show the current child title (or its remembered descendant's title),
 and clicking one activates that branch's remembered window. Selecting a parent
 highlights all descendant headers; returning to a leaf restores its individual
 highlight in the same update. Fullscreen and
-hidden workspaces suppress the group UI. Header-wheel cycling is deferred.
+hidden workspaces suppress the group UI. Scrolling a header cycles that group's
+active branch, wrapping at its ends and restoring the branch's remembered leaf.
+Wheel fractions and touchpad motion accumulate into whole steps; leaving the
+header or ending the gesture clears the partial step.
 
 The `font` directive configures these titles, for example
 `font pango:monospace 8` or `font pango:DejaVu Sans Bold Italic 14px`.

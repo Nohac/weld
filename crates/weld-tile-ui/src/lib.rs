@@ -3,6 +3,7 @@
 use std::collections::HashMap;
 mod divider;
 mod frame;
+mod scroll;
 
 use bevy::{
     app::{App, Plugin, PreUpdate},
@@ -121,6 +122,7 @@ impl Plugin for TileUiPlugin {
                     .after(weld_tile::TileSystems::LateLayout)
                     .before(WindowSystems::FinalReconcile),
             );
+        scroll::install(app);
     }
 }
 
