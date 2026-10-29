@@ -61,6 +61,7 @@ fn shared_control_driver_delivers_changes_and_authorized_actions_then_cancels() 
         let (server_write, client_read) = pipe();
         let (client_write, server_read) = pipe();
         let (client, driver) = DeviceClient::new(|| {});
+        assert!(client.is_connected());
         let application = ApplicationInfo {
             window: 5,
             surface: ClientSurfaceId::new(ClientId::new(ClientSourceId::new(1), 1), 1),
@@ -99,6 +100,10 @@ fn shared_control_driver_delivers_changes_and_authorized_actions_then_cancels() 
             })
             .await;
             until(|| client.take_error().is_some()).await;
+            assert!(
+                client.is_connected(),
+                "an operation rejection keeps the catalogue connection alive"
+            );
             drop(client);
         };
         let (_, (client_result, server_result)) = zip(
@@ -117,6 +122,14 @@ fn shared_control_driver_delivers_changes_and_authorized_actions_then_cancels() 
         service.leave(&access);
         assert!(service.catalogue(id).await.is_err());
     });
+}
+
+#[test]
+fn losing_the_control_driver_is_observable_without_a_media_failure() {
+    let (client, driver) = DeviceClient::new(|| {});
+    assert!(client.is_connected());
+    drop(driver);
+    assert!(!client.is_connected());
 }
 
 #[test]

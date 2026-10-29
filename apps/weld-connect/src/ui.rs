@@ -1,7 +1,8 @@
 use crate::platform::{Bridge, Requests};
 use crate::{
     catalogue::{self, Grouping},
-    session::{ConnectionRequest as Command, Session, Snapshot},
+    session::{ConnectionRequest as Command, Phase, Session, Snapshot},
+    store::Host,
 };
 use anyhow::Result;
 use dioxus::prelude::*;
@@ -52,7 +53,7 @@ pub fn launch(directory: PathBuf, device_name: String) -> Result<()> {
     let session = Arc::new(Session::start(directory)?);
     let config = dioxus_native::Config::new().with_window_attributes(
         dioxus_native::WindowAttributes::default()
-            .with_title("Weld Connect")
+            .with_title("Weld Station")
             .with_surface_size(dioxus_native::LogicalSize::new(960.0, 720.0)),
     );
     dioxus_native::launch_cfg_with_props(
@@ -111,14 +112,14 @@ fn Shell() -> Element {
     dioxus_native::use_back_button({
         let mut client = client.clone();
         move || {
-            client.send(Command::Disconnect);
+            client.send(Command::CancelPairing);
             navigator.replace(Route::Hosts {});
         }
     });
     rsx! {
         div { class: Styles::shell, style: "padding: {client.insets.read()[1]}px {client.insets.read()[2]}px {client.insets.read()[3]}px {client.insets.read()[0]}px;",
             header { class: Styles::header,
-                div { class: Styles::brand, "weld" }
+                div { class: Styles::brand, "Weld Station" }
                 div { class: Styles::subtitle, "Your applications, wherever you are." }
             }
             main { class: Styles::content, div { class: Styles::page, Outlet::<Route> {} } }
@@ -135,28 +136,56 @@ fn Hosts() -> Element {
     let view = (client.snapshot)();
     rsx! {
         h1 { class: Styles::heading, "Your hosts" }
-        p { class: Styles::description, "Connect to a computer to browse its running applications." }
+        p { class: Styles::description, "Your paired computers connect automatically. Open a host to browse its apps." }
         div { class: Styles::toolbar,
             button { class: "{Styles::button} {Styles::primary}", onclick: move |_| { navigator.push(Route::Pair {}); }, "Pair a device" }
         }
         if view.hosts.is_empty() {
-            div { class: Styles::empty, "Bring your first computer into Weld Connect. Create a pairing invitation with weldctl on that computer, then add it here." }
+            div { class: Styles::empty, "Bring your first computer into Weld Station. Create a pairing invitation with weldctl on that computer, then add it here." }
         }
         div { class: Styles::cards,
             for host in view.hosts {
                 if let Ok(id) = host.id() {
-                    div { key: "{id}", class: Styles::card,
-                        div {
-                            p { class: Styles::label, "{host.name}" }
-                            div { class: Styles::detail, "Paired host" }
-                        }
-                        button { class: Styles::button, onclick: {
-                            let mut client = client.clone();
-                            move |_| { if client.send(Command::Connect(id.clone())) { navigator.push(Route::Applications { id: id.clone() }); } }
-                        }, "Open" }
-                    }
+                    HostCard { key: "{id}", host }
                 }
             }
+        }
+    }
+}
+#[component]
+fn HostCard(host: Host) -> Element {
+    let mut client = use_context::<Client>();
+    let navigator = use_navigator();
+    let Ok(id) = host.id() else {
+        return rsx! {};
+    };
+    let view = (client.snapshot)();
+    let peer = view.peers.get(&id);
+    let connected = peer.is_some_and(|peer| peer.phase == Phase::Connected);
+    let label = peer.map_or("Connecting", |peer| peer.label());
+    let badge = if connected {
+        Styles::online
+    } else {
+        Styles::pending
+    };
+    let detail = if connected {
+        format!(
+            "{} running apps",
+            peer.map_or(0, |peer| peer.applications.len())
+        )
+    } else {
+        "Trying automatically · open for details".into()
+    };
+    rsx! {
+        div { class: Styles::card,
+            div { class: Styles::host_info,
+                p { class: Styles::label, "{host.name}" }
+                div { class: "{Styles::connection} {badge}", "{label}" }
+                p { class: Styles::detail, "{detail}" }
+            }
+            button { class: Styles::button, onclick: move |_| {
+                if client.send(Command::Connect(id.clone())) { navigator.push(Route::Applications { id: id.clone() }); }
+            }, "Open" }
         }
     }
 }
@@ -195,7 +224,7 @@ fn Pair() -> Element {
                     Err(_) => client.error.set(Some("Enter a valid Weld pairing link".into())),
                 } }
             }, "Pair" }
-            button { class: Styles::button, onclick: move |_| { client.send(Command::Disconnect); navigator.replace(Route::Hosts {}); }, "Back to hosts" }
+            button { class: Styles::button, onclick: move |_| { client.send(Command::CancelPairing); navigator.replace(Route::Hosts {}); }, "Back to hosts" }
         }
     }
 }
@@ -205,6 +234,10 @@ fn Applications(id: String) -> Element {
     let navigator = use_navigator();
     let mut grouping = use_signal(Grouping::default);
     let view = (client.snapshot)();
+    let peer = view.peers.get(&id);
+    let connected = peer.is_some_and(|peer| peer.phase == Phase::Connected);
+    let applications = peer.map_or(&[][..], |peer| peer.applications.as_slice());
+    let status = peer.map_or("Connecting", |peer| peer.label());
     let name = view
         .hosts
         .iter()
@@ -214,16 +247,24 @@ fn Applications(id: String) -> Element {
         h1 { class: Styles::heading, "{name}" }
         p { class: Styles::description, "Running applications" }
         div { class: Styles::toolbar,
-            button { class: Styles::button, onclick: move |_| { client.send(Command::Disconnect); navigator.replace(Route::Hosts {}); }, "Hosts" }
+            button { class: Styles::button, onclick: move |_| { navigator.replace(Route::Hosts {}); }, "Hosts" }
             button { class: Styles::button, aria_pressed: grouping() == Grouping::Windows, onclick: move |_| grouping.set(Grouping::Windows), "Windows" }
             button { class: Styles::button, aria_pressed: grouping() == Grouping::Application, onclick: move |_| grouping.set(Grouping::Application), "By application" }
         }
-        if view.connected.as_deref() != Some(id.as_str()) {
-            div { class: Styles::empty, "{view.status}" }
-        } else if view.applications.is_empty() {
+        if !connected {
+            div { class: Styles::empty,
+                p { class: Styles::label, "{status}…" }
+                p { "We’ll keep trying. Your apps will appear when the host is reachable." }
+                if let Some(error) = peer.and_then(|peer| peer.error.as_deref()) { p { class: Styles::detail, "{error}" } }
+                button { class: Styles::button, onclick: {
+                    let id = id.clone();
+                    move |_| { client.send(Command::Connect(id.clone())); }
+                }, "Retry now" }
+            }
+        } else if applications.is_empty() {
             div { class: Styles::empty, "No running applications are available on this host." }
         } else {
-            for group in catalogue::groups(&view.applications, grouping()) {
+            for group in catalogue::groups(applications, grouping()) {
                 h2 { class: Styles::group_title, "{group.label}" }
                 div { class: Styles::cards,
                     for application in group.windows {
@@ -253,6 +294,19 @@ fn Stream(id: String, window: u64) -> Element {
     let client = use_context::<Client>();
     let navigator = use_navigator();
     let native_window = dioxus_native::use_window();
+    let initial_navigation = use_hook(|| client.snapshot.peek().navigation_revision);
+    use_effect({
+        let snapshot = client.snapshot;
+        let id = id.clone();
+        move || {
+            let view = snapshot.read();
+            if view.navigation_revision != initial_navigation
+                && view.return_to_apps.as_ref() == Some(&(id.clone(), window))
+            {
+                navigator.replace(Route::Applications { id: id.clone() });
+            }
+        }
+    });
     dioxus_native::use_window_event({
         let session = client.session.clone();
         move |event, _| {
@@ -298,8 +352,15 @@ fn Stream(id: String, window: u64) -> Element {
     rsx! {
         div { class: Styles::stream,
             object { class: Styles::video, "data": widget }
-            if client.snapshot.read().connected.as_deref() != Some(id.as_str()) {
-                div { class: Styles::stream_status, "{client.snapshot.read().status}" }
+            if let Some(error) = client.snapshot.read().stream_error.as_deref() {
+                div { class: Styles::stream_status,
+                    p { "{error}" }
+                    if client.snapshot.read().reconnecting_stream { p { class: Styles::detail, "Trying to resume. Returning to apps after 10 seconds if the connection does not recover." } }
+                    button { class: Styles::button, onclick: {
+                        let id = id.clone();
+                        move |_| { navigator.replace(Route::Applications { id: id.clone() }); }
+                    }, "Back to apps" }
+                }
             }
             if !Bridge::AVAILABLE {
                 button { class: Styles::stream_back, onclick: move |_| { navigator.replace(Route::Applications { id: id.clone() }); }, "Back" }
@@ -351,7 +412,7 @@ fn Root() -> Element {
                             }
                             Route::Hosts {} => requests.background = true,
                             _ => {
-                                client.send(Command::Disconnect);
+                                client.send(Command::CancelPairing);
                                 navigator.replace(Route::Hosts {});
                             }
                         }

@@ -104,6 +104,13 @@ profile overrides or `CARGO_TARGET_DIR` changes for routine desktop work.
 Explicit Tracy/perf investigations and Android/client assemblies retain their
 documented feature, compiler and target settings as separate build variants.
 
+Weld Station uses `scripts/run-connect` for its standalone client assembly.
+Use `--test`, `--check`, or `--clippy` for opt-in validation with the launcher's
+same environment, default features and development profile. Android supports
+`--android --check` and `--android --clippy`; tests execute on Linux. Keep all
+commands in the same development shell. Both platforms share the cache root
+`target/dioxus-texture-probe/cargo`, with separate target-specific artifacts.
+
 Cargo uses Clang and LLD for Linux targets. The shared Rust shell already
 provides both tools, so run builds from that environment rather than depending
 on globally installed linkers.

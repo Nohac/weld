@@ -74,4 +74,6 @@ pub struct DeviceHello {
 #[derive(Serialize, Deserialize)]
 pub struct DeviceWelcome {
     pub codec: VideoCodec,
+    /// Identifies the lifetime of the host's catalogue and window identities.
+    pub instance: [u8; 16],
 }

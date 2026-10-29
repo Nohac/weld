@@ -198,6 +198,10 @@ impl DeviceClient {
     pub fn take_error(&self) -> Option<String> {
         self.errors.try_recv().ok()
     }
+    /// The catalogue/control driver still owns its request receiver.
+    pub fn is_connected(&self) -> bool {
+        !self.commands.is_closed()
+    }
     pub fn applications(&self) -> Vec<ApplicationInfo> {
         let snapshot = self
             .catalogue

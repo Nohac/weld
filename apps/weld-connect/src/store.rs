@@ -44,7 +44,7 @@ impl Store {
             .mode(0o600)
             .open(directory.join("client.lock"))?;
         rustix::fs::flock(&lock, rustix::fs::FlockOperation::NonBlockingLockExclusive)
-            .context("could not lock Weld Connect state directory")?;
+            .context("could not lock Weld Station state directory")?;
         let hosts: Vec<Host> = match File::open(directory.join("hosts.json")) {
             Ok(file) => {
                 let mut bytes = Vec::new();

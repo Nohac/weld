@@ -108,7 +108,15 @@ pub struct IrohHost {
 
 impl IrohHost {
     pub fn bind(sessions: &SessionRuntime, network: IrohNetwork) -> Result<Self> {
-        Self::bind_key(sessions, network, None, IrohDnsPolicy::System, None, None)
+        Self::bind_key(
+            sessions,
+            network,
+            None,
+            IrohDnsPolicy::System,
+            None,
+            None,
+            true,
+        )
     }
 
     /// Bind exactly the application's service registry. Hoist/pairing endpoints
@@ -125,6 +133,7 @@ impl IrohHost {
             IrohDnsPolicy::System,
             None,
             Some(services),
+            true,
         )
     }
 
@@ -146,7 +155,34 @@ impl IrohHost {
         identity: &IrohDeviceIdentity,
         dns: IrohDnsPolicy,
     ) -> Result<Self> {
-        Self::bind_key(sessions, network, Some(identity.secret()), dns, None, None)
+        Self::bind_key(
+            sessions,
+            network,
+            Some(identity.secret()),
+            dns,
+            None,
+            None,
+            true,
+        )
+    }
+
+    /// Opens an outgoing client's local sockets immediately. Discovery and relay
+    /// readiness are awaited by individual connection attempts.
+    pub fn bind_client_with_identity_and_dns(
+        sessions: &SessionRuntime,
+        network: IrohNetwork,
+        identity: &IrohDeviceIdentity,
+        dns: IrohDnsPolicy,
+    ) -> Result<Self> {
+        Self::bind_key(
+            sessions,
+            network,
+            Some(identity.secret()),
+            dns,
+            None,
+            None,
+            false,
+        )
     }
 
     /// Bind a custom-only source and resolve its loopback TCP listener before
@@ -168,6 +204,7 @@ impl IrohHost {
             IrohDnsPolicy::System,
             Some(listen),
             None,
+            true,
         )
     }
 
@@ -178,6 +215,7 @@ impl IrohHost {
         dns: IrohDnsPolicy,
         adb_listen: Option<SocketAddr>,
         services: Option<weld_session::Registry<crate::IrohConnection>>,
+        wait_online: bool,
     ) -> Result<Self> {
         let (commands, receiver) = mpsc::unbounded_channel();
         let (started_tx, started_rx) = std_mpsc::sync_channel(1);
@@ -203,6 +241,7 @@ impl IrohHost {
                                 dns,
                                 adb_listen,
                                 services,
+                                wait_online,
                             },
                             receiver,
                             started_tx,
@@ -807,6 +846,7 @@ struct EndpointStartup {
     dns: IrohDnsPolicy,
     adb_listen: Option<SocketAddr>,
     services: Option<weld_session::Registry<crate::IrohConnection>>,
+    wait_online: bool,
 }
 
 async fn run_host(
@@ -823,6 +863,7 @@ async fn run_host(
         dns,
         adb_listen,
         services,
+        wait_online,
     } = options;
     let secret = secret.unwrap_or_else(SecretKey::generate);
     let links = (network == IrohNetwork::Adb).then(|| adb::Manager::new(secret.public()));
@@ -879,7 +920,7 @@ async fn run_host(
         .bind()
         .await
         .map_err(anyhow::Error::from)?;
-    if network == IrohNetwork::N0 {
+    if network == IrohNetwork::N0 && wait_online {
         tokio::time::timeout(N0_ONLINE_WAIT, endpoint.online())
             .await
             .context("Iroh N0 endpoint did not become online within 30 seconds")?;

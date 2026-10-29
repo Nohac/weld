@@ -233,6 +233,7 @@ async fn serve_device<C: Connection>(connection: C, provider: &impl Services<C>)
             &mut send,
             &DeviceWelcome {
                 codec: source.codec,
+                instance: source.services.instance(),
             },
         ))
         .await?;

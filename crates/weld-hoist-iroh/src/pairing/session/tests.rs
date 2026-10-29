@@ -77,6 +77,7 @@ async fn live_session_recovers_a_late_reply_and_owner_drop_cancels_the_next_wait
         &mut send,
         &Welcome {
             codec: VideoCodec::H264,
+            instance: [42; 16],
         },
     )
     .await
@@ -103,6 +104,7 @@ async fn live_session_recovers_a_late_reply_and_owner_drop_cancels_the_next_wait
     })
     .await
     .expect("ready session");
+    assert_eq!(session.instance, [42; 16]);
     let preview_request = thumbnail::ThumbnailRequest {
         target: thumbnail::ThumbnailTarget {
             window: 1,

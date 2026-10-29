@@ -37,6 +37,13 @@ fn response<T>(mut pending: Pending<T>) -> T {
 fn shared_owner_isolates_sessions_and_revocation_without_transport_state() {
     let service = SessionService::start(|| {}).expect("service");
     let other_binding = service.clone();
+    assert_eq!(service.instance(), other_binding.instance());
+    assert_ne!(
+        service.instance(),
+        SessionService::start(|| {})
+            .expect("another host lifetime")
+            .instance()
+    );
     let authority = AccessAuthority::new(|| {});
     let first_access = authority.open("first".into()).expect("permit");
     let second_access = authority.open("second".into()).expect("permit");

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build Weld Connect with native CSS assets, then run on Linux or Android."""
+"""Build and run Weld Station, or validate it with the same build environment."""
 import argparse
 import hashlib
 import os
@@ -48,12 +48,23 @@ def main():
     parser.add_argument("--serial")
     parser.add_argument("--no-build", action="store_true")
     parser.add_argument("--build-only", action="store_true")
+    validation = parser.add_mutually_exclusive_group()
+    validation.add_argument("--check", dest="validation", action="store_const", const="check",
+                            help="check compilation without packaging or launching")
+    validation.add_argument("--test", dest="validation", action="store_const", const="test",
+                            help="run Linux tests without packaging or launching")
+    validation.add_argument("--clippy", dest="validation", action="store_const", const="clippy",
+                            help="run Clippy without packaging or launching")
     parser.add_argument("--jobs", type=int, default=8)
     args = parser.parse_args()
     if args.jobs < 1:
         parser.error("jobs must be positive")
     if args.serial and not args.android:
         parser.error("--serial requires --android")
+    if args.validation and (args.no_build or args.build_only or args.serial):
+        parser.error("validation options cannot be combined with launch/build-only options")
+    if args.android and args.validation == "test":
+        parser.error("--test runs on Linux; use --android --check or --android --clippy for Android")
     os.umask(0o077)
     OUTPUT.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ, CARGO_TARGET_DIR=str(CARGO), WGPU_BACKEND="gl",
@@ -68,8 +79,10 @@ def main():
             toolchain = ndk / "toolchains/llvm/prebuilt/linux-x86_64"
             env.update(FFMPEG_DIR=str(prefix), PKG_CONFIG_LIBDIR="", PKG_CONFIG_PATH="",
                        BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android=f"--sysroot={toolchain}/sysroot --target=aarch64-linux-android28")
-            run("cargo", "ndk", "-t", "arm64-v8a", "--platform", "28", "build", "--lib",
+            run("cargo", "ndk", "-t", "arm64-v8a", "--platform", "28", args.validation or "build", "--lib",
                 "--locked", "--manifest-path", manifest, "-j", args.jobs, env=env, cwd=ROOT)
+            if args.validation:
+                return
             library = CARGO / "aarch64-linux-android/debug/libweld_connect.so"
             packaged = OUTPUT / "libweld_connect.so"
             shutil.copy2(library, packaged)
@@ -114,6 +127,10 @@ def main():
         libraries = [subprocess.check_output(["pkg-config", "--variable=libdir", name], text=True).strip()
                      for name in ("egl", "glesv2", "libavcodec", "libavutil", "libavformat", "libavfilter", "libva", "libva-drm")]
         env["LD_LIBRARY_PATH"] = ":".join(dict.fromkeys([*env.get("LD_LIBRARY_PATH", "").split(":"), *libraries])).strip(":")
+        if args.validation:
+            run("cargo", args.validation, "--all-targets", "--locked", "--manifest-path", manifest,
+                "-j", args.jobs, env=env, cwd=ROOT)
+            return
         binary = OUTPUT / "weld-connect"
         if not args.no_build:
             run("cargo", "build", "--locked", "--manifest-path", manifest, "--bin", "weld-connect", "-j", args.jobs, env=env, cwd=ROOT)

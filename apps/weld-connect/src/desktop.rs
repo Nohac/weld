@@ -13,5 +13,5 @@ pub fn launch() -> Result<()> {
             .data_local_dir()
             .to_owned(),
     };
-    crate::ui::launch(directory, "Weld Connect".into())
+    crate::ui::launch(directory, "Weld Station".into())
 }

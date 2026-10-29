@@ -38,6 +38,7 @@ pub struct DestinationChannels<P, W, R> {
 
 /// Application control and independent service requests for one live receiver.
 pub struct DeviceSession<P: ConnectionControl> {
+    pub instance: [u8; 16],
     pub services: ServiceClient,
     pub control: DeviceClient,
     pub peer: P,
@@ -59,7 +60,7 @@ where
     C::Connection: DestinationConnection,
 {
     let notify = wake.clone();
-    runtime.start_operation("weld/device-client/1", 8, wake, |session| session.peer.close(), move |completion| async move {
+    runtime.start_operation("weld/device-client/1", 64, wake, |session| session.peer.close(), move |completion| async move {
         let setup = async {
             let connection = connector.connect(DEVICE_SERVICE).await?;
             let (mut send, mut receive) = connection.open_control().await?;
@@ -67,14 +68,14 @@ where
             let welcome: DeviceWelcome = receive_record(&mut receive).await?;
             negotiation::presentation(&preferences, welcome.codec)?;
             let channels = connection.destination(welcome.codec, notify.clone()).await?;
-            Ok::<_, anyhow::Error>((connection, send, receive, channels))
+            Ok::<_, anyhow::Error>((connection, send, receive, channels, welcome.instance))
         };
-        let (connection, send, receive, channels) = tokio::time::timeout(Duration::from_secs(15), setup)
+        let (connection, send, receive, channels, instance) = tokio::time::timeout(Duration::from_secs(15), setup)
             .await.context("device connection timed out")??;
         let service_wake = notify.clone();
         let (services, service_driver) = ServiceClient::new(move || service_wake());
         let (control, driver) = DeviceClient::new(move || notify());
-        completion.send(DeviceSession { services, control, peer: channels.peer })?;
+        completion.send(DeviceSession { instance, services, control, peer: channels.peer })?;
         let control = driver.run(send, receive, channels.recorder.as_ref());
         let service = service_driver.run(Duplex(channels.services.0, channels.services.1));
         tokio::pin!(control);

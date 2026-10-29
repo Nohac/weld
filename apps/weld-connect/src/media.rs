@@ -176,10 +176,10 @@ impl Receiver {
             .min()
     }
     pub fn poll(&mut self) -> Result<()> {
-        if self.shared.reset.swap(false, Ordering::AcqRel) {
+        if self.requested.is_some() && self.shared.reset.swap(false, Ordering::AcqRel) {
             self.reset_input();
         }
-        let active = self.shared.active.load(Ordering::Acquire);
+        let active = self.requested.is_some() && self.shared.active.load(Ordering::Acquire);
         if self.active != active {
             self.active = active;
             self.reset_input();
@@ -351,6 +351,8 @@ impl Receiver {
 impl Drop for Receiver {
     fn drop(&mut self) {
         self.reset_input();
-        self.shared.clear();
+        if self.requested.is_some() {
+            self.shared.clear();
+        }
     }
 }

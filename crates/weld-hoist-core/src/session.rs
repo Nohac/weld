@@ -396,6 +396,7 @@ impl Controller {
 }
 
 struct Owner {
+    instance: [u8; 16],
     sender: Sender<Event>,
     actions: Receiver<DeviceAction>,
     worker: Option<JoinHandle<()>>,
@@ -416,6 +417,9 @@ impl Drop for Owner {
 pub struct SessionService(Arc<Owner>);
 impl SessionService {
     pub fn start(notify: impl Fn() + Send + 'static) -> Result<Self> {
+        let mut instance = [0; 16];
+        getrandom::fill(&mut instance)
+            .map_err(|error| anyhow::anyhow!("session identity: {error}"))?;
         let (sender, receiver) = async_channel::bounded(MAX_COMMANDS);
         let (actions, receive_actions) = async_channel::bounded(MAX_COMMANDS);
         let mut controller = Controller {
@@ -437,10 +441,14 @@ impl SessionService {
             })
             .context("could not start session service")?;
         Ok(Self(Arc::new(Owner {
+            instance,
             sender,
             actions: receive_actions,
             worker: Some(worker),
         })))
+    }
+    pub fn instance(&self) -> [u8; 16] {
+        self.0.instance
     }
     fn submit(&self, event: Event) -> Result<()> {
         self.0
