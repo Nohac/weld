@@ -188,6 +188,11 @@ Weld is a workspace of reusable layers and one standard distribution:
   configured persistence palettes share ordinary smart-border and corner policy.
   SSD presentation identity includes the occupant surface, so same-update
   replacement retires the old content mount.
+  Presentation owners can request `WindowShellContent` and mount their UI in
+  `FrameContent`. SSD retains frame geometry, focus/persistence/urgency colors,
+  output projections and rounded clipping. `weld-hoist-ui` uses this mount for
+  status and reclaim/dismiss buttons; the hoist owner retains the application
+  title and the admitting session's participant identity for live and closed slots.
 - `weld-float` supplies conventional freeform placement, focus, stacking,
   movement, and interactive-resize policy without owning UI entities.
   `FloatBehaviorPlugin` applies interaction to `FloatingWindow` members owned

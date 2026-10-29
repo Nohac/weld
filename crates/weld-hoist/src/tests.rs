@@ -12,6 +12,7 @@ use bevy::{
     ecs::message::Messages,
     image::Image,
     math::{UVec2, Vec2},
+    prelude::{BorderColor, Color, Node, Text, UiRect, Val},
     scene::ScenePlugin,
     ui::UiScale,
     window::RequestRedraw,
@@ -20,23 +21,28 @@ use weld_app::{
     client::ClientAdapterCommandQueue,
     output::{OutputGeometry, OutputId, OutputPosition, PrimaryOutput, WeldOutput},
     surface::{
-        ClientProvenance, ClientSource, ClientToplevel, HostSurfaceEvent, HostSurfaceEventKind,
-        SurfaceAction, SurfaceBufferContent, SurfaceBufferUpdate, SurfaceCommitRevisions,
-        SurfaceContentView, SurfaceId, SurfaceLayerId, SurfaceLayerPlacement, SurfacePlugin,
-        SurfaceTreeSnapshot, SurfaceWindowGeometry, ToplevelInteractionRequestKind,
-        WindowDecoration, enqueue_surface_event, register_client_source, take_surface_actions,
+        ClientProvenance, ClientSource, ClientToplevel, ClientWindowMetadata, HostSurfaceEvent,
+        HostSurfaceEventKind, SurfaceAction, SurfaceBufferContent, SurfaceBufferUpdate,
+        SurfaceCommitRevisions, SurfaceContentView, SurfaceId, SurfaceLayerId,
+        SurfaceLayerPlacement, SurfacePlugin, SurfaceTreeSnapshot, SurfaceWindowGeometry,
+        ToplevelInteractionRequestKind, WindowDecoration, enqueue_surface_event,
+        register_client_source, take_surface_actions,
     },
 };
 use weld_client::{
     ClientAdapterCommandEnvelope, ClientId, ClientSourceDescriptor, ClientSourceId,
-    ClientSurfaceRole, ToplevelLayout, ToplevelState,
+    ClientSurfaceMetadata, ClientSurfaceRole, ToplevelLayout, ToplevelState,
 };
 use weld_float::FloatPlugin;
-use weld_ssd::SsdPlugin;
+use weld_ssd::{BorderStyle, SsdPlugin, SsdSettings, WindowShellContent};
+use weld_window::fullscreen::{
+    FullscreenAction, FullscreenMode, FullscreenPlugin, FullscreenRequest,
+};
 use weld_window::{
     ClientResizeState, OccupiesWindow, PrimaryWindowPresentation, TiledWindow, WindowAdmissionHold,
-    WindowGeometry, WindowInteractionKind, WindowInteractionSession, WindowOccupant, WindowOutput,
-    WindowPlugin, WindowPresentationOverride,
+    WindowCommand, WindowCommandKind, WindowGeometry, WindowInteractionKind,
+    WindowInteractionSession, WindowOccupant, WindowOutput, WindowPlugin,
+    WindowPresentationOverride,
 };
 use weld_window_ui::WindowUiPlugin;
 
@@ -48,6 +54,96 @@ use crate::{
 
 const LOCAL_SOURCE: ClientSourceId = ClientSourceId::new(0);
 const LOOPBACK_SOURCE: ClientSourceId = ClientSourceId::new(1);
+
+#[test]
+fn hoisted_content_keeps_shared_focus_style_fullscreen_and_peer_identity() {
+    let (mut app, endpoint) = test_app();
+    app.add_plugins(FullscreenPlugin);
+    let local = surface(LOCAL_SOURCE, 77);
+    let client = map_surface(&mut app, local, None, WindowDecoration::ServerSide);
+    app.world_mut()
+        .entity_mut(client)
+        .insert(ClientWindowMetadata(
+            ClientSurfaceMetadata::new("org.test.Editor".into(), "Edited document".into())
+                .expect("metadata"),
+        ));
+    let window = window_for_client(&mut app, client);
+    let (_, receiver) = begin_hoist(
+        &mut app,
+        endpoint,
+        window,
+        local,
+        WindowDecoration::ServerSide,
+    );
+    app.update();
+    let placeholder = app
+        .world()
+        .get::<HoistPlaceholder>(window)
+        .expect("placeholder");
+    assert_eq!(placeholder.application, "Edited document");
+    assert_eq!(placeholder.destination, "Local preview");
+    assert!(app.world().get::<WindowShellContent>(window).is_some());
+    assert!(
+        app.world_mut()
+            .query::<&Text>()
+            .iter(app.world())
+            .any(|text| text
+                .0
+                .contains("Edited document\n\nHoisted to\nLocal preview"))
+    );
+
+    let focused = Color::srgb(0.1, 0.7, 0.3);
+    let unfocused = Color::srgb(0.3, 0.2, 0.5);
+    {
+        let mut settings = app.world_mut().resource_mut::<SsdSettings>();
+        settings.floating = BorderStyle::Pixel(4);
+        settings.focused.child_border = focused;
+        settings.unfocused.child_border = unfocused;
+        settings.corner_radius = 15;
+    }
+    for (target, expected) in [(window, focused), (receiver, unfocused)] {
+        app.world_mut().trigger(WindowCommand {
+            window: target,
+            kind: WindowCommandKind::Focus,
+        });
+        app.update();
+        let root = app
+            .world()
+            .get::<PrimaryWindowPresentation>(window)
+            .expect("shared frame")
+            .entity();
+        assert_eq!(
+            *app.world().get::<BorderColor>(root).expect("border"),
+            BorderColor::all(expected)
+        );
+        assert_eq!(
+            app.world().get::<Node>(root).expect("node").border,
+            UiRect::all(Val::Px(4.0))
+        );
+    }
+    app.world_mut().trigger(FullscreenRequest {
+        window: Some(window),
+        action: FullscreenAction::Enable(FullscreenMode::Normal),
+    });
+    app.update();
+    app.update();
+    let root = app
+        .world()
+        .get::<PrimaryWindowPresentation>(window)
+        .expect("fullscreen frame")
+        .entity();
+    assert_eq!(
+        app.world().get::<Node>(root).expect("node").border,
+        UiRect::all(Val::Px(0.0))
+    );
+    assert_eq!(
+        app.world()
+            .get::<WindowGeometry>(window)
+            .expect("geometry")
+            .size,
+        Vec2::new(1_000.0, 800.0)
+    );
+}
 
 #[test]
 fn explicit_phone_destination_preserves_the_desktop_default() {
@@ -445,6 +541,11 @@ fn hoist_uses_an_independent_relocated_client_and_restores_after_ordered_unmap()
             .is_none()
     );
     assert!(app.world().get::<HoistPlaceholder>(source_window).is_none());
+    assert!(
+        app.world()
+            .get::<WindowShellContent>(source_window)
+            .is_none()
+    );
     assert!(!app.world().entities().contains(session_entity));
 }
 

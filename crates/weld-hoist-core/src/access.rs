@@ -40,6 +40,9 @@ pub struct AuthorizedEndpoint<E> {
 }
 
 impl<E: HoistEndpoint> HoistEndpoint for AuthorizedEndpoint<E> {
+    fn participant(&self) -> Option<&str> {
+        Some(self.session.participant())
+    }
     fn is_available(&self) -> bool {
         self.session.is_authorized() && self.endpoint.is_available()
     }

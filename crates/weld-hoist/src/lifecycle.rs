@@ -15,8 +15,8 @@ use bevy::{
 use weld_app::{
     client::ClientAdapterCommandQueue,
     surface::{
-        ClientId, ClientSource, ClientToplevel, MappedSurface, SurfaceAction, SurfaceActionQueue,
-        SurfaceCommitRevisions,
+        ClientId, ClientSource, ClientToplevel, ClientWindowMetadata, MappedSurface, SurfaceAction,
+        SurfaceActionQueue, SurfaceCommitRevisions,
     },
 };
 use weld_hoist_core::{HoistFamilyId, HoistSourceMode, ReclaimScope};
@@ -58,6 +58,7 @@ pub(super) struct BeginHoistParams<'w, 's> {
         ),
     >,
     presentation_insets: Query<'w, 's, &'static PresentationInsets>,
+    metadata: Query<'w, 's, &'static ClientWindowMetadata>,
     sessions: Query<'w, 's, &'static HoistSession>,
     families: WindowFamilyResolver<'w, 's>,
 }
@@ -293,7 +294,26 @@ fn begin_hoist(params: &mut BeginHoistParams, planned: PlannedHoist) {
                 HoistPlaceholder {
                     session,
                     state: HoistPlaceholderState::Live,
-                    metrics,
+                    application: params
+                        .metadata
+                        .get(source_client)
+                        .map(|metadata| {
+                            if metadata.0.title().is_empty() {
+                                metadata.0.app_id()
+                            } else {
+                                metadata.0.title()
+                            }
+                        })
+                        .unwrap_or("Application")
+                        .to_owned(),
+                    destination: endpoint
+                        .participant()
+                        .unwrap_or(if endpoint.has_local_receiver() {
+                            "Local preview"
+                        } else {
+                            "Remote receiver"
+                        })
+                        .to_owned(),
                 },
                 WindowVacancy::Retain,
             ));

@@ -7,6 +7,18 @@ that a later network/codec transport must implement.
 
 ## Runtime boundary
 
+### Source placeholder
+
+Hoisted windows retain the shared desktop frame, including configured borders,
+focus and persistence colors, tab-group joins, fullscreen and rounded clipping.
+The content shows the application's title and its destination session identity
+(or “Local preview” for loopback). Reclaim returns the application's hoisted
+family; a remotely closed window offers Dismiss. Buttons consume their pointer
+press, show pending feedback and submit one request while the operation runs.
+The same actions support the headless widget's focused Enter/Space activation.
+
+### Surface transport
+
 The source remains the authoritative Wayland compositor for the real client.
 The destination registers a Relocated `weld-client` adapter and presents the
 transported toplevels and popups through ordinary window admission.

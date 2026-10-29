@@ -1,35 +1,26 @@
-//! Hoist placeholder, reclaim, and tombstone presentation.
-
-use std::collections::HashSet;
+//! Hoist status and actions mounted inside the shared window shell.
 
 use bevy::{
-    app::{App, Plugin, PreUpdate},
-    ecs::{
-        component::Component,
-        entity::Entity,
-        message::{Message, MessageWriter},
-        observer::On,
-        query::With,
-        schedule::IntoScheduleConfigs,
-        system::{Commands, Query},
-        template::template,
+    ecs::template::template,
+    input::{ButtonState, keyboard::KeyboardInput},
+    input_focus::FocusedInput,
+    picking::{
+        Pickable,
+        events::{PointerCancel, PointerClick, PointerPress, PointerRelease},
+        hover::Hovered,
+        pointer::PointerButton,
     },
-    picking::{Pickable, events::PointerClick, pointer::PointerButton},
-    prelude::{
-        AccessibleLabel, AlignItems, BackgroundColor, BorderColor, BorderRadius, BoxShadow,
-        Children, Color, FlexDirection, GlobalZIndex, JustifyContent, Node, Overflow, PositionType,
-        Scene, UiRect, UiTargetCamera, px,
-    },
+    prelude::*,
     scene::{CommandsSceneExt, bsn},
-    text::{FontSourceTemplate, GenericFontFamily, TextFont},
-    ui_widgets::Button,
+    text::FontSize,
+    ui::{InteractionDisabled, Pressed},
+    ui_widgets::{Activate, Button},
     window::RequestRedraw,
 };
-use weld_app::output::{OutputCompositionCamera, PrimaryOutput, WeldOutput};
+use weld_ssd::{FrameContent, SsdSettings, WindowShellContent};
 use weld_window::{
-    ManagedWindow, PresentationInsets, PresentationOffset, PresentsWindow,
-    PrimaryWindowPresentation, WindowGeometryAnchor, WindowOutput, WindowOutputIntersections,
-    WindowPresentationOverride, WindowProjection, WindowSystems, WindowZOrder,
+    PresentationInsets, PresentationOffset, WindowGeometryAnchor, WindowProjectionLookup,
+    WindowSystems,
 };
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -45,11 +36,12 @@ pub enum HoistPlaceholderState {
     Closed,
 }
 
-#[derive(Component, Clone, Copy, Debug)]
+#[derive(Component, Clone, Debug, PartialEq)]
 pub struct HoistPlaceholder {
     pub session: Entity,
     pub state: HoistPlaceholderState,
-    pub metrics: HoistPlaceholderMetrics,
+    pub application: String,
+    pub destination: String,
 }
 
 #[derive(Clone, Copy, Debug, Message)]
@@ -62,56 +54,168 @@ pub struct DismissHoistTombstone {
     pub session: Entity,
 }
 
-#[derive(Component, Clone, Copy, Debug)]
+#[derive(Component, Clone, Copy)]
 struct HoistActionHandle {
     session: Entity,
     reclaim: bool,
 }
 
-#[derive(Component, Clone, Copy, Debug)]
-pub struct HoistPresentation {
-    pub session: Entity,
-    pub state: HoistPlaceholderState,
+#[derive(Component)]
+struct Mounted {
+    child: Entity,
+    placeholder: HoistPlaceholder,
+    style: ContentStyle,
 }
 
-/// Hoist placeholder presentation for applications that also install the
-/// generic Weld window-UI projection plugin.
+#[derive(Clone, PartialEq)]
+struct ContentStyle {
+    font: TextFont,
+    background: Color,
+    foreground: Color,
+    button: Color,
+    button_foreground: Color,
+    radius: f32,
+}
+
+/// Mounts content in the shared SSD shell with scoped button behavior.
 pub struct HoistUiPlugin;
 
 impl Plugin for HoistUiPlugin {
     fn build(&self, app: &mut App) {
         app.add_message::<ReclaimHoist>()
             .add_message::<DismissHoistTombstone>()
+            .add_observer(claim_shell)
+            .add_observer(release_shell)
             .add_observer(request_action)
+            .add_observer(press)
+            .add_observer(click)
+            .add_observer(release)
+            .add_observer(cancel)
+            .add_observer(keyboard)
             .add_systems(
                 PreUpdate,
-                revoke_presentations.in_set(WindowSystems::PresentationRevoke),
-            )
-            .add_systems(
-                PreUpdate,
-                present_placeholders.in_set(WindowSystems::PresentationClaim),
-            )
-            .add_systems(
-                PreUpdate,
-                reconcile_projections.in_set(WindowSystems::UiReconcile),
+                (mount, button_feedback)
+                    .chain()
+                    .after(WindowSystems::UiReconcile),
             );
     }
 }
 
-fn request_action(
-    mut click: On<PointerClick>,
-    handles: Query<&HoistActionHandle>,
-    mut reclaims: MessageWriter<ReclaimHoist>,
-    mut dismissals: MessageWriter<DismissHoistTombstone>,
-    mut redraw: MessageWriter<RequestRedraw>,
+fn press(
+    mut event: On<PointerPress>,
+    buttons: Query<(), With<HoistActionHandle>>,
+    mut commands: Commands,
 ) {
-    if click.button != PointerButton::Primary || click.original_event_target() != click.entity {
-        return;
+    if buttons.contains(event.entity) {
+        event.propagate(false);
+        if event.button == PointerButton::Primary {
+            commands.entity(event.entity).insert(Pressed);
+        }
     }
-    let Ok(handle) = handles.get(click.entity) else {
+}
+
+fn click(
+    mut event: On<PointerClick>,
+    buttons: Query<(), (With<HoistActionHandle>, With<Pressed>)>,
+    mut commands: Commands,
+) {
+    if buttons.contains(event.entity) {
+        event.propagate(false);
+        if event.button == PointerButton::Primary {
+            commands.trigger(Activate {
+                entity: event.entity,
+            });
+        }
+    }
+}
+
+fn release(
+    mut event: On<PointerRelease>,
+    buttons: Query<(), With<HoistActionHandle>>,
+    mut commands: Commands,
+) {
+    if buttons.contains(event.entity) {
+        event.propagate(false);
+        if event.button == PointerButton::Primary {
+            commands.entity(event.entity).remove::<Pressed>();
+        }
+    }
+}
+
+fn cancel(
+    mut event: On<PointerCancel>,
+    buttons: Query<(), With<HoistActionHandle>>,
+    mut commands: Commands,
+) {
+    if buttons.contains(event.entity) {
+        event.propagate(false);
+        commands.entity(event.entity).remove::<Pressed>();
+    }
+}
+
+fn keyboard(
+    mut event: On<FocusedInput<KeyboardInput>>,
+    buttons: Query<(), With<HoistActionHandle>>,
+    mut commands: Commands,
+) {
+    if buttons.contains(event.focused_entity)
+        && event.input.state == ButtonState::Pressed
+        && !event.input.repeat
+        && matches!(event.input.key_code, KeyCode::Enter | KeyCode::Space)
+    {
+        event.propagate(false);
+        commands.trigger(Activate {
+            entity: event.focused_entity,
+        });
+    }
+}
+
+fn claim_shell(
+    event: On<Add<HoistPlaceholder>>,
+    placeholders: Query<&HoistPlaceholder>,
+    mut commands: Commands,
+) {
+    if let Ok(placeholder) = placeholders.get(event.entity) {
+        commands
+            .entity(event.entity)
+            .insert(WindowShellContent(placeholder.session));
+    }
+}
+
+fn release_shell(event: On<Remove<HoistPlaceholder>>, mut commands: Commands) {
+    commands
+        .entity(event.entity)
+        .try_remove::<WindowShellContent>();
+}
+
+fn request_action(
+    event: On<Activate>,
+    handles: Query<&HoistActionHandle, Without<InteractionDisabled>>,
+    mut commands: Commands,
+    (mut reclaims, mut dismissals): (
+        MessageWriter<ReclaimHoist>,
+        MessageWriter<DismissHoistTombstone>,
+    ),
+    mut redraw: MessageWriter<RequestRedraw>,
+    children: Query<&Children>,
+    mut labels: Query<&mut Text>,
+) {
+    let Ok(handle) = handles.get(event.entity) else {
         return;
     };
-    click.propagate(false);
+    commands.entity(event.entity).insert(InteractionDisabled);
+    if let Ok(children) = children.get(event.entity) {
+        for child in children {
+            if let Ok(mut text) = labels.get_mut(*child) {
+                text.0 = if handle.reclaim {
+                    "Reclaiming…"
+                } else {
+                    "Dismissing…"
+                }
+                .into();
+            }
+        }
+    }
     if handle.reclaim {
         reclaims.write(ReclaimHoist {
             session: handle.session,
@@ -124,233 +228,131 @@ fn request_action(
     redraw.write(RequestRedraw);
 }
 
-fn revoke_presentations(
-    mut commands: Commands,
-    roots: Query<(Entity, &WindowProjection, &HoistPresentation)>,
-    windows: Query<(&HoistPlaceholder, &WindowPresentationOverride)>,
+type Buttons<'w, 's> = Query<
+    'w,
+    's,
+    (
+        Option<&'static Hovered>,
+        Has<Pressed>,
+        Has<InteractionDisabled>,
+        &'static mut BackgroundColor,
+    ),
+    With<HoistActionHandle>,
+>;
+
+fn button_feedback(
+    settings: Res<SsdSettings>,
+    mut buttons: Buttons,
+    mut redraw: MessageWriter<RequestRedraw>,
 ) {
-    for (root, projection, presentation) in &roots {
-        let valid = windows
-            .get(projection.window())
-            .is_ok_and(|(placeholder, owner)| {
-                placeholder.session == presentation.session
-                    && placeholder.state == presentation.state
-                    && owner.owner() == placeholder.session
-            });
-        if !valid {
-            commands.entity(root).despawn();
+    for (hovered, pressed, disabled, mut background) in &mut buttons {
+        let color = if disabled {
+            settings.unfocused.background
+        } else if pressed || hovered.is_some_and(|hovered| hovered.get()) {
+            settings.focused.indicator
+        } else {
+            settings.focused.background
+        };
+        if background.0 != color {
+            background.0 = color;
+            redraw.write(RequestRedraw);
         }
     }
 }
 
-type PlaceholderWindows<'w, 's> = Query<
-    'w,
-    's,
-    (
-        Entity,
-        &'static HoistPlaceholder,
-        &'static WindowZOrder,
-        Option<&'static WindowOutput>,
-        &'static WindowOutputIntersections,
-        Option<&'static PrimaryWindowPresentation>,
-        &'static WindowPresentationOverride,
-    ),
-    With<ManagedWindow>,
->;
-
-type OutputCameras<'w, 's> = Query<
-    'w,
-    's,
-    (
-        Entity,
-        Option<&'static OutputCompositionCamera>,
-        Option<&'static PrimaryOutput>,
-    ),
-    With<WeldOutput>,
->;
-
-fn present_placeholders(
+fn mount(
     mut commands: Commands,
-    windows: PlaceholderWindows,
-    outputs: OutputCameras,
+    settings: Res<SsdSettings>,
+    mounts: Query<(Entity, Option<&Mounted>), With<FrameContent>>,
+    projections: WindowProjectionLookup,
+    placeholders: Query<&HoistPlaceholder>,
+    mut redraw: MessageWriter<RequestRedraw>,
 ) {
-    for (window, placeholder, z_order, output, _, primary, owner) in &windows {
-        if primary.is_some() || owner.owner() != placeholder.session {
-            continue;
-        }
-        let output = output.map(|output| output.0).or_else(|| {
-            outputs
-                .iter()
-                .find_map(|(output, _, primary)| primary.is_some().then_some(output))
-        });
-        if let Some(output) = output {
-            spawn_placeholder(
-                &mut commands,
-                window,
-                *placeholder,
-                output,
-                z_order.0,
-                true,
-                &outputs,
-            );
-        }
-    }
-}
-
-fn reconcile_projections(
-    mut commands: Commands,
-    windows: PlaceholderWindows,
-    outputs: OutputCameras,
-    roots: Query<(Entity, &WindowProjection, &HoistPresentation)>,
-) {
-    let mut retained = HashSet::new();
-    for (root, projection, presentation) in &roots {
-        let Ok((window, placeholder, _, _, intersections, primary, owner)) =
-            windows.get(projection.window())
-        else {
-            commands.entity(root).despawn();
+    let mut font = settings.title_font.text_font();
+    font.font_size = FontSize::Px(settings.title_font.size.max(18.0));
+    let style = ContentStyle {
+        font,
+        background: settings.placeholder.background,
+        foreground: settings.placeholder.foreground,
+        button: settings.focused.background,
+        button_foreground: settings.focused.foreground,
+        radius: f32::from(settings.corner_radius),
+    };
+    for (mount, mounted) in &mounts {
+        let Some(window) = projections.window_for(mount) else {
             continue;
         };
-        let authoritative = primary.is_some_and(|primary| primary.entity() == root);
-        if window != projection.window()
-            || placeholder.session != presentation.session
-            || placeholder.state != presentation.state
-            || owner.owner() != placeholder.session
-            || (!authoritative && !intersections.contains(projection.output()))
-            || !retained.insert((window, projection.output()))
+        let Ok(placeholder) = placeholders.get(window) else {
+            continue;
+        };
+        if mounted
+            .is_some_and(|mounted| mounted.placeholder == *placeholder && mounted.style == style)
         {
-            commands.entity(root).despawn();
-        }
-    }
-    for (window, placeholder, z_order, _, intersections, _, owner) in &windows {
-        if owner.owner() != placeholder.session {
             continue;
         }
-        for output in intersections.iter() {
-            if retained.insert((window, output)) {
-                spawn_placeholder(
-                    &mut commands,
-                    window,
-                    *placeholder,
-                    output,
-                    z_order.0,
-                    false,
-                    &outputs,
-                );
-            }
+        if let Some(mounted) = mounted {
+            commands.entity(mounted.child).despawn();
         }
+        let child = commands
+            .spawn_scene(content_scene(placeholder, &style))
+            .insert(ChildOf(mount))
+            .id();
+        commands.entity(mount).insert(Mounted {
+            child,
+            placeholder: placeholder.clone(),
+            style: style.clone(),
+        });
+        redraw.write(RequestRedraw);
     }
 }
 
-fn spawn_placeholder(
-    commands: &mut Commands,
-    window: Entity,
-    placeholder: HoistPlaceholder,
-    output: Entity,
-    z_order: i32,
-    primary: bool,
-    outputs: &OutputCameras,
-) {
-    let root = match placeholder.state {
-        HoistPlaceholderState::Live => commands.spawn_scene(live_scene(placeholder.session)).id(),
-        HoistPlaceholderState::Closed => {
-            commands.spawn_scene(closed_scene(placeholder.session)).id()
-        }
+fn content_scene(placeholder: &HoistPlaceholder, style: &ContentStyle) -> impl Scene {
+    let reclaim = placeholder.state == HoistPlaceholderState::Live;
+    let action = if reclaim { "Reclaim" } else { "Dismiss" };
+    let status = if reclaim { "Hoisted to" } else { "Closed on" };
+    let description = format!(
+        "{}\n\n{status}\n{}",
+        placeholder.application, placeholder.destination
+    );
+    let label = description.clone();
+    let handle = HoistActionHandle {
+        session: placeholder.session,
+        reclaim,
     };
-    let mut entity = commands.entity(root);
-    entity.insert((
-        WindowProjection::new(window, output),
-        HoistPresentation {
-            session: placeholder.session,
-            state: placeholder.state,
-        },
-        placeholder.metrics.insets,
-        placeholder.metrics.offset,
-        placeholder.metrics.anchor,
-        GlobalZIndex(z_order),
-    ));
-    if primary {
-        entity.insert(PresentsWindow(window));
-    }
-    if let Ok((_, Some(camera), _)) = outputs.get(output)
-        && let Some(camera) = camera.entity()
-    {
-        entity.insert(UiTargetCamera(camera));
-    }
-}
-
-fn live_scene(session: Entity) -> impl Scene {
-    placeholder_scene(
-        session,
-        "Window hoisted",
-        "Reclaim hoisted window",
-        "Reclaim",
-        Color::srgb(0.20, 0.45, 0.72),
-        true,
-    )
-}
-
-fn closed_scene(session: Entity) -> impl Scene {
-    placeholder_scene(
-        session,
-        "Window closed remotely",
-        "Dismiss closed remote window placeholder",
-        "Dismiss",
-        Color::srgb(0.32, 0.35, 0.42),
-        false,
-    )
-}
-
-fn placeholder_scene(
-    session: Entity,
-    message: &'static str,
-    label: &'static str,
-    action: &'static str,
-    color: Color,
-    reclaim: bool,
-) -> impl Scene {
+    let style = style.clone();
+    let label_font = style.font.clone();
+    let button_font = style.font.clone();
     bsn! {
         Node {
-            position_type: PositionType::Absolute,
-            flex_direction: FlexDirection::Column,
-            align_items: AlignItems::Center,
-            justify_content: JustifyContent::Center,
-            overflow: Overflow::clip(),
-            border: UiRect::all(px(2)),
-            border_radius: BorderRadius::all(px(10)),
+            width: percent(100), height: percent(100), min_width: px(0), min_height: px(0),
+            padding: UiRect::all(px(16)), flex_direction: FlexDirection::Column,
+            align_items: AlignItems::Center, justify_content: JustifyContent::Center,
+            row_gap: px(16),
         }
-        BackgroundColor(Color::srgb(0.08, 0.10, 0.14))
-        BorderColor::all(Color::srgb(0.28, 0.34, 0.44))
-        BoxShadow::new(
-            Color::srgba(0.0, 0.0, 0.0, 0.55),
-            px(0),
-            px(10),
-            px(2),
-            px(22),
-        )
+        BackgroundColor({style.background})
         Children [
             Pickable::IGNORE
-            bevy::ui::widget::Text(message)
-            TextFont { font: FontSourceTemplate::Generic(GenericFontFamily::Monospace), font_size: px(20.0) }
-            bevy::text::TextColor(Color::srgb(0.88, 0.91, 0.96))
+            Node { max_width: percent(100) }
+            Text::new(description)
+            AccessibleLabel::new(label)
+            template(move |_| Ok(label_font.clone()))
+            TextColor({style.foreground})
             --
             Button
-            AccessibleLabel::new(label)
-            template(move |_| Ok(HoistActionHandle { session, reclaim }))
+            Hovered(false)
+            template(move |_| Ok(handle))
+            AccessibleLabel::new(action)
             Node {
-                width: px(132),
-                height: px(38),
-                margin: bevy::ui::UiRect::top(px(16)),
-                align_items: AlignItems::Center,
-                justify_content: JustifyContent::Center,
-                border_radius: BorderRadius::all(px(8)),
+                padding: UiRect::axes(px(20), px(10)), flex_shrink: 0.0,
+                align_items: AlignItems::Center, justify_content: JustifyContent::Center,
+                border_radius: BorderRadius::all(px(style.radius)),
             }
-            BackgroundColor(color)
+            BackgroundColor({style.button})
             Children [
                 Pickable::IGNORE
-                bevy::ui::widget::Text(action)
-                TextFont { font: FontSourceTemplate::Generic(GenericFontFamily::Monospace), font_size: px(16.0) }
-                bevy::text::TextColor(Color::WHITE)
+                Text(action)
+                template(move |_| Ok(button_font.clone()))
+                TextColor({style.button_foreground})
             ]
         ]
     }
@@ -358,22 +360,18 @@ fn placeholder_scene(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use bevy::{
-        app::App,
         camera::{ManualTextureViewHandle, NormalizedRenderTarget},
-        ecs::message::Messages,
-        math::Vec2,
         picking::{
             backend::HitData,
-            events::{Pointer, PointerClick},
+            events::{Pointer, PointerClick, PointerPress},
             pointer::{Location, PointerButton, PointerId},
         },
     };
 
-    use super::*;
-
     #[test]
-    fn accepted_hoist_action_requests_redraw() {
+    fn action_is_dispatched_once_and_requests_redraw() {
         let mut app = App::new();
         app.add_message::<RequestRedraw>()
             .add_plugins(HoistUiPlugin);
@@ -385,24 +383,105 @@ mod tests {
                 reclaim: true,
             })
             .id();
-        let camera = app.world_mut().spawn_empty().id();
+        app.world_mut().trigger(Activate { entity: button });
+        app.world_mut().flush();
+        app.world_mut().trigger(Activate { entity: button });
+        assert_eq!(app.world().resource::<Messages<ReclaimHoist>>().len(), 1);
+        assert_eq!(app.world().resource::<Messages<RequestRedraw>>().len(), 1);
+    }
 
-        app.world_mut().trigger(PointerClick {
-            entity: button,
-            pointer: Pointer::new(
+    #[test]
+    fn descendant_click_activates_button_without_starting_a_frame_grab() {
+        #[derive(Resource, Default)]
+        struct FramePresses(usize);
+        #[derive(Component)]
+        struct Frame;
+        let mut app = App::new();
+        app.add_message::<RequestRedraw>()
+            .init_resource::<FramePresses>()
+            .add_plugins(HoistUiPlugin);
+        app.add_observer(
+            |event: On<PointerPress>,
+             frames: Query<(), With<Frame>>,
+             mut count: ResMut<FramePresses>| {
+                if frames.contains(event.entity) {
+                    count.0 += 1;
+                }
+            },
+        );
+        let frame = app.world_mut().spawn(Frame).id();
+        let session = app.world_mut().spawn_empty().id();
+        let button = app
+            .world_mut()
+            .spawn((
+                Button,
+                HoistActionHandle {
+                    session,
+                    reclaim: true,
+                },
+                ChildOf(frame),
+            ))
+            .id();
+        let label = app
+            .world_mut()
+            .spawn((Text::new("Reclaim"), ChildOf(button)))
+            .id();
+        let pointer = || {
+            Pointer::new(
                 PointerId::Mouse,
                 Location {
                     target: NormalizedRenderTarget::TextureView(ManualTextureViewHandle(1)),
                     position: Vec2::ZERO,
                 },
-            ),
+            )
+        };
+        let hit = || HitData::new(frame, 0.0, None, None);
+        app.world_mut().register_component::<bevy::window::Window>();
+        app.world_mut().flush();
+        assert_eq!(
+            app.world()
+                .get::<ChildOf>(label)
+                .expect("label parent")
+                .parent(),
+            button
+        );
+        app.world_mut().trigger(PointerPress {
+            entity: label,
+            pointer: pointer(),
             button: PointerButton::Primary,
-            hit: HitData::new(camera, 0.0, None, None),
+            hit: hit(),
+            count: 1,
+        });
+        app.world_mut().flush();
+        assert!(
+            app.world().get::<Pressed>(button).is_some(),
+            "pointer press reaches the button"
+        );
+        app.world_mut().trigger(PointerClick {
+            entity: label,
+            pointer: pointer(),
+            button: PointerButton::Primary,
+            hit: hit(),
             duration: std::time::Duration::ZERO,
             count: 1,
         });
-
+        app.world_mut().flush();
+        assert_eq!(app.world().resource::<FramePresses>().0, 0);
         assert_eq!(app.world().resource::<Messages<ReclaimHoist>>().len(), 1);
-        assert_eq!(app.world().resource::<Messages<RequestRedraw>>().len(), 1);
+        assert_eq!(
+            app.world().get::<Text>(label).expect("button label").0,
+            "Reclaiming…"
+        );
+        let content = app.world_mut().spawn(ChildOf(frame)).id();
+        app.world_mut().trigger(PointerPress {
+            entity: content,
+            pointer: pointer(),
+            button: PointerButton::Primary,
+            hit: hit(),
+            count: 1,
+        });
+        app.world_mut().flush();
+        assert_eq!(app.world().resource::<FramePresses>().0, 1);
+        assert!(app.world().get::<Pressed>(content).is_none());
     }
 }

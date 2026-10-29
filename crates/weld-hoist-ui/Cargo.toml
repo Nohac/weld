@@ -8,3 +8,4 @@ publish.workspace = true
 bevy.workspace = true
 weld-app = { path = "../weld-app" }
 weld-window = { path = "../weld-window" }
+weld-ssd = { path = "../weld-ssd" }

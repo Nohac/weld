@@ -73,6 +73,15 @@ struct WindowBody;
 #[derive(Component, Clone, Copy, Default)]
 pub struct FrameHeader;
 
+/// Content mount inside the shared frame's rounded clipping boundary.
+#[derive(Component, Clone, Copy, Default)]
+pub struct FrameContent;
+
+/// Requests the shared shell for a presentation owner that supplies its own content.
+/// The owner must match [`WindowPresentationOverride`].
+#[derive(Component, Clone, Copy, Debug)]
+pub struct WindowShellContent(pub Entity);
+
 #[derive(Component, Clone, Copy, Default)]
 struct FrameHeaderBackdrop;
 
@@ -251,7 +260,11 @@ type ClaimedSsdRoots<'w, 's> = Query<
 fn revoke_ssd_presentations(
     mut commands: Commands,
     roots: ClaimedSsdRoots,
-    windows: Query<(&WindowVacancy, Option<&WindowPresentationOverride>)>,
+    windows: Query<(
+        &WindowVacancy,
+        Option<&WindowPresentationOverride>,
+        Option<&WindowShellContent>,
+    )>,
     clients: WindowClientResolver,
     occupants: Query<(
         &ClientToplevel,
@@ -261,32 +274,34 @@ fn revoke_ssd_presentations(
     styles: FrameStyles,
 ) {
     for (root, projection, vacant_presentation, geometry, content) in &roots {
-        let still_server_decorated =
-            windows
-                .get(projection.window())
-                .is_ok_and(|(vacancy, presentation_override)| {
-                    presentation_override.is_none()
-                        && clients.client_entity(projection.window()).map_or(
-                            vacant_presentation.is_some()
-                                && (*vacancy == WindowVacancy::Retain
-                                    || styles.persistent_windows.contains(projection.window())),
-                            |client| {
-                                vacant_presentation.is_none()
-                                    && occupants.get(client).is_ok_and(
-                                        |(toplevel, mapped, requested)| {
-                                            // Unmapping hides the frame; remapping resolves policy.
-                                            *content == SsdContent::Surface(toplevel.surface)
-                                                && (mapped.is_none()
-                                                    || styles.frames.server_frame_required(
-                                                        projection.window(),
-                                                        requested,
-                                                        mapped,
-                                                    ))
-                                        },
-                                    )
-                            },
-                        )
-                });
+        let still_server_decorated = windows.get(projection.window()).is_ok_and(
+            |(vacancy, presentation_override, shell)| {
+                if let Some(owner) = presentation_override {
+                    return shell.is_some_and(|shell| shell.0 == owner.owner())
+                        && *content == SsdContent::External(owner.owner());
+                }
+                clients.client_entity(projection.window()).map_or(
+                    vacant_presentation.is_some()
+                        && (*vacancy == WindowVacancy::Retain
+                            || styles.persistent_windows.contains(projection.window())),
+                    |client| {
+                        vacant_presentation.is_none()
+                            && occupants
+                                .get(client)
+                                .is_ok_and(|(toplevel, mapped, requested)| {
+                                    // Unmapping hides the frame; remapping resolves policy.
+                                    *content == SsdContent::Surface(toplevel.surface)
+                                        && (mapped.is_none()
+                                            || styles.frames.server_frame_required(
+                                                projection.window(),
+                                                requested,
+                                                mapped,
+                                            ))
+                                })
+                    },
+                )
+            },
+        );
         if !still_server_decorated || *geometry != styles.geometry(projection.window()) {
             commands.entity(root).despawn();
         }
@@ -303,6 +318,7 @@ type ProjectedSsdWindows<'w, 's> = Query<
         &'static WindowZOrder,
         &'static WindowOutputIntersections,
         Option<&'static WindowPresentationOverride>,
+        Option<&'static WindowShellContent>,
     ),
 >;
 
@@ -320,8 +336,8 @@ fn reconcile_ssd_projections(
     styles: FrameStyles,
 ) {
     let mut retained = HashSet::new();
-    for (window, primary, _, _, _, presentation_override) in &windows {
-        if presentation_override.is_some() {
+    for (window, primary, _, _, _, presentation_override, shell) in &windows {
+        if !shared_shell(presentation_override, shell) {
             continue;
         }
         if let Ok((_, projection)) = roots.get(primary.entity()) {
@@ -333,8 +349,8 @@ fn reconcile_ssd_projections(
         .iter()
         .filter(
             |(root, projection)| match windows.get(projection.window()) {
-                Ok((_, primary, _, _, _, presentation_override)) => {
-                    presentation_override.is_some() || *root != primary.entity()
+                Ok((_, primary, _, _, _, presentation_override, shell)) => {
+                    !shared_shell(presentation_override, shell) || *root != primary.entity()
                 }
                 Err(_) => true,
             },
@@ -342,13 +358,13 @@ fn reconcile_ssd_projections(
         .collect::<Vec<_>>();
     secondary_roots.sort_unstable_by_key(|(root, _)| root.to_bits());
     for (root, projection) in secondary_roots {
-        let Ok((_, _, _, _, intersections, presentation_override)) =
+        let Ok((_, _, _, _, intersections, presentation_override, shell)) =
             windows.get(projection.window())
         else {
             commands.entity(root).despawn();
             continue;
         };
-        if presentation_override.is_some()
+        if !shared_shell(presentation_override, shell)
             || !intersections.contains(projection.output())
             || !retained.insert((projection.window(), projection.output()))
         {
@@ -356,29 +372,34 @@ fn reconcile_ssd_projections(
         }
     }
 
-    for (window, _, vacancy, z_order, intersections, presentation_override) in &windows {
-        if presentation_override.is_some() {
+    for (window, _, vacancy, z_order, intersections, presentation_override, shell) in &windows {
+        if !shared_shell(presentation_override, shell) {
             continue;
         }
-        let content = match clients.client_entity(window) {
-            Some(client) => {
-                let Ok((toplevel, Some(mapped), requested)) = occupants.get(client) else {
-                    continue;
-                };
-                if !styles
-                    .frames
-                    .server_frame_required(window, requested.is_some(), Some(mapped))
-                {
-                    continue;
+        let content = if let Some(owner) = presentation_override {
+            SsdContent::External(owner.owner())
+        } else {
+            match clients.client_entity(window) {
+                Some(client) => {
+                    let Ok((toplevel, Some(mapped), requested)) = occupants.get(client) else {
+                        continue;
+                    };
+                    if !styles.frames.server_frame_required(
+                        window,
+                        requested.is_some(),
+                        Some(mapped),
+                    ) {
+                        continue;
+                    }
+                    SsdContent::Surface(toplevel.surface)
                 }
-                SsdContent::Surface(toplevel.surface)
+                None if *vacancy == WindowVacancy::Retain
+                    || styles.persistent_windows.contains(window) =>
+                {
+                    SsdContent::Vacant
+                }
+                None => continue,
             }
-            None if *vacancy == WindowVacancy::Retain
-                || styles.persistent_windows.contains(window) =>
-            {
-                SsdContent::Vacant
-            }
-            None => continue,
         };
         for output in intersections.iter() {
             if !retained.insert((window, output)) {
@@ -428,12 +449,18 @@ type UnpresentedSsdWindows<'w, 's> = Query<
         &'static WindowVacancy,
         &'static WindowZOrder,
         Option<&'static WindowOutput>,
+        Option<&'static WindowPresentationOverride>,
+        Option<&'static WindowShellContent>,
     ),
-    (
-        Without<PrimaryWindowPresentation>,
-        Without<WindowPresentationOverride>,
-    ),
+    Without<PrimaryWindowPresentation>,
 >;
+
+fn shared_shell(
+    owner: Option<&WindowPresentationOverride>,
+    shell: Option<&WindowShellContent>,
+) -> bool {
+    owner.is_none_or(|owner| shell.is_some_and(|shell| shell.0 == owner.owner()))
+}
 
 fn present_ssd_windows(
     mut commands: Commands,
@@ -449,26 +476,34 @@ fn present_ssd_windows(
 ) {
     let _presentation_span =
         tracing::trace_span!(target: PROFILE_TARGET, "weld_ssd_present_windows").entered();
-    for (window, vacancy, z_order, output) in &windows {
-        let content = match clients.client_entity(window) {
-            Some(client) => {
-                let Ok((toplevel, Some(mapped), requested)) = occupants.get(client) else {
-                    continue;
-                };
-                if !styles
-                    .frames
-                    .server_frame_required(window, requested.is_some(), Some(mapped))
-                {
-                    continue;
+    for (window, vacancy, z_order, output, owner, shell) in &windows {
+        if !shared_shell(owner, shell) {
+            continue;
+        }
+        let content = if let Some(owner) = owner {
+            SsdContent::External(owner.owner())
+        } else {
+            match clients.client_entity(window) {
+                Some(client) => {
+                    let Ok((toplevel, Some(mapped), requested)) = occupants.get(client) else {
+                        continue;
+                    };
+                    if !styles.frames.server_frame_required(
+                        window,
+                        requested.is_some(),
+                        Some(mapped),
+                    ) {
+                        continue;
+                    }
+                    SsdContent::Surface(toplevel.surface)
                 }
-                SsdContent::Surface(toplevel.surface)
+                None if *vacancy == WindowVacancy::Retain
+                    || styles.persistent_windows.contains(window) =>
+                {
+                    SsdContent::Vacant
+                }
+                None => continue,
             }
-            None if *vacancy == WindowVacancy::Retain
-                || styles.persistent_windows.contains(window) =>
-            {
-                SsdContent::Vacant
-            }
-            None => continue,
         };
         let output = output.map(|output| output.0).or_else(|| {
             outputs
@@ -515,6 +550,7 @@ pub struct WindowFrameColors<'w, 's> {
     splits: Query<'w, 's, &'static WindowSplitEdge, Without<FloatingWindow>>,
     parents: Query<'w, 's, &'static ClientToplevelParent>,
     persistent_windows: Query<'w, 's, (), With<PersistentWindow>>,
+    shells: Query<'w, 's, (), With<WindowShellContent>>,
 }
 
 impl WindowFrameColors<'_, '_> {
@@ -545,7 +581,10 @@ impl WindowFrameColors<'_, '_> {
                 self.settings.persistent_unfocused
             };
         }
-        if self.clients.client_entity(window).is_none() && !group_selected {
+        if self.clients.client_entity(window).is_none()
+            && !group_selected
+            && !self.shells.contains(window)
+        {
             return self.settings.placeholder;
         }
         let relocated = self
@@ -654,6 +693,7 @@ fn sync_focus_style(
 enum SsdContent {
     Surface(SurfaceId),
     Vacant,
+    External(Entity),
 }
 
 fn spawn_ssd_scene(
@@ -664,6 +704,7 @@ fn spawn_ssd_scene(
     styles: &FrameStyles,
 ) -> Entity {
     let root = match content {
+        SsdContent::External(_) => commands.spawn_scene(window_scene(bsn_list! {}, style)).id(),
         SsdContent::Surface(surface) => commands.spawn_scene(scene(surface, style)).id(),
         SsdContent::Vacant => commands
             .spawn_scene(vacant::scene(
@@ -764,6 +805,7 @@ fn window_scene(content: impl SceneList, style: FrameGeometry) -> impl Scene {
                     bevy::picking::Pickable::IGNORE
                 ]
                 --
+                FrameContent
                 RoundedSurfaceClip
                 Node {
                     width: percent(100),

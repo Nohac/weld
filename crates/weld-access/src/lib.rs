@@ -51,6 +51,10 @@ impl AccessSession {
         self.0.id
     }
 
+    pub fn participant(&self) -> &str {
+        &self.0.participant
+    }
+
     /// Cheap check at input acceptance and frame-publication boundaries.
     pub fn is_authorized(&self) -> bool {
         self.0.authorized.load(Ordering::Acquire)

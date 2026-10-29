@@ -9678,6 +9678,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "weld-app",
+ "weld-ssd",
  "weld-window",
 ]
 

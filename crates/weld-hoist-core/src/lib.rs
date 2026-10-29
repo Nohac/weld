@@ -67,6 +67,11 @@ pub enum HoistEndpointCommand {
 }
 
 pub trait HoistEndpoint: Send + Sync {
+    /// Participant identity supplied by the admitting session.
+    fn participant(&self) -> Option<&str> {
+        None
+    }
+
     fn is_available(&self) -> bool {
         true
     }
