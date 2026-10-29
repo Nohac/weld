@@ -44,6 +44,8 @@ pub struct ToplevelState {
 #[cfg_attr(feature = "serde", derive(serde::Deserialize, serde::Serialize))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ToplevelHints {
+    /// The application requests user attention.
+    pub urgent: bool,
     pub kind: ToplevelKind,
     /// Zero means no client minimum on that axis.
     pub min_size: Extent,

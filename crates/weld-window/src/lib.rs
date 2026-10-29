@@ -7,6 +7,7 @@
 const PROFILE_TARGET: &str = "weld_profile";
 
 mod activity;
+pub mod attention;
 
 pub mod fullscreen;
 pub mod inspection;
@@ -905,6 +906,7 @@ pub struct WindowPlugin;
 impl Plugin for WindowPlugin {
     fn build(&self, app: &mut App) {
         inspection::register(app);
+        attention::install(app);
         app.init_resource::<WindowRegistry>()
             .add_message::<persistence::WindowPersistenceToggled>()
             .add_observer(persistence::request)

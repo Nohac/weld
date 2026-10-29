@@ -1,5 +1,6 @@
 //! Smithay Wayland-server boundary shared by host backends.
 
+mod activation;
 mod adapter;
 mod capture;
 mod cursor;
@@ -110,6 +111,7 @@ pub struct ServerState {
     _presentation_time: smithay::wayland::presentation::PresentationState,
     session_lock: session_lock::SessionLock,
     xdg_shell_state: XdgShellState,
+    activation: smithay::wayland::xdg_activation::XdgActivationState,
     xwayland: xwayland::XwaylandState,
     layer_shell_state: smithay::wayland::shell::wlr_layer::WlrLayerShellState,
     layers: layer::LayerStore,
@@ -206,6 +208,8 @@ impl ServerState {
         let presentation_time = presentation_time::global(&display_handle);
         let session_lock = session_lock::SessionLock::new(&display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);
+        let activation =
+            smithay::wayland::xdg_activation::XdgActivationState::new::<Self>(&display_handle);
         let xwayland = xwayland::XwaylandState::new(&display_handle);
         let layer_shell_state =
             smithay::wayland::shell::wlr_layer::WlrLayerShellState::new::<Self>(&display_handle);
@@ -369,6 +373,7 @@ impl ServerState {
             _presentation_time: presentation_time,
             session_lock,
             xdg_shell_state,
+            activation,
             xwayland,
             layer_shell_state,
             layers: layer::LayerStore::default(),

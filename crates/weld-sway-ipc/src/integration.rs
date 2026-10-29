@@ -156,6 +156,7 @@ impl Desktop<'_> {
                     )?);
                 }
                 // Keep tiling branches and floating windows together in the workspace's focus list.
+                child.urgent |= child.floating_nodes.iter().any(|window| window.urgent);
                 let recent = workspace
                     .focus_history
                     .iter()
@@ -169,6 +170,7 @@ impl Desktop<'_> {
                     .copied()
             });
             node.focus = focus_order(&node, workspace_focus);
+            node.urgent = node.nodes.iter().any(|workspace| workspace.urgent);
             snapshot.outputs.push(Output {
                 name,
                 active: true,
@@ -189,6 +191,7 @@ impl Desktop<'_> {
             NodeKey::Tile(id) => self.tiles.containers().contains_key(id),
         });
         snapshot.tree.rect = union(snapshot.outputs.iter().map(|output| output.rect));
+        snapshot.tree.urgent = snapshot.tree.nodes.iter().any(|output| output.urgent);
         snapshot.tree.focus = focus_order(
             &snapshot.tree,
             focused_output.and_then(|id| ids.ids.get(&NodeKey::Output(id)).copied()),
@@ -229,6 +232,7 @@ impl Desktop<'_> {
                     )?);
                 }
             }
+            node.urgent = node.nodes.iter().any(|child| child.urgent);
             return Ok(node);
         };
         node.rect = rectangle(
@@ -244,6 +248,7 @@ impl Desktop<'_> {
         for &child in &container.children {
             node.nodes.push(self.node(child, origin, ids, depth + 1)?);
         }
+        node.urgent = node.nodes.iter().any(|child| child.urgent);
         node.focus = focus_order(
             &node,
             container
@@ -275,6 +280,7 @@ impl Desktop<'_> {
         );
         node.focused = self.focused() == Some(TileNodeId::Window(window_id));
         node.visible = window.visible;
+        node.urgent = window.urgent;
         node.sticky = window.sticky;
         node.fullscreen_mode = match window.fullscreen {
             None => 0,

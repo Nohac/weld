@@ -49,6 +49,7 @@ pub struct WindowInfo {
     pub application_viewport: Option<Viewport>,
     pub occupied: bool,
     pub focused: bool,
+    pub urgent: bool,
     pub visible: bool,
     pub floating: bool,
     /// Short control ID for this application incarnation; retired on replacement.

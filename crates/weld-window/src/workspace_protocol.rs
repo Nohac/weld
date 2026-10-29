@@ -2,6 +2,8 @@
 
 use crate::{
     WindowSystems,
+    attention::WindowAttention,
+    workspace::WorkspaceMember,
     workspace::{Workspace, WorkspaceOutput},
 };
 use bevy::{
@@ -14,7 +16,7 @@ use bevy::{
         message::MessageReader,
         query::{Changed, Or},
         schedule::IntoScheduleConfigs,
-        system::{Commands, Query, ResMut},
+        system::{Commands, Query, ResMut, SystemParam},
     },
 };
 use weld_app::{
@@ -59,8 +61,33 @@ fn activate(
     }
 }
 
+#[derive(SystemParam)]
+struct WorkspaceAttention<'w, 's> {
+    windows: Query<'w, 's, (&'static WorkspaceMember, &'static WindowAttention)>,
+    changed: Query<'w, 's, (), AttentionChanges>,
+    removed: (
+        RemovedComponents<'w, 's, WindowAttention>,
+        RemovedComponents<'w, 's, WorkspaceMember>,
+    ),
+}
+
+type AttentionChanges = Or<(Changed<WorkspaceMember>, Changed<WindowAttention>)>;
+
+impl WorkspaceAttention<'_, '_> {
+    fn changed(&mut self) -> bool {
+        let removed = self.removed.0.read().count() + self.removed.1.read().count();
+        removed != 0 || !self.changed.is_empty()
+    }
+    fn urgent(&self, workspace: Entity) -> bool {
+        self.windows
+            .iter()
+            .any(|(member, attention)| member.0 == workspace && attention.is_urgent())
+    }
+}
+
 fn publish(
-    workspaces: Query<(&Workspace, Option<&WorkspaceOutput>)>,
+    workspaces: Query<(Entity, &Workspace, Option<&WorkspaceOutput>)>,
+    mut attention: WorkspaceAttention,
     outputs: Query<&WeldOutput>,
     changed_workspaces: Query<(), WorkspaceChanged>,
     changed_outputs: Query<(), Changed<WeldOutput>>,
@@ -73,9 +100,11 @@ fn publish(
 ) {
     let removed_count =
         removed.0.read().count() + removed.1.read().count() + removed.2.read().count();
+    let attention_changed = attention.changed();
     if !published.is_added()
         && changed_workspaces.is_empty()
         && changed_outputs.is_empty()
+        && !attention_changed
         && removed_count == 0
     {
         return;
@@ -83,13 +112,14 @@ fn publish(
     published.publish(
         workspaces
             .iter()
-            .map(|(workspace, output)| DesktopWorkspace {
+            .map(|(entity, workspace, output)| DesktopWorkspace {
                 id: DesktopWorkspaceId::new(workspace.id().raw()),
                 name: workspace.name().to_owned(),
                 output: output
                     .and_then(|output| outputs.get(output.0).ok())
                     .map(|output| output.id),
                 active: workspace.visible(),
+                urgent: attention.urgent(entity),
             })
             .collect(),
     );

@@ -45,12 +45,14 @@ mod tests {
                 name: "1".into(),
                 output: None,
                 active: true,
+                urgent: false,
             },
             DesktopWorkspace {
                 id: DesktopWorkspaceId::new(2),
                 name: "2".into(),
                 output: None,
                 active: false,
+                urgent: false,
             },
         ];
         state.publish(workspaces.clone());

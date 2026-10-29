@@ -364,6 +364,7 @@ fn apply<Extension>(config: &mut Configuration<Extension>, statement: &Statement
             | "client.unfocused"
             | "client.focused_inactive"
             | "client.placeholder"
+            | "client.urgent"
             | "client.persistent_focused"
             | "client.persistent_unfocused"),
             values,
@@ -373,6 +374,7 @@ fn apply<Extension>(config: &mut Configuration<Extension>, statement: &Statement
                 "client.focused" => config.decorations.focused = colors,
                 "client.focused_inactive" => config.decorations.focused_inactive = colors,
                 "client.placeholder" => config.decorations.placeholder = colors,
+                "client.urgent" => config.decorations.urgent = colors,
                 "client.persistent_focused" => config.decorations.persistent_focused = colors,
                 "client.persistent_unfocused" => config.decorations.persistent_unfocused = colors,
                 _ => config.decorations.unfocused = colors,
@@ -1342,6 +1344,7 @@ mod tests {
             default_floating_border normal 2
             corner_radius 8
             client.focused #112233 #223344 #334455 #445566 #556677
+            client.urgent #991122 #882233 #ffffff #ff0000 #ff3344
             bindsym Mod1+b border toggle
             bindsym Mod1+n border none
         "},
@@ -1349,6 +1352,10 @@ mod tests {
         .expect("frames");
         assert_eq!(config.decorations.tiled, BorderStyle::Pixel(4));
         assert_eq!(config.decorations.floating, BorderStyle::Normal(2));
+        assert_eq!(
+            config.decorations.urgent.child_border,
+            Color::srgb_u8(0xff, 0x33, 0x44)
+        );
         assert_eq!(
             config.decorations.focused.child_border,
             Color::srgb_u8(0x55, 0x66, 0x77)

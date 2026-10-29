@@ -61,6 +61,7 @@ fn fixture() -> (App, ClientAdapterRegistration) {
                 .chain()
                 .after(WindowSystems::UiReconcile),
         );
+    request::install(&mut app);
     (app, adapter)
 }
 
@@ -101,6 +102,11 @@ fn control_request_waits_for_user_handoff_without_changing_permissions() {
     assert!(app.world().get::<ControlRequested>(window).is_some());
     assert!(
         app.world()
+            .get::<weld_window::attention::WindowAttention>(window)
+            .is_some_and(|attention| attention.is_urgent())
+    );
+    assert!(
+        app.world()
             .get::<ControlPolicy>(window)
             .expect("policy")
             .local
@@ -133,6 +139,11 @@ fn control_request_waits_for_user_handoff_without_changing_permissions() {
         .expect("immediate handoff notification")
         .expect("available");
     assert!(app.world().get::<ControlRequested>(window).is_none());
+    assert!(
+        !app.world()
+            .get::<weld_window::attention::WindowAttention>(window)
+            .is_some_and(|attention| attention.is_urgent())
+    );
     assert_eq!(
         app.world()
             .get::<ControlledWindow>(window)

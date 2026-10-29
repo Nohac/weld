@@ -140,6 +140,20 @@ fn inventories_publish_geometry_selection_and_removal_in_one_desktop_revision() 
     );
     assert!(std::sync::Arc::ptr_eq(&initial, &publisher.0.borrow()));
 
+    let attention = app
+        .world_mut()
+        .spawn(weld_window::attention::AttentionForWindow(first))
+        .id();
+    app.update();
+    let urgent = publisher.0.borrow().clone();
+    assert!(process_node(&urgent.tree).expect("window").urgent);
+    assert!(urgent.tree.urgent);
+    assert!(urgent.tree.nodes[0].urgent);
+    assert!(urgent.tree.nodes[0].nodes[0].urgent);
+    app.world_mut().despawn(attention);
+    app.update();
+    assert!(!publisher.0.borrow().tree.urgent);
+
     app.world_mut()
         .entity_mut(output)
         .remove::<OutputPosition>();

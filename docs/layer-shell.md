@@ -94,8 +94,15 @@ the native adapter diffs snapshots and emits complete `ext-workspace-v1` updates
 The global appears after the first policy publication. Session-stable IDs remain
 internal rather than claiming the protocol's persistent cross-session identity.
 
-One group represents each output. Workspaces on every output are advertised;
-inactive workspaces remain eligible for display in switchers. The supported
+One group represents each output. Workspaces on every output are advertised.
+Their urgent state aggregates attention requests from their managed windows.
+X11 WM_HINTS and demands-attention requests, Wayland `xdg-activation-v1` requests,
+and pending remote-control handoffs all feed the same window attention model.
+Application focus clears its application hint; independent shell requests remain
+until their owner retires them. Wayland tokens are single-use, expire after 30
+seconds, and request attention without stealing desktop focus.
+
+Inactive workspaces remain eligible for display in switchers. The supported
 request capability is activation. Requests wait for the client's manager `commit`,
 then run through the same i3 switch policy as keyboard bindings, preserving
 per-output visibility and remembered window focus. Inventory publication follows

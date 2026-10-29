@@ -204,6 +204,7 @@ fn header_scene(target: HeaderTarget, visual: HeaderVisual) -> impl Scene {
 
 #[derive(SystemParam)]
 struct HeaderTree<'w, 's> {
+    attention: Query<'w, 's, (Entity, &'static weld_window::attention::WindowAttention)>,
     containers: Query<'w, 's, &'static TileContainer>,
     parents: Query<'w, 's, &'static TileParent>,
     history: Res<'w, TileFocusHistory>,
@@ -221,6 +222,24 @@ struct HeaderTree<'w, 's> {
 
 impl HeaderTree<'_, '_> {
     fn colors(&self, node: Entity, focused: bool, active: bool) -> FrameColors {
+        if self.attention.iter().any(|(window, attention)| {
+            if !attention.is_urgent() {
+                return false;
+            }
+            let mut ancestor = window;
+            for _ in 0..=weld_tile::MAX_DEPTH {
+                if ancestor == node {
+                    return true;
+                }
+                let Ok(parent) = self.parents.get(ancestor) else {
+                    break;
+                };
+                ancestor = parent.entity();
+            }
+            false
+        }) {
+            return self.style.urgent;
+        }
         if self
             .leaf(node)
             .is_some_and(|leaf| self.persistent_windows.contains(leaf))
@@ -386,6 +405,7 @@ struct HeaderViews<'w, 's> {
 }
 
 type HeaderChanges = Or<(
+    Changed<weld_window::attention::WindowAttention>,
     Changed<TileHeaders>,
     Changed<TileGeometry>,
     Changed<TileParent>,
@@ -403,6 +423,7 @@ type HeaderChanges = Or<(
 
 #[derive(SystemParam)]
 struct Invalidations<'w, 's> {
+    attention: RemovedComponents<'w, 's, weld_window::attention::WindowAttention>,
     changed: Query<'w, 's, (), HeaderChanges>,
     headers: RemovedComponents<'w, 's, TileHeaders>,
     outputs: RemovedComponents<'w, 's, WorkspaceOutput>,
@@ -417,7 +438,8 @@ struct Invalidations<'w, 's> {
 
 impl Invalidations<'_, '_> {
     fn changed(&mut self) -> bool {
-        let removed = self.headers.read().count()
+        let removed = self.attention.read().count()
+            + self.headers.read().count()
             + self.outputs.read().count()
             + self.cameras.read().count()
             + self.occupants.read().count()

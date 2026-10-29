@@ -694,7 +694,10 @@ impl ServerState {
         };
         let geometry = toplevel.surface.geometry();
         if matches!(toplevel.surface, WindowSurface::Xdg(_))
-            && let hints = toplevel.surface.hints()
+            && let hints = (weld_client::ToplevelHints {
+                urgent: toplevel.hints.urgent,
+                ..toplevel.surface.hints()
+            })
             && hints != toplevel.hints
         {
             toplevel.hints = hints;

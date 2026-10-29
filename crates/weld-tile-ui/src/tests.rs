@@ -29,6 +29,48 @@ use weld_window::{
 };
 
 #[test]
+fn attention_marks_the_inactive_tab_and_shared_frame_until_its_owner_retires() {
+    use weld_window::attention::AttentionForWindow;
+    for layout in [TileLayout::Tabbed, TileLayout::Stacked] {
+        let (mut app, first, second) = setup();
+        app.world_mut().trigger(I3LayoutRequest::Set(layout));
+        let claim = app.world_mut().spawn(AttentionForWindow(first)).id();
+        app.update();
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(second)
+        );
+        let urgent = app.world().resource::<SsdSettings>().urgent;
+        let first_header = app
+            .world_mut()
+            .query::<(&HeaderTarget, &HeaderVisual)>()
+            .iter(app.world())
+            .find(|(target, _)| target.child == first)
+            .expect("inactive tab");
+        assert_eq!(first_header.1.colors, urgent);
+        assert_eq!(
+            *app.world_mut()
+                .query_filtered::<&BorderColor, With<frame::GroupFrame>>()
+                .single(app.world())
+                .expect("frame"),
+            BorderColor::all(urgent.border)
+        );
+        app.world_mut().despawn(claim);
+        app.update();
+        let first_header = app
+            .world_mut()
+            .query::<(&HeaderTarget, &HeaderVisual)>()
+            .iter(app.world())
+            .find(|(target, _)| target.child == first)
+            .expect("inactive tab");
+        assert_eq!(
+            first_header.1.colors,
+            app.world().resource::<SsdSettings>().unfocused
+        );
+    }
+}
+
+#[test]
 fn header_scroll_accumulates_motion_wraps_and_resets_between_gestures() {
     use bevy::{
         input::{mouse::MouseScrollUnit, touch::TouchPhase},

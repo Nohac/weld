@@ -68,6 +68,7 @@ fn publish(
             application_viewport: None,
             occupied: window.occupant.is_some(),
             focused: windows.focused() == Some(*id),
+            urgent: window.urgent,
             visible: window.visible,
             floating: window.floating,
             control: controlled

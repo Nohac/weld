@@ -136,6 +136,7 @@ pub(crate) fn install(app: &mut WeldApp, service: &WindowService) -> Result<()> 
             .after(crate::control::launch::LaunchAdmission)
             .before(reconcile),
     );
+    request::install(app.app_mut());
     weld_remote_control_ui::install(app.app_mut())?;
     Ok(())
 }

@@ -52,6 +52,7 @@ impl WindowSurface {
             }
         };
         ToplevelHints {
+            urgent: matches!(self, Self::X11 { window, .. } if window.demands_attention() || window.hints().is_some_and(|hints| hints.urgent)),
             kind,
             min_size: Extent::new(minimum.w.max(0) as u32, minimum.h.max(0) as u32),
             max_size: Extent::new(maximum.w.max(0) as u32, maximum.h.max(0) as u32),

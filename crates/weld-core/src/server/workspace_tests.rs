@@ -117,6 +117,7 @@ fn workspace(id: u64, output: u64, active: bool) -> DesktopWorkspace {
         name: id.to_string(),
         output: Some(OutputId::new(output)),
         active,
+        urgent: false,
     }
 }
 
@@ -189,6 +190,7 @@ fn workspace_inventory_diffs_and_commit_batched_activation() {
     snapshot[1].output = Some(OutputId::new(2));
     snapshot[1].name = "2: renamed".into();
     snapshot[1].active = true;
+    snapshot[1].urgent = true;
     f.server.publish_workspaces(snapshot.clone());
     f.sync();
     let groups = &f.observer.workspaces.groups;
@@ -200,6 +202,14 @@ fn workspace_inventory_diffs_and_commit_batched_activation() {
         ]
     );
     assert_eq!(f.observer.workspaces.names[&second_id], "2: renamed");
+    assert_eq!(
+        f.observer.workspaces.states[&second_id],
+        ext_workspace_handle_v1::State::Active | ext_workspace_handle_v1::State::Urgent
+    );
+
+    snapshot[1].urgent = false;
+    f.server.publish_workspaces(snapshot.clone());
+    f.sync();
     assert_eq!(
         f.observer.workspaces.states[&second_id],
         ext_workspace_handle_v1::State::Active

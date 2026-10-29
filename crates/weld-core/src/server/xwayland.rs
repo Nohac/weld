@@ -600,6 +600,18 @@ impl XwmHandler for ServerState {
     fn property_notify(&mut self, _: XwmId, window: X11Surface, _: WmWindowProperty) {
         self.publish_x11_role(window.window_id());
     }
+    fn demands_attention_request(&mut self, _: XwmId, window: X11Surface) {
+        if let Err(error) = window.set_demands_attention(true) {
+            warn!(%error, "could not set X11 attention state");
+        }
+        self.publish_x11_role(window.window_id());
+    }
+    fn undemands_attention_request(&mut self, _: XwmId, window: X11Surface) {
+        if let Err(error) = window.set_demands_attention(false) {
+            warn!(%error, "could not clear X11 attention state");
+        }
+        self.publish_x11_role(window.window_id());
+    }
     fn resize_request(&mut self, _: XwmId, window: X11Surface, button: u32, edge: ResizeEdge) {
         let edge = match edge {
             ResizeEdge::Top => WindowResizeEdge::Top,

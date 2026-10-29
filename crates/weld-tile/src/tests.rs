@@ -1067,6 +1067,7 @@ fn independent_special_windows_center_and_floating_limits_do_not_constrain_tiles
             UVec2::new(800, 600)
         };
         let hints = ToplevelHints {
+            urgent: false,
             kind,
             min_size: Extent::new(400, 300),
             max_size: Extent::new(

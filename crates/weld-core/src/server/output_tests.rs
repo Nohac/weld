@@ -1,5 +1,7 @@
 //! Real protocol regression for event-driven output and scale propagation.
 
+#[path = "activation_tests.rs"]
+mod activation_tests;
 #[path = "cursor_tests.rs"]
 mod cursor_tests;
 #[path = "input_binding_tests.rs"]
@@ -67,6 +69,7 @@ struct Observer {
     input: input_seat_tests::Probe,
     selection: input_binding_tests::SelectionProbe,
     workspaces: workspace_tests::Probe,
+    activation: activation_tests::Probe,
     layers: Option<
         wayland_protocols_wlr::layer_shell::v1::client::zwlr_layer_shell_v1::ZwlrLayerShellV1,
     >,
@@ -100,6 +103,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Observer {
         } = event
         {
             match interface.as_str() {
+                "xdg_activation_v1" => {
+                    state.activation.manager = Some(registry.bind(name, 1, qh, ()))
+                }
                 "wp_presentation" => {
                     state.presentation.manager = Some(registry.bind(name, version.min(2), qh, ()));
                 }

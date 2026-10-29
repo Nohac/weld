@@ -3,6 +3,7 @@
 use crate::{
     FloatingWindow, FocusedWindow, ManagedWindow, PresentationInsets, PrimaryWindowPresentation,
     StickyWindow, WindowGeometry, WindowId, WindowOccupant, WindowOutput, WindowVisibility,
+    attention::WindowAttention,
     fullscreen::{FullscreenMode, FullscreenOccluded, WindowFullscreen},
     workspace::{FocusedWorkspace, Workspace, WorkspaceId, WorkspaceMember, WorkspaceOutput},
 };
@@ -21,6 +22,7 @@ use weld_client::ClientSurfaceMetadata;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindowSnapshot {
+    pub urgent: bool,
     pub output: Option<OutputId>,
     pub workspace: Option<WorkspaceId>,
     pub geometry: WindowGeometry,
@@ -83,6 +85,7 @@ pub(crate) fn register(app: &mut App) {
 
 #[derive(QueryData)]
 struct InspectWindow {
+    attention: Option<&'static WindowAttention>,
     entity: Entity,
     window: &'static ManagedWindow,
     geometry: &'static WindowGeometry,
@@ -99,6 +102,7 @@ struct InspectWindow {
 
 type WindowChanges = Or<(
     Or<(
+        Changed<WindowAttention>,
         Changed<ManagedWindow>,
         Changed<WindowGeometry>,
         Changed<WindowVisibility>,
@@ -121,6 +125,7 @@ type WindowChanges = Or<(
 
 #[derive(SystemParam)]
 struct RemovedWindowState<'w, 's> {
+    attention: RemovedComponents<'w, 's, WindowAttention>,
     windows: RemovedComponents<'w, 's, ManagedWindow>,
     occupant: RemovedComponents<'w, 's, WindowOccupant>,
     metadata: RemovedComponents<'w, 's, ClientWindowMetadata>,
@@ -140,7 +145,8 @@ struct RemovedWindowState<'w, 's> {
 
 impl RemovedWindowState<'_, '_> {
     fn count(&mut self) -> usize {
-        self.windows.read().count()
+        self.attention.read().count()
+            + self.windows.read().count()
             + self.occupant.read().count()
             + self.metadata.read().count()
             + self.presentation.read().count()
@@ -207,6 +213,7 @@ fn collect_windows(
         next.windows.insert(
             item.window.id,
             WindowSnapshot {
+                urgent: item.attention.is_some_and(WindowAttention::is_urgent),
                 output,
                 workspace,
                 geometry: *item.geometry,

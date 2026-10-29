@@ -2005,6 +2005,7 @@ mod tests {
         let child = surface(source, 2);
         let session = HoistSessionId::new(1);
         let hints = weld_client::ToplevelHints {
+            urgent: true,
             kind: weld_client::ToplevelKind::Dialog,
             min_size: weld_client::Extent::new(320, 240),
             max_size: weld_client::Extent::new(640, 480),

@@ -583,7 +583,8 @@ impl ServerState {
             {
                 surface.set_activated(false);
             }
-            if let Some((_, surface)) = &next {
+            if let Some((id, surface)) = &next {
+                self.set_window_attention(*id, false);
                 self.raise_x11_surface(surface.wl_surface());
                 surface.set_activated(true);
             }

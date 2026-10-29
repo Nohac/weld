@@ -506,6 +506,7 @@ fn present_ssd_windows(
 #[derive(SystemParam)]
 /// Shared palette policy for window frames and their group dividers.
 pub struct WindowFrameColors<'w, 's> {
+    attention: Query<'w, 's, &'static weld_window::attention::WindowAttention>,
     focus: Res<'w, FocusedWindow>,
     selected_group: Query<'w, 's, (), With<weld_window::WindowGroupSelected>>,
     clients: WindowClientResolver<'w, 's>,
@@ -528,6 +529,13 @@ impl WindowFrameColors<'_, '_> {
     }
     /// Configured frame palette for the window's focus, persistence and provenance.
     pub fn palette(&self, window: Entity) -> FrameColors {
+        if self
+            .attention
+            .get(window)
+            .is_ok_and(|attention| attention.is_urgent())
+        {
+            return self.settings.urgent;
+        }
         let group_selected = self.selected_group.contains(window);
         let focused = self.focus.entity() == Some(window) || group_selected;
         if self.persistent_windows.contains(window) {

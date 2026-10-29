@@ -10,6 +10,7 @@ use std::{
     },
     time::Instant,
 };
+use weld_window::attention::AttentionForWindow;
 
 #[derive(Component)]
 #[require(ControlRequested)]
@@ -18,6 +19,23 @@ pub(super) struct PendingInputRequest {
     deadline: Instant,
     cancelled: Arc<AtomicBool>,
     completion: Option<mpsc::SyncSender<Result<(), String>>>,
+}
+
+pub(super) fn install(app: &mut App) {
+    app.add_observer(
+        |event: On<Add<PendingInputRequest>>, mut commands: Commands| {
+            commands
+                .entity(event.entity)
+                .insert(AttentionForWindow(event.entity));
+        },
+    );
+    app.add_observer(
+        |event: On<Remove<PendingInputRequest>>, mut commands: Commands| {
+            commands
+                .entity(event.entity)
+                .try_remove::<AttentionForWindow>();
+        },
+    );
 }
 
 impl PendingInputRequest {

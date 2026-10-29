@@ -90,6 +90,7 @@ pub struct SsdSettings {
     pub focused: FrameColors,
     pub focused_inactive: FrameColors,
     pub unfocused: FrameColors,
+    pub urgent: FrameColors,
     pub placeholder: FrameColors,
     pub persistent_focused: FrameColors,
     pub persistent_unfocused: FrameColors,
@@ -108,6 +109,7 @@ impl Default for SsdSettings {
             focused: FrameColors::from_border(super::FOCUSED_BORDER),
             focused_inactive: FrameColors::from_border(super::UNFOCUSED_BORDER),
             unfocused: FrameColors::from_border(super::UNFOCUSED_BORDER),
+            urgent: FrameColors::from_border(Color::srgb(0.94, 0.27, 0.27)),
             placeholder: FrameColors::from_border(super::UNFOCUSED_BORDER),
             persistent_focused: FrameColors {
                 indicator: Color::srgb(0.8, 1.0, 0.95),

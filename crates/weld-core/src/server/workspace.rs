@@ -202,13 +202,17 @@ impl Binding {
             }
             if previous
                 .as_ref()
-                .is_none_or(|old| old.active != next.active)
+                .is_none_or(|old| old.active != next.active || old.urgent != next.urgent)
             {
-                handle.state(if next.active {
+                let mut state = if next.active {
                     ext_workspace_handle_v1::State::Active
                 } else {
                     ext_workspace_handle_v1::State::empty()
-                });
+                };
+                if next.urgent {
+                    state |= ext_workspace_handle_v1::State::Urgent;
+                }
+                handle.state(state);
                 changed = true;
             }
             if previous

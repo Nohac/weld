@@ -279,7 +279,10 @@ Timeout, revocation, permission/grant replacement or window destruction ends the
 wait and clears the indicator. Persistent-slot shorthands resolve once to the
 current control incarnation. Expiry wakes the compositor for cleanup; idle
 requests use no repaint timer. All subsequent input retains the normal live
-permission and ownership checks. Workspace/tab urgency is a follow-up integration.
+permission and ownership checks. While pending, the request contributes window
+urgency: borders and tabs use `client.urgent`, and Waybar's `ext/workspaces`
+receives the workspace's urgent state. Focusing the window preserves this request;
+handoff, timeout, cancellation or revocation retires its attention claim.
 
 ## Native testing loop
 

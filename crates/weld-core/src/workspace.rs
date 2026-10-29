@@ -21,4 +21,5 @@ pub struct DesktopWorkspace {
     pub name: String,
     pub output: Option<OutputId>,
     pub active: bool,
+    pub urgent: bool,
 }

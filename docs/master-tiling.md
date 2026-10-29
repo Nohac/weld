@@ -203,7 +203,7 @@ adaptive sync are reported as unsupported while scale on the same line applies.
   remain available. An omitted width uses 3 pixels.
 - `corner_radius N`, 0..64 logical pixels, applies to decorated frames.
 - `client.focused`, `client.unfocused`, `client.focused_inactive`,
-  `client.placeholder`, `client.persistent_focused` and
+  `client.urgent`, `client.placeholder`, `client.persistent_focused` and
   `client.persistent_unfocused` accept three to five `#RRGGBB`/`#RRGGBBAA` colors: border,
   background, text, indicator and child border. Omitted indicator/child-border
   colors use the border and background colors respectively. Normal frames use the first
@@ -216,7 +216,8 @@ adaptive sync are reported as unsupported while scale on the same line applies.
   explicit borderless style hides that edge. An active move/resize uses indicator
   color on all edges. The inactive palette
   currently identifies the parent of the focused dialog. Relocated windows
-  retain their distinct configured red accent. Urgency hints remain a follow-up.
+  retain their distinct configured red accent. Live attention requests use the
+  urgent palette, including inactive tabs and their ancestor group frames.
 - `border normal|pixel [N]|none|toggle` changes the selected window's frame.
   Per-window overrides survive global reload; live defaults apply to other windows.
 - `bindsym CHORD COMMAND` with literal Mod4, Mod1, Control/Ctrl and Shift
@@ -677,6 +678,14 @@ continues to own spatial window sizing and ignores desktop fullscreen intent.
 Exclusive fullscreen here is presentation/input policy. Direct scanout and
 suspending unrelated encoded streams are separate work. Physical multi-output
 and DRM validation remain on the daily-driver checklist.
+
+## Attention
+
+Application attention arrives through the shared toplevel hints, including from
+hoisted clients. Rebuild hoist peers together after the addition of the urgency
+field. Window inspection and the Sway IPC tree expose `urgent`; ancestors aggregate
+their children's attention. Urgency changes selection styling without changing
+desktop selection or input ownership.
 
 ## Next improvements
 

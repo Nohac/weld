@@ -786,6 +786,7 @@ mod tests {
             application_viewport: None,
             occupied: true,
             focused: true,
+            urgent: false,
             visible: true,
             floating: false,
             control: None,
