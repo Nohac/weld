@@ -188,6 +188,14 @@ Weld is a workspace of reusable layers and one standard distribution:
   descendant surface layers, including oversized peeks and subsurfaces. The
   surface renderer resolves the inherited mask after UI layout and refreshes
   its cached material parameters only when that mask changes.
+  `FrameContent` owns the rounded background in `client.placeholder` colors.
+  Its backing material leaves an opening matching a mounted surface's actual
+  pixel-snapped bounds, preserving client transparency while filling uncovered
+  viewport space. Fully covered viewports omit this background draw. Placeholder
+  features mount labels and controls with the shared node painting their backing;
+  ordinary Bevy child clipping supplies rectangular bounds, while the shared
+  backing and surface materials supply the rounded contour. Geometry and palette
+  changes invalidate retained presentation through the material node.
   Vacant persistent frames show the captured match with configured placeholder
   colors. Interactive persistence results feed a short, input-transparent notice;
   configured persistence palettes share ordinary smart-border and corner policy.

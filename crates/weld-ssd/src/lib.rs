@@ -2,6 +2,7 @@
 
 use std::collections::HashSet;
 
+mod content_background;
 mod persistence_notice;
 mod style;
 mod vacant;
@@ -74,6 +75,9 @@ struct WindowBody;
 pub struct FrameHeader;
 
 /// Content mount inside the shared frame's rounded clipping boundary.
+/// Owns the rounded placeholder backing and fills unused space around a directly
+/// mounted [`weld_app::surface::SurfaceNode`]. Feature content supplies labels,
+/// controls and surfaces within this shared shell.
 #[derive(Component, Clone, Copy, Default)]
 pub struct FrameContent;
 
@@ -210,6 +214,7 @@ pub struct SsdPlugin;
 
 impl Plugin for SsdPlugin {
     fn build(&self, app: &mut App) {
+        content_background::install(app);
         app.init_resource::<SsdSettings>()
             .add_observer(border_request)
             .add_systems(
@@ -971,6 +976,7 @@ mod tests {
             events::{Pointer, PointerPress},
             pointer::{Location, PointerButton, PointerId},
         },
+        prelude::MaterialNode,
         scene::{ScenePlugin, WorldSceneExt},
         ui::{Display, UiScale},
         window::RequestRedraw,
@@ -1573,10 +1579,27 @@ mod tests {
         assert!(label.contains("Persistent window"));
         assert!(label.contains("Close this empty window"));
         let background = app.world().resource::<SsdSettings>().placeholder.background;
+        let mount = app
+            .world()
+            .get::<ChildOf>(parent)
+            .expect("content mount")
+            .parent();
+        let background_color = |app: &App| {
+            let material = app
+                .world()
+                .get::<MaterialNode<content_background::ContentBackground>>(mount)
+                .expect("shared content background");
+            app.world()
+                .resource::<Assets<content_background::ContentBackground>>()
+                .get(&material.0)
+                .expect("background material")
+                .color
+        };
         assert_eq!(
             app.world().get::<BackgroundColor>(parent),
-            Some(&BackgroundColor(background))
+            Some(&BackgroundColor(Color::NONE))
         );
+        assert_eq!(background_color(&app), background.to_linear());
         let content_node = app
             .world()
             .get::<Node>(parent)
@@ -1625,8 +1648,8 @@ mod tests {
             Display::Flex
         );
         assert_eq!(
-            app.world().get::<BackgroundColor>(parent),
-            Some(&BackgroundColor(Color::srgb(0.2, 0.25, 0.3)))
+            background_color(&app),
+            Color::srgb(0.2, 0.25, 0.3).to_linear()
         );
         let font = app.world().resource::<SsdSettings>().title_font.text_font();
         assert_eq!(

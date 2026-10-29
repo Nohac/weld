@@ -70,7 +70,6 @@ struct Mounted {
 #[derive(Clone, PartialEq)]
 struct ContentStyle {
     font: TextFont,
-    background: Color,
     foreground: Color,
     button: Color,
     button_foreground: Color,
@@ -272,7 +271,6 @@ fn mount(
     font.font_size = FontSize::Px(settings.title_font.size.max(18.0));
     let style = ContentStyle {
         font,
-        background: settings.placeholder.background,
         foreground: settings.placeholder.foreground,
         button: settings.focused.background,
         button_foreground: settings.focused.foreground,
@@ -329,7 +327,6 @@ fn content_scene(placeholder: &HoistPlaceholder, style: &ContentStyle) -> impl S
             align_items: AlignItems::Center, justify_content: JustifyContent::Center,
             row_gap: px(16),
         }
-        BackgroundColor({style.background})
         Children [
             Pickable::IGNORE
             Node { max_width: percent(100) }

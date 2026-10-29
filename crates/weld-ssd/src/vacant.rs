@@ -7,14 +7,13 @@ use bevy::{
         entity::Entity,
         lifecycle::RemovedComponents,
         message::MessageWriter,
-        query::With,
         system::{Commands, Query, Res},
         template::template,
     },
     picking::Pickable,
     prelude::{
-        AccessibleLabel, AlignItems, BackgroundColor, Children, JustifyContent, Node, Overflow,
-        Scene, Text, TextColor, TextFont, UiRect, percent, px,
+        AccessibleLabel, AlignItems, Children, JustifyContent, Node, Overflow, Scene, Text,
+        TextColor, TextFont, UiRect, percent, px,
     },
     scene::bsn,
     text::FontSize,
@@ -61,7 +60,6 @@ pub(super) fn scene(
             padding: UiRect::all(px(16)), align_items: AlignItems::Center,
             justify_content: JustifyContent::Center, overflow: Overflow::clip(),
         }
-        BackgroundColor({colors.background})
         Children [
             template(move |_| Ok(VacantText(window)))
             Node { max_width: percent(100) }
@@ -92,7 +90,6 @@ pub(super) fn sync(
     persistent: Query<Ref<PersistentWindow>>,
     mut removed: RemovedComponents<PersistentWindow>,
     mut labels: VacantLabels,
-    mut backgrounds: Query<&mut BackgroundColor, With<VacantContent>>,
     mut redraw: MessageWriter<RequestRedraw>,
     mut commands: Commands,
 ) {
@@ -119,14 +116,6 @@ pub(super) fn sync(
         if color.0 != settings.placeholder.foreground {
             color.0 = settings.placeholder.foreground;
             changed = true;
-        }
-    }
-    if settings.is_changed() {
-        for mut background in &mut backgrounds {
-            if background.0 != settings.placeholder.background {
-                background.0 = settings.placeholder.background;
-                changed = true;
-            }
         }
     }
     if changed {

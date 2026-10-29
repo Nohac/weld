@@ -26,11 +26,15 @@ probe are documented in
 ## Window transparency — Implemented
 
 Alpha-bearing client buffers blend with the desktop and windows beneath them.
-SSD bodies and shared tab/stack frames leave the content area transparent;
-headers, borders and vacant placeholders retain their own configured colors.
+SSD bodies and shared tab/stack frames preserve transparency beneath the actual
+client surface. The shared rounded content backing fills uncovered viewport space
+and placeholders with the configured placeholder background; headers and borders
+retain their own configured colors.
 The offscreen `window_transparency` regression exercises transparent,
 half-transparent and opaque SHM updates, overlapping floating windows, and
 tabbed presentation through the production surface shader and frame plugins.
+It also checks undersized viewport backing, grow/shrink transitions, retained
+replay and hoist-placeholder corner/border pixels at 1.0 and 1.25 output scales.
 Encoded streams advertise their alpha-retention mode separately.
 
 ## Frame demand — Implemented
