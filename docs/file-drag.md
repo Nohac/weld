@@ -24,6 +24,8 @@ The native owner requires a local pointer position, rejects competing grabs,
 and preserves keyboard focus while the pointer crosses application-specific
 seat bindings. Pointer buttons belong to the drag; motion continues through
 the desktop's hit testing. Ordinary pointer hover is restored after completion.
+DRM startup supplies its centered cursor position before the first physical
+motion; TTY reactivation restores the retained position for new drags.
 An eight-entry transfer queue and five-second nonblocking write deadlines keep
 slow receivers off the host loop. The worker sleeps until work or shutdown.
 
@@ -36,7 +38,8 @@ integration work, tracked with [XWayland](xwayland.md) and
 
 `file_drag_tests` exercises real private Wayland connections: source-free offers,
 URI transfer, independent client seats, preserved keyboard focus and cancellation
-with a held button. The session-lock regression checks drag retirement and
+with a held button, plus dragging from the initialized DRM cursor before motion
+and after reactivation. The session-lock regression checks drag retirement and
 rejection while locked. Unit tests cover URI preparation, cancellation of a
 stalled transfer and native-control RPC dispatch.
 

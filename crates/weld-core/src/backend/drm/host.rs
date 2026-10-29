@@ -254,6 +254,11 @@ pub(super) fn run(
     let topology = OutputTopology::new(OutputLayout::new(1, current_configurations.clone())?);
     let input = LibinputAdapter::new(topology);
     let initial_input = input.initial_event();
+    runtime
+        .state
+        .data
+        .server
+        .dispatch_file_drag_input(&initial_input);
     if application.enqueue_input_event(initial_input.clone()) {
         runtime
             .state
@@ -475,6 +480,10 @@ impl NativeDriver<HostEvent> for DrmDriver {
                     self.desktop.activate()?;
                     self.presentation_schedule.activate_all();
                     self.target = SessionTarget::ActivePhysical;
+                    state
+                        .data
+                        .server
+                        .dispatch_file_drag_input(&self.input.initial_event());
                     if !state.data.server.session_locked() {
                         application.restore_input_focus();
                     }

@@ -1,6 +1,11 @@
 //! Native source offers tested through actual Wayland data-device requests.
 use super::*;
-use crate::runtime::drag::FileDragPayload;
+use crate::{
+    input::source::libinput::LibinputAdapter,
+    output::{OutputConfiguration, OutputId, OutputLayout, OutputScale, OutputTopology},
+    runtime::drag::FileDragPayload,
+    surface::{Extent, LogicalPoint},
+};
 use std::io::Read;
 use wayland_client::protocol::{wl_data_device, wl_data_device_manager, wl_data_offer};
 use weld_client::{
@@ -70,6 +75,42 @@ fn button(f: &mut Fixture, state: ButtonState) {
         2
     )));
     f.sync();
+}
+
+#[test]
+#[ignore = "uses a private Wayland socket; run serialized"]
+fn file_drag_starts_at_the_drm_cursor_before_motion_and_after_reactivation() {
+    let mut f = Fixture::new();
+    let output = OutputConfiguration::new(
+        OutputId::new(1),
+        Extent::new(1920, 1080),
+        OutputScale::new(1.5).expect("scale"),
+        LogicalPoint::ZERO,
+        true,
+        None,
+    )
+    .expect("output");
+    let input = LibinputAdapter::new(OutputTopology::new(
+        OutputLayout::new(1, vec![output]).expect("layout"),
+    ));
+    let files = tempfile::tempdir().expect("directory");
+    let payload = FileDragPayload::from_paths(&[files.path().to_owned()]).expect("payload");
+    for _ in 0..2 {
+        assert!(!f.server.dispatch_file_drag_input(&input.initial_event()));
+        f.server
+            .begin_file_drag(payload.clone())
+            .expect("initialized DRM cursor can start a drag without physical motion");
+        let pointer = f.server.local_input.native.get_pointer().expect("pointer");
+        assert_eq!(pointer.current_location(), (640.0, 360.0).into());
+        assert!(f.server.file_drag_active());
+        f.server
+            .dispatch_file_drag_input(&RawSeatEvent::new(RawSeatEventKind::HostFocusLost, 1));
+        assert!(!f.server.file_drag_active());
+        assert!(
+            f.server.begin_file_drag(payload.clone()).is_err(),
+            "an inactive desktop must wait for pointer reactivation"
+        );
+    }
 }
 
 #[test]
