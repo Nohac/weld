@@ -225,7 +225,8 @@ scrolling and hover feedback have been confirmed in a physical DRM session.
 The X11 root cursor uses Weld's shared cursor theme and follows configuration
 updates; client-defined cursor artwork remains application-owned.
 
-The WM's fullscreen/minimize policy, pointer locking and confinement, X11/Wayland clipboard
+X11 fullscreen requests use the shared window policy, including output-sized
+configuration and restoration. Minimize policy, pointer locking and confinement, X11/Wayland clipboard
 and drag-and-drop bridging, X11-specific scale policy, resize increments/aspect
 hints, and application activation requests need separate validation or support.
 Floating resize constraints cover minimum/maximum dimensions; tiled/fullscreen

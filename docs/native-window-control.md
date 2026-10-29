@@ -432,8 +432,10 @@ delivery and explicit paste semantics remain follow-ups. Accessibility action
 execution, bounded text/value inspection with sensitive-field handling, and
 broader window association remain follow-ups. Mixed-version capability diagnostics
 would make method/field mismatches during upgrades easier to identify.
-Launch-bound window readiness, process filters, structured ownership refusals and
-ownership-change waits, and mixed pointer/keyboard batches remain follow-ups.
+Launch-bound window readiness, process filters, structured ownership refusals,
+general ownership-change subscriptions, and mixed pointer/keyboard batches remain
+follow-ups. `request-control` already provides a bounded wait for local-to-remote
+input handoff, with immediate completion when access becomes available.
 The 2026-10-14 Draftship validation motivates these additions; the current frame
 checkpoint supplies a bounded newer-frame observation for screenshot-based tests.
 

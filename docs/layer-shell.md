@@ -75,8 +75,10 @@ focus loss; a pointer-observer regression test covers that path.
 
 ## Follow-ups
 
-Sway IPC and foreign-toplevel enumeration for Rofi window switching are subsequent slices.
-This slice targets Rofi application launching. Layer popup geometry applies the
+Sway IPC provides binding-mode queries/events and tree/output queries used by
+Grimshot. Command execution and foreign-toplevel enumeration for Rofi window
+switching remain follow-ups. Rofi application launching is supported.
+Layer popup geometry applies the
 client's flip/slide/resize constraints against its output on initial configure
 and reposition. Bounds are converted to parent coordinates, including panel
 placement, output scaling, and nested-menu offsets.

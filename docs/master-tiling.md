@@ -205,7 +205,7 @@ adaptive sync are reported as unsupported while scale on the same line applies.
   background, text, indicator and child border. Omitted indicator/child-border
   colors use the border and background colors respectively. Normal frames use the first
   color on the upper border and child-border color elsewhere; pixel frames
-  use child-border color throughout. Titlebar fill and close glyph use background
+  use child-border color throughout. Titlebar fill and controls use background
   and text. The focused tile uses indicator color on its right edge for side-by-side
   layout, or bottom edge for stacked layout, marking where the next window opens.
   The hint follows the current parent split and
@@ -428,7 +428,7 @@ workspaces or rewriting their layouts. Use a fresh workspace or restart the
 test to exercise a changed assignment. Master publishes workspace names, active
 states and output membership through `ext-workspace-v1`, including click-to-switch
 activation. See [desktop layer surfaces](layer-shell.md#workspace-controls).
-Workspace IPC, pointer warping, blank-output pointer focus, `focus output`,
+Workspace-list IPC, pointer warping, blank-output pointer focus, `focus output`,
 `move workspace to output`, workspace rename, and the automatic back-and-forth
 setting remain follow-ups.
 
