@@ -13,8 +13,8 @@ use bevy::{
     },
     picking::Pickable,
     prelude::{
-        BackgroundColor, BorderColor, BorderRadius, BoxShadow, GlobalZIndex, Node, Overflow,
-        PositionType, Scene, UiRect, UiTargetCamera, px,
+        BorderColor, BorderRadius, BoxShadow, GlobalZIndex, Node, Overflow, PositionType, Scene,
+        UiRect, UiTargetCamera, px,
     },
     scene::{CommandsSceneExt, bsn},
     window::RequestRedraw,
@@ -92,7 +92,6 @@ fn scene(frame: GroupFrame) -> impl Scene {
         template(move |_| Ok(frame.clone()))
         template(move |_| Ok(UiTargetCamera(camera)))
         GlobalZIndex(z)
-        BackgroundColor({colors.background})
         BorderColor::all(colors.border)
         template(move |_| Ok(shadow.clone()))
         Pickable::IGNORE
@@ -105,7 +104,6 @@ pub(super) struct FrameView {
     entity: Entity,
     frame: &'static mut GroupFrame,
     node: &'static mut Node,
-    background: &'static mut BackgroundColor,
     border: &'static mut BorderColor,
     camera: &'static mut UiTargetCamera,
     z: &'static mut GlobalZIndex,
@@ -171,7 +169,6 @@ pub(super) fn reconcile(
             continue;
         }
         *view.node = frame_node(&next);
-        *view.background = BackgroundColor(next.colors.background);
         *view.border = BorderColor::all(next.colors.border);
         *view.camera = UiTargetCamera(next.camera);
         *view.z = GlobalZIndex(next.z);

@@ -23,6 +23,16 @@ and DRM operation, remaining limitations, and the retained historical WSI
 probe are documented in
 [Direct DRM presentation](../drm-presentation.md).
 
+## Window transparency — Implemented
+
+Alpha-bearing client buffers blend with the desktop and windows beneath them.
+SSD bodies and shared tab/stack frames leave the content area transparent;
+headers, borders and vacant placeholders retain their own configured colors.
+The offscreen `window_transparency` regression exercises transparent,
+half-transparent and opaque SHM updates, overlapping floating windows, and
+tabbed presentation through the production surface shader and frame plugins.
+Encoded streams advertise their alpha-retention mode separately.
+
 ## Frame demand — Implemented
 
 Rendering is event driven. Surface and host changes request composition;

@@ -726,7 +726,6 @@ fn window_scene(content: impl SceneList, style: FrameGeometry) -> impl Scene {
                 ),
                 overflow: Overflow::clip(),
             }
-            BackgroundColor(Color::srgb(0.10, 0.12, 0.16))
             Children [
                 WindowMoveHandle
                 FrameHeader
