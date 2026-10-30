@@ -148,6 +148,7 @@ impl<D: SeatHandler> Inner<D> {
 /// Global data of WlSeat
 pub struct SeatGlobalData<D: SeatHandler> {
     arc: Arc<SeatRc<D>>,
+    filter: Option<Box<dyn Fn(&Client) -> bool + Send + Sync>>,
 }
 
 impl<D: SeatHandler> fmt::Debug for SeatGlobalData<D> {
@@ -174,7 +175,13 @@ impl<D: SeatHandler + 'static> SeatState<D> {
     {
         let Seat { arc } = self.new_seat(name);
 
-        let global_id = display.create_global::<D, _, _>(10, SeatGlobalData { arc: arc.clone() });
+        let global_id = display.create_global::<D, _, _>(
+            10,
+            SeatGlobalData {
+                arc: arc.clone(),
+                filter: None,
+            },
+        );
         arc.inner.lock().unwrap().global = Some(global_id);
 
         Seat { arc }
@@ -182,6 +189,25 @@ impl<D: SeatHandler + 'static> SeatState<D> {
 }
 
 impl<D: SeatHandler + 'static> Seat<D> {
+    /// Advertise this seat to clients accepted by `filter`.
+    ///
+    /// The caller owns the returned global's lifetime and must remove it when
+    /// access ends. Multiple filtered globals can advertise the same logical
+    /// seat while sharing its input and selection state.
+    pub fn create_global_with_filter<F>(&self, display: &DisplayHandle, filter: F) -> GlobalId
+    where
+        D: GlobalDispatch<WlSeat, SeatGlobalData<D>>,
+        F: Fn(&Client) -> bool + Send + Sync + 'static,
+    {
+        display.create_global::<D, _, _>(
+            10,
+            SeatGlobalData {
+                arc: self.arc.clone(),
+                filter: Some(Box::new(filter)),
+            },
+        )
+    }
+
     /// Checks whether a given [`WlSeat`] is associated with this [`Seat`]
     pub fn owns(&self, seat: &wl_seat::WlSeat) -> bool {
         let inner = self.arc.inner.lock().unwrap();
@@ -337,6 +363,10 @@ where
     D: SeatHandler,
     D: 'static,
 {
+    fn can_view(&self, client: &Client) -> bool {
+        self.filter.as_ref().is_none_or(|filter| filter(client))
+    }
+
     fn bind(
         &self,
         state: &mut D,
