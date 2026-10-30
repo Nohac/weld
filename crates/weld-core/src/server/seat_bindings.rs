@@ -59,6 +59,26 @@ impl InputSeat {
 }
 
 impl ServerState {
+    /// Publish a controller's seat only to the application receiving its input.
+    pub(super) fn advertise_remote_input(
+        &self,
+        controller: ClientInputController,
+        client: &Client,
+    ) {
+        let Some(input) = self.remote_inputs.get(&controller) else {
+            return;
+        };
+        let mut publications = input.publications.borrow_mut();
+        if publications.iter().any(|(owner, _)| owner == client) {
+            return;
+        }
+        let owner = client.id();
+        let global = input
+            .native
+            .create_global_with_filter(&self.display_handle, move |client| client.id() == owner);
+        publications.push((client.clone(), global));
+    }
+
     fn move_selection_group(input: &Seat<Self>, next: Seat<Self>) {
         if let Some(group) = input.user_data().get::<SelectionGroup>() {
             move_data_devices(input, &group.0.borrow(), &next);
@@ -91,6 +111,16 @@ impl ServerState {
 
     pub(super) fn cleanup_input_bindings(&mut self) {
         let backend = self.display_handle.backend_handle();
+        for input in self.remote_inputs.values() {
+            input.publications.borrow_mut().retain(|(client, global)| {
+                if backend.get_client_data(client.id()).is_ok() {
+                    true
+                } else {
+                    self.display_handle.remove_global::<Self>(global.clone());
+                    false
+                }
+            });
+        }
         let mut index = 0;
         while index < self.input_bindings.len() {
             if backend
@@ -203,6 +233,9 @@ impl ServerState {
         takeover: bool,
     ) -> Option<Rc<InputSeat>> {
         let client = self.input_client(surface)?;
+        if let Some(controller) = controller {
+            self.advertise_remote_input(controller, &client);
+        }
         // Keep a sequence on its admitted devices even if native bindings arrive later.
         let pinned = self.input_bindings.iter().find(|binding| {
             binding.client == client

@@ -30,6 +30,13 @@ temporary `wl-clipboard` toplevel, which caused a brief tiled-layout rearrangeme
 Clients admitted to the local Wayland socket can read and replace clipboard
 selections through these protocols.
 
+Ordinary clipboard-reader connections discover the desktop seat. Remote seats
+are advertised only to the application connections receiving their input, and
+retain separate clipboard contents through controller handoffs. This also keeps
+unspecified-seat readers such as Arboard/wl-clipboard-rs from randomly selecting
+an unrelated remote clipboard. Local socket access remains trusted; explicit
+clipboard-sharing permissions and restricted helper connections are future work.
+
 Grimshot's `active`, `window`, `output` and `anything` selectors use Weld's
 Sway IPC tree/output queries. Child applications inherit `SWAYSOCK` and `I3SOCK`.
 The tree includes nested tiling groups, floating windows, global logical geometry,
@@ -64,6 +71,8 @@ Run from the normal Rust development environment on an existing desktop:
 scripts/check-screenshot-capture
 cargo test -p weldwm -p weld-core --lib \
   async_capture_keeps_each_snapshot -- --ignored
+cargo test -p weldwm -p weld-core --lib \
+  clipboard_readers_keep_desktop_selection -- --ignored --test-threads=1
 ```
 
 The script launches an isolated nested Weld and Foot, checks full/region PNGs,

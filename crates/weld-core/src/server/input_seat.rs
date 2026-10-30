@@ -8,6 +8,7 @@ use crate::{
 use smithay::{
     desktop::PopupGrab,
     input::{Seat, pointer::CursorImageStatus},
+    reexports::wayland_server::{Client, backend::GlobalId},
 };
 use std::{
     cell::{Cell, RefCell},
@@ -21,6 +22,7 @@ use weld_client::{ClientFocusRequest, ClientInputEvent};
 // finish before calling Smithay.
 pub(super) struct InputSeat {
     pub native: Seat<ServerState>,
+    pub publications: RefCell<Vec<(Client, GlobalId)>>,
     pub touch_mode: Cell<Option<super::touch::TouchMode>>,
     pub touch_count: Cell<usize>,
     pub touch_pending: Cell<bool>,
@@ -52,6 +54,7 @@ impl InputSeat {
     ) -> Rc<Self> {
         Rc::new(Self {
             native,
+            publications: RefCell::default(),
             touch_mode: Cell::new(None),
             touch_count: Cell::new(0),
             touch_pending: Cell::new(false),
@@ -98,20 +101,14 @@ impl ServerState {
         if let Some(input) = self.remote_inputs.get(&controller) {
             return Some(input.clone());
         }
-        let mut native = self.seat_state.new_wl_seat(
-            &self.display_handle,
-            format!(
-                "weld-peer-{}-{}",
-                controller.adapter.raw(),
-                controller.connection
-            ),
-        );
+        let mut native = self.seat_state.new_seat(format!(
+            "weld-peer-{}-{}",
+            controller.adapter.raw(),
+            controller.connection
+        ));
         let keyboard = match native.add_keyboard(Default::default(), 200, 25) {
             Ok(keyboard) => keyboard,
             Err(error) => {
-                if let Some(global) = native.global() {
-                    self.display_handle.remove_global::<Self>(global);
-                }
                 self.seat_state.remove_seat(&native);
                 tracing::warn!(%error, "could not create remote keyboard");
                 return None;
@@ -120,9 +117,6 @@ impl ServerState {
         if let Err(error) =
             keyboard.set_keymap_from_string(self, self.keyboard_mapper.keymap().as_str().to_owned())
         {
-            if let Some(global) = native.global() {
-                self.display_handle.remove_global::<Self>(global);
-            }
             native.remove_keyboard();
             self.seat_state.remove_seat(&native);
             tracing::warn!(%error, "could not configure remote keyboard");
@@ -156,6 +150,9 @@ impl ServerState {
         if let Some(input) = self.remote_inputs.get(&controller).cloned() {
             self.release_controller_input(Some(controller), self.event_time());
             self.retire_input_bindings(controller);
+            for (_, global) in input.publications.borrow_mut().drain(..) {
+                self.display_handle.remove_global::<Self>(global);
+            }
             smithay::wayland::selection::data_device::clear_data_device_selection(
                 &self.display_handle,
                 &input.native,
@@ -164,9 +161,6 @@ impl ServerState {
             native.remove_pointer();
             native.remove_touch();
             native.remove_keyboard();
-            if let Some(global) = input.native.global() {
-                self.display_handle.remove_global::<Self>(global);
-            }
             self.remote_inputs.remove(&controller);
             self.seat_state.remove_seat(&native);
         }

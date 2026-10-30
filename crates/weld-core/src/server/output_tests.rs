@@ -2,6 +2,8 @@
 
 #[path = "activation_tests.rs"]
 mod activation_tests;
+#[path = "clipboard_tests.rs"]
+mod clipboard_tests;
 #[path = "cursor_tests.rs"]
 mod cursor_tests;
 #[path = "file_drag_tests.rs"]

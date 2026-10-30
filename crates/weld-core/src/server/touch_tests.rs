@@ -41,6 +41,7 @@ fn setup(first_only: bool) -> (Fixture, [SurfaceId; 2]) {
         id
     });
     f.server.remote_input(peer(1)).expect("peer");
+    f.server.advertise_remote_input(peer(1), &f.client);
     f.sync();
     f.sync();
     f.sync();
@@ -326,6 +327,7 @@ fn disconnect_cancels_only_its_controller_and_surface_removal_cancels_native_con
     let (mut f, windows) = setup(false);
     bind_touch(&mut f, 1);
     f.server.remote_input(peer(2)).expect("second peer");
+    f.server.advertise_remote_input(peer(2), &f.client);
     f.sync();
     f.sync();
     f.sync();

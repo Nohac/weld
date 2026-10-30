@@ -31,6 +31,7 @@ fn setup() -> (Fixture, [SurfaceId; 2], ClientInputController) {
         connection: 1,
     };
     fixture.server.remote_input(peer).expect("peer");
+    fixture.server.advertise_remote_input(peer, &fixture.client);
     fixture.sync();
     (fixture, windows, peer)
 }
@@ -438,6 +439,7 @@ fn popup_grabs_use_the_bound_context_in_native_and_fallback_routes() {
             connection: 1,
         };
         f.server.remote_input(peer).expect("peer");
+        f.server.advertise_remote_input(peer, &f.client);
         f.sync();
         f.sync();
         f.sync();

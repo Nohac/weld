@@ -540,6 +540,17 @@ with their original group. Selection focus tracks its owning context so an
 inactive application's handoff cannot clear another application's clipboard
 focus. Source destruction clears its original group.
 
+Remote logical seats start inside the host. Input routing publishes a filtered
+seat global to each target application connection when that controller first
+addresses it. The global shares the controller's input and clipboard storage;
+its lifetime ends with the application connection or controller. Existing
+first-seat fallback remains available while native bindings arrive. Ordinary
+desktop connections discover only the desktop seat, so clipboard helpers using
+an unspecified seat consistently select the desktop clipboard. Both data-control
+protocols continue resolving an explicitly bound seat to that logical seat's
+selection. The native protocol regression exercises fresh and long-lived
+clipboard readers alongside remote input, distinct clipboard offers and cleanup.
+
 State remains accessible during synchronous Smithay callbacks; cell borrows end
 before delivery. Remote keyboards use compositor-owned repeats and the configured
 legacy fallback. Keymap reload waits for all held keys. Activation remains set

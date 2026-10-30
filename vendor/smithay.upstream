@@ -2,6 +2,7 @@ repository = "https://github.com/Smithay/smithay.git"
 branch = "master"
 revision = "0ff00983b6007257a7a161a4fe8b14a778e2ac8f"
 update_command = "git subtree pull --prefix=vendor/smithay https://github.com/Smithay/smithay.git 0ff00983b6007257a7a161a4fe8b14a778e2ac8f --squash"
+local_patch_seat_visibility = "Seat::create_global_with_filter advertises an existing logical seat to selected clients. Weld owns these filtered globals per controller/application connection and retires them on disconnect; ordinary desktop clipboard readers discover only the desktop seat."
 local_patch_data_control = "SeatUserData retains the advertised seat alongside the application input context. ext-data-control and wlr-data-control use that advertised seat consistently for registration, selection updates, device removal and source destruction, keeping clipboard-manager access scoped to the named logical seat. Validated with scripts/check-screenshot-capture PNG transfer and no temporary clipboard toplevels."
 # Preserve XkbContext::set_modifier_masks: exact modifier/layout synchronization
 # keeps physical keyboard state across application-visible seat focus changes.

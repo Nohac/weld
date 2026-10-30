@@ -479,6 +479,7 @@ fn local_surface_handoff_releases_native_holds_without_retiring_peer_input() {
         connection: 1,
     };
     f.server.remote_input(peer).expect("peer seat");
+    f.server.advertise_remote_input(peer, &f.client);
     for _ in 0..3 {
         f.sync();
     }
@@ -596,6 +597,8 @@ fn peer_seats_share_windows_but_isolate_focus_holds_and_disconnect() {
     let second = controller(2);
     f.server.remote_input(first).expect("first seat");
     f.server.remote_input(second).expect("second seat");
+    f.server.advertise_remote_input(first, &f.client);
+    f.server.advertise_remote_input(second, &f.client);
     f.sync();
     f.sync();
     f.sync();
