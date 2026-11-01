@@ -469,6 +469,25 @@ use anonymous file descriptors and are reclaimed on process exit. Explicit
 PNG/video exports are user-owned files and survive lease expiry; exports refuse
 to overwrite an existing path.
 
+### Recording usability follow-ups
+
+Early user-reported Artboard validation on 2026-11-01 exercised smooth movement,
+timed clicks, drag cancellation, cropping and background recording with the
+preview hidden. Three recordings completed with zero reported dropped frames;
+frame inspection and exported files matched the recordings. AV1's coded-width
+difference was handled as padding. One recording expired during analysis while
+its exported file remained available.
+
+- [ ] Add optional contact-sheet labels such as `#94 · 1.600 s`, using the
+  recorded frame index and actual observation timestamp from each tile's
+  metadata. Place labels in a gutter outside the captured pixels. Include the
+  gutter in the requested total image dimensions and keep tile rectangles
+  accurate for downstream cropping. Labels make frame/metadata lookup easier.
+- [ ] Make the idle retention period configurable and raise the default to
+  ten minutes for analysis workflows. Continue renewing it on inspection/status
+  requests, retaining the existing recording-count and memory budgets, explicit
+  release, and occupant-scoped authorization. Explicit exports remain user-owned.
+
 ## MCP
 
 Configure an MCP client to launch:
