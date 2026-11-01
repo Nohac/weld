@@ -1,0 +1,20 @@
+[package]
+name = "weld-recording"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+base64 = "0.22"
+ffmpeg-next = { workspace = true, features = ["software-scaling"] }
+png.workspace = true
+serde.workspace = true
+serde_json = "1"
+schemars = "1"
+tempfile = "3"
+weld-client = { path = "../weld-client" }
+weld-media = { path = "../weld-media" }
+weld-hoist-core = { path = "../weld-hoist-core" }
+weld-hoist-protocol = { path = "../weld-hoist-protocol" }
+weld-hoist-encoded = { path = "../weld-hoist-encoded" }

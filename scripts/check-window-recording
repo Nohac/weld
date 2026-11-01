@@ -1,0 +1,148 @@
+#!/usr/bin/env python3
+"""Exercise hardware recording, CLI/public RPC and MCP in a private nested host."""
+import argparse
+import base64
+import json
+import os
+from pathlib import Path
+import select
+import signal
+import struct
+import subprocess
+import tempfile
+import time
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--no-build", action="store_true")
+    args = parser.parse_args()
+    root = Path(__file__).resolve().parent.parent
+    if not args.no_build:
+        subprocess.run(["cargo", "build", "--locked", "-j8", "-p", "weldwm", "-p", "weld-control", "--bins"], cwd=root, check=True)
+    run = Path(tempfile.mkdtemp(prefix="recording-", dir=root / "target/validation"))
+    config = run / "host.config"
+    config.write_text("font monospace 14\ndefault_border pixel 2\n")
+    display = run / "wayland"
+    socket = run / "weld-control/wayland.sock"
+    ctl = [str(root / "target/debug/weldctl"), "--socket", str(socket)]
+    print(f"Logs: {run}", flush=True)
+
+    def rpc(method, **params):
+        result = subprocess.run([*ctl, "rpc"], input=json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}),
+                                text=True, capture_output=True, check=True, timeout=40)
+        response = json.loads(result.stdout)
+        if "error" in response:
+            raise RuntimeError(response["error"])
+        return response["result"]
+
+    def wait(predicate, description):
+        end = time.monotonic() + 30
+        while time.monotonic() < end:
+            if host.poll() is not None:
+                raise RuntimeError(f"host exited: {run / 'host.log'}")
+            value = predicate()
+            if value:
+                return value
+            time.sleep(0.05)
+        raise RuntimeError(f"timed out waiting for {description}")
+
+    with (run / "host.log").open("w") as log:
+        host = subprocess.Popen([str(root / "target/debug/weldwm"), "--backend", "nested", "--config", str(config),
+                                 "--wayland-socket", str(display), "--scale", "1"], cwd=root,
+                                stdout=log, stderr=subprocess.STDOUT, start_new_session=True)
+        try:
+            wait(socket.exists, "private control socket")
+            subprocess.run([*ctl, "launch", "--headless", "--control", "--owner", "recording-probe", "--", "foot",
+                            "--app-id=weld-recording-probe", "sh", "-c",
+                            "i=0; while true; do printf '\\033[H\\033[2JFrame %s\\n' \"$i\"; i=$((i+1)); sleep 0.016; done"],
+                           check=True, capture_output=True, timeout=10)
+            def window():
+                return next((item for item in rpc("find", owner="recording-probe")["windows"] if item["control"]), None)
+            target = wait(window, "controlled Foot")
+            control = target["control"]
+            wait(lambda: window()["application_viewport"], "initial frame")
+            options = {"duration_ms": 700, "region": {"x": 0, "y": 0, "width": 160, "height": 96}}
+            result = subprocess.check_output([*ctl, "window", "record", "--control", control,
+                                              "--options", json.dumps(options), "--json"], text=True, timeout=30)
+            info = json.loads(result)
+            assert info["status"] == "complete", info
+            assert info["frames"] == [], "recording replies default to summary metadata"
+            info = rpc("recording_info", recording=info["id"], include_frames=True)
+            assert len(info["frames"]) >= 3, info
+            (run / "recording.json").write_text(json.dumps(info, indent=2))
+            recording = info["id"]
+            sheet_options = {"frames": 6, "width": 600, "height": 240}
+            sheet = rpc("recording_sheet", recording=recording, options=sheet_options, output=str(run / "sheet.png"))
+            assert len(sheet["tiles"]) == 6
+            assert struct.unpack(">II", base64.b64decode(sheet["png_base64"])[16:24]) == (600, 240)
+            frame = rpc("recording_frame", recording=recording, options={"at_ms": 350}, output=str(run / "frame.png"))
+            assert frame["tiles"][0]["frame"]["time_us"] <= 350000
+            rpc("recording_export", recording=recording, output=str(run / "clip.mkv"))
+            probe = json.loads(subprocess.check_output(["ffprobe", "-v", "error", "-count_frames", "-show_streams", "-show_format", "-of", "json", str(run / "clip.mkv")], text=True))
+            assert int(probe["streams"][0]["nb_read_frames"]) == len(info["frames"]), probe
+            pixels = subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(run / "clip.mkv"),
+                                              "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-"], timeout=15)
+            assert struct.unpack(">II", pixels[16:24]) == (info["width"], info["height"]), "exported video exposed encoder padding"
+            print(f"PASS native AV1 recording: {len(info['frames'])} frames, {info['dropped_frames']} coalesced/dropped; PNG inspection and video export", flush=True)
+            rpc("recording_release", recording=recording)
+            try:
+                rpc("recording_info", recording=recording)
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("released recording still readable")
+
+            pending = rpc("record", control=control, options={"duration_ms": 5000}, wait=False)
+            rpc("input", control=control, actions=[["p", "a"]])
+            rpc("permissions", id=target["id"], view=False, keyboard=True, pointer=True, resize=True)
+            wait(lambda: window()["control"] != control, "revoked recording grant")
+            try:
+                rpc("recording_info", recording=pending["id"])
+            except RuntimeError:
+                pass
+            else:
+                raise AssertionError("recording outlived its View grant")
+            rpc("permissions", id=target["id"], view=True, keyboard=True, pointer=True, resize=True)
+            target = wait(lambda: (candidate if (candidate := window())["capabilities"]["view"] else None), "new View grant")
+            control = target["control"]
+            wait(lambda: window()["application_viewport"], "replacement controlled frame")
+            with subprocess.Popen([*ctl, "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log) as mcp:
+                def request(identifier, method, params):
+                    mcp.stdin.write(json.dumps({"jsonrpc": "2.0", "id": identifier, "method": method, "params": params}).encode() + b"\n")
+                    mcp.stdin.flush()
+                    if not select.select([mcp.stdout], [], [], 30)[0]:
+                        raise RuntimeError(f"MCP timed out: {identifier}")
+                    response = json.loads(mcp.stdout.readline())
+                    assert response.get("id") == identifier and "error" not in response, response
+                    result = response["result"]
+                    assert not result.get("isError"), result
+                    return result
+                request(1, "initialize", {"protocolVersion": "2025-11-25", "capabilities": {}, "clientInfo": {"name": "recording-probe", "version": "1"}})
+                mcp.stdin.write(b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
+                mcp.stdin.flush()
+                tools = request(2, "tools/list", {})["tools"]
+                schema = next(tool for tool in tools if tool["name"] == "window_record")["inputSchema"]
+                assert "duration_ms" in schema["properties"]["options"]["properties"]
+                info = request(3, "tools/call", {"name": "window_record", "arguments": {"control": control, "options": {**options, "codec": "h264"}}})["structuredContent"]
+                assert info["status"] == "complete", info
+                image = request(4, "tools/call", {"name": "window_recording_sheet", "arguments": {"recording": info["id"], "options": sheet_options}})
+                assert any(item["type"] == "image" and item["mimeType"] == "image/png" for item in image["content"])
+                assert "png_base64" not in image["structuredContent"]
+                request(5, "tools/call", {"name": "window_recording_release", "arguments": {"recording": info["id"]}})
+                mcp.stdin.close()
+                mcp.wait(timeout=5)
+            print("PASS typed key sequence during recording, grant revocation, MCP H.264 recording and direct image delivery", flush=True)
+        finally:
+            os.killpg(host.pid, signal.SIGTERM)
+            try:
+                host.wait(timeout=20)
+            except subprocess.TimeoutExpired:
+                os.killpg(host.pid, signal.SIGKILL)
+                host.wait(timeout=5)
+        assert host.returncode == 0, host.returncode
+    print("PASS isolated host shutdown", flush=True)
+
+
+if __name__ == "__main__":
+    main()

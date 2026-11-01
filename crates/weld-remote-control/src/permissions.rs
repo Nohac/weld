@@ -52,7 +52,7 @@ impl Capabilities {
 impl Operation {
     pub(crate) const fn capability(&self) -> Capability {
         match self {
-            Self::Capture | Self::CaptureAfter { .. } => Capability::View,
+            Self::Capture | Self::CaptureAfter { .. } | Self::Record(_) => Capability::View,
             Self::Keys { .. }
             | Self::Chord { .. }
             | Self::TypeText { .. }

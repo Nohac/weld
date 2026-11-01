@@ -21,6 +21,7 @@ members = [
   "crates/weld-accessibility",
   "crates/weld-access",
   "crates/weld-remote-control",
+  "crates/weld-recording",
   "crates/weld-remote-control-ui",
   "crates/weld-diagnostics",
   "crates/weld-app",

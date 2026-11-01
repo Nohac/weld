@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 /// The local administrator supplies exact arguments and an absolute directory.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LaunchRequest {
     pub program: String,
     pub arguments: Vec<String>,

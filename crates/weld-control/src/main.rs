@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use qrcode::{QrCode, render::unicode};
 use std::{
-    io::{self, Write},
+    io::{self, Read, Write},
     os::unix::fs::OpenOptionsExt,
     path::{Path, PathBuf},
     thread,
@@ -32,6 +32,8 @@ enum Command {
     },
     /// Serve window inspection tools to an MCP client over stdin/stdout.
     Mcp,
+    /// Handle one public JSON-RPC request or batch from stdin, forwarding through typed local RPC.
+    Rpc,
     /// Query the running host's managed windows.
     #[command(disable_help_flag = true)]
     Window {
@@ -181,6 +183,15 @@ fn main() -> Result<()> {
             }
         }
         Command::Mcp => weld_control::mcp::run(path)?,
+        Command::Rpc => {
+            let mut input = String::new();
+            io::stdin().take(65537).read_to_string(&mut input)?;
+            anyhow::ensure!(input.len() <= 65536, "RPC request exceeds 64 KiB");
+            let request = serde_json::from_str(&input)?;
+            let client = weld_control::windows::WindowClient::new(path);
+            let response = futures_lite::future::block_on(client.jsonrpc_handle_async(request));
+            println!("{}", serde_json::to_string(&response)?);
+        }
         Command::Window { arguments } => {
             weld_control::windows::WindowClient::new(path)
                 .cli_run_with(std::iter::once("window".to_owned()).chain(arguments))

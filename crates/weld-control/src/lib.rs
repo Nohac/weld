@@ -9,14 +9,14 @@ pub mod access;
 pub mod launch;
 pub mod mcp;
 pub mod native;
+pub mod rpc;
 pub mod windows;
 use anyhow::{Context, Result, ensure};
 use launch::{LaunchReceipt, LaunchRequest};
 use native::NativeOperations;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
+use serde::{Deserialize, Serialize};
 use std::{
     fs,
-    io::{Read, Write},
     os::unix::{
         fs::{DirBuilderExt, MetadataExt},
         net::{UnixListener, UnixStream},
@@ -27,14 +27,12 @@ use std::{
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
-    time::Duration,
 };
 use weld_access::{AccessAuthority, AccessStatus};
 use weld_hoist_iroh::{IrohDeviceIdentity, IrohHost, IrohNetwork};
 
-#[derive(Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Request {
-    Window(serde_json::Value),
     Access(access::AccessRequest),
     Run(LaunchRequest),
     Drag(native::DragRequest),
@@ -56,9 +54,8 @@ pub enum Request {
     Devices,
     Revoke(String),
 }
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub enum Response {
-    Window(serde_json::Value),
     AccessStatus(AccessStatus),
     Launched(LaunchReceipt),
     DiagnosticSessions(
@@ -123,12 +120,12 @@ fn validate_session(session: &str) -> Result<()> {
 }
 
 pub fn call(path: &Path, request: &Request) -> Result<Response> {
-    let mut stream = UnixStream::connect(path)
-        .with_context(|| format!("could not reach Weld at {}", path.display()))?;
-    stream.set_read_timeout(Some(Duration::from_secs(40)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(3)))?;
-    write(&mut stream, request)?;
-    match read_bounded(&mut stream, MAX_CONTROL_RESPONSE_BYTES)? {
+    let request = request.clone();
+    match rpc::call(path, |client, context| async move {
+        client.native(context, request).await
+    })
+    .map_err(anyhow::Error::msg)?
+    {
         Response::Error(error) => anyhow::bail!("{error}"),
         response => Ok(response),
     }
@@ -253,7 +250,7 @@ impl ControlService {
                     if stopped.load(Ordering::Acquire) {
                         break;
                     }
-                    let Ok(mut stream) = stream else {
+                    let Ok(stream) = stream else {
                         break;
                     };
                     let mut index = 0;
@@ -265,20 +262,27 @@ impl ControlService {
                         }
                     }
                     if connections.len() >= 16 {
-                        let _ = stream.set_write_timeout(Some(Duration::from_secs(1)));
-                        let _ = write(
-                            &mut stream,
-                            &Response::Error("control connection capacity reached".into()),
-                        );
                         continue;
                     }
                     let owner = owner.clone();
                     let access = access.clone();
                     let windows = window_queries.clone();
+                    let stop = stopped.clone();
                     match thread::Builder::new()
                         .name("weld-control-request".into())
-                        .spawn(move || serve_connection(stream, owner, access, windows))
-                    {
+                        .spawn(move || {
+                            if let Err(error) = rpc::serve(
+                                stream,
+                                rpc::Service {
+                                    owner,
+                                    access,
+                                    windows,
+                                },
+                                stop,
+                            ) {
+                                eprintln!("control connection failed: {error:#}");
+                            }
+                        }) {
                         Ok(connection) => connections.push(connection),
                         Err(error) => eprintln!("could not start control request: {error}"),
                     }
@@ -303,43 +307,6 @@ impl ControlService {
     }
 }
 
-fn serve_connection(
-    mut stream: UnixStream,
-    owner: Arc<Mutex<Owner>>,
-    access: AccessAuthority,
-    windows: windows::WindowService,
-) {
-    let result = (|| -> Result<Response> {
-        let credentials = rustix::net::sockopt::socket_peercred(&stream)?;
-        ensure!(
-            credentials.uid == rustix::process::geteuid(),
-            "control client belongs to another user"
-        );
-        stream.set_read_timeout(Some(Duration::from_secs(3)))?;
-        stream.set_write_timeout(Some(Duration::from_secs(3)))?;
-        let request = read(&mut stream)?;
-        if let Request::Window(request) = request {
-            ensure!(request.is_object(), "expected one window RPC request");
-            let runtime = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()?;
-            return Ok(Response::Window(
-                runtime.block_on(windows.jsonrpc_handle_async(request)),
-            ));
-        }
-        // Access retirement remains responsive while a launch or diagnostic
-        // collection waits on the serialized service owner.
-        if let Request::Access(request) = request {
-            return request.execute(&access);
-        }
-        owner
-            .lock()
-            .map_err(|_| anyhow::anyhow!("control service unavailable"))?
-            .request(request)
-    })();
-    let response = result.unwrap_or_else(|error| Response::Error(format!("{error:#}")));
-    let _ = write(&mut stream, &response);
-}
 impl Drop for ControlService {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
@@ -356,7 +323,7 @@ struct PairingSetup {
     directory: PathBuf,
     desktop: SourceSessions<IrohSourcePeer>,
 }
-struct Owner {
+pub(crate) struct Owner {
     access: AccessAuthority,
     native: NativeOperations,
     host: Option<IrohHost>,
@@ -401,7 +368,6 @@ impl Owner {
     }
     fn request(&mut self, request: Request) -> Result<Response> {
         Ok(match request {
-            Request::Window(_) => anyhow::bail!("window requests require the window service"),
             Request::Access(request) => request.execute(&self.access)?,
             Request::Run(request) => Response::Launched((self.native.launch)(request)?),
             Request::Drag(request) => {
@@ -476,35 +442,14 @@ impl Owner {
     }
 }
 
-const MAX_CONTROL_RESPONSE_BYTES: usize = 96 * 1024 * 1024;
-
-fn write(stream: &mut UnixStream, value: &impl Serialize) -> Result<()> {
-    let bytes = serde_json::to_vec(value)?;
-    ensure!(
-        bytes.len() <= MAX_CONTROL_RESPONSE_BYTES,
-        "control response too large"
-    );
-    stream.write_all(&(bytes.len() as u32).to_le_bytes())?;
-    stream.write_all(&bytes)?;
-    Ok(())
-}
-fn read<T: DeserializeOwned>(stream: &mut UnixStream) -> Result<T> {
-    read_bounded(stream, 65536)
-}
-fn read_bounded<T: DeserializeOwned>(stream: &mut UnixStream, limit: usize) -> Result<T> {
-    let mut length = [0; 4];
-    stream.read_exact(&mut length)?;
-    let length = u32::from_le_bytes(length) as usize;
-    ensure!(length <= limit, "control record too large");
-    let mut bytes = vec![0; length];
-    stream.read_exact(&mut bytes)?;
-    Ok(serde_json::from_slice(&bytes)?)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt;
+    use std::{
+        io::{Read, Write},
+        time::Duration,
+    };
 
     fn unavailable_launch(_: LaunchRequest) -> Result<LaunchReceipt> {
         anyhow::bail!("launch unavailable in fixture")
@@ -630,12 +575,14 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(3)))
             .expect("timeout");
         invalid
-            .write_all(&65537u32.to_le_bytes())
+            .write_all(&65537u32.to_be_bytes())
             .expect("oversized length");
-        assert!(matches!(
-            read::<Response>(&mut invalid).expect("rejection"),
-            Response::Error(_)
-        ));
+        assert_eq!(
+            invalid
+                .read(&mut [0; 1])
+                .expect("oversized connection closed"),
+            0
+        );
         assert!(
             matches!(call(&socket, &Request::Devices).expect("still serves"), Response::Devices(devices) if devices.is_empty())
         );
@@ -666,8 +613,7 @@ mod tests {
         ));
         assert!(
             call(&socket, &Request::Pair)
-                .err()
-                .expect("no enrollment")
+                .expect_err("no enrollment")
                 .to_string()
                 .contains("device enrollment unavailable")
         );
@@ -711,8 +657,7 @@ mod tests {
             if program == "missing" {
                 assert!(
                     response
-                        .err()
-                        .expect("failure")
+                        .expect_err("failure")
                         .to_string()
                         .contains("executable missing")
                 );
@@ -871,8 +816,7 @@ mod tests {
         assert!(
             client
                 .capture("w12".into())
-                .err()
-                .expect("vacant capture")
+                .expect_err("vacant capture")
                 .contains("waiting for application")
         );
         assert_eq!(

@@ -16,3 +16,6 @@ weld-client = { path = "../weld-client" }
 weld-hoist-core = { path = "../weld-hoist-core" }
 weld-hoist-protocol = { path = "../weld-hoist-protocol" }
 tracing.workspace = true
+weld-recording = { path = "../weld-recording" }
+weld-hoist-encoded = { path = "../weld-hoist-encoded" }
+weld-media = { path = "../weld-media" }

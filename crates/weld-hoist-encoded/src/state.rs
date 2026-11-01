@@ -1005,12 +1005,45 @@ pub struct EncodedSourceOptions {
 }
 
 impl<T: EncodedSourceTransport> EncodedSourcePort<T> {
-    /// The sole public constructor for a source on any transport. Failure closes the supplied
+    /// Configure a source on any transport. Failure closes the supplied
     /// transport, including failures after a pending peer has been admitted.
     pub fn configured(
         transport: T,
         backend: Box<dyn EncodeBackend>,
         options: EncodedSourceOptions,
+    ) -> Result<Self> {
+        let mode = transport.stream_mode();
+        Self::configure(transport, backend, options, mode)
+    }
+
+    /// Encode already-composed input through the shared scheduler and codec worker.
+    /// The sink receives one viewport stream; its input events retain their caller's revisions.
+    pub fn composed_input(transport: T, backend: Box<dyn EncodeBackend>) -> Result<Self> {
+        ensure!(
+            transport.stream_mode() == weld_client::SurfaceStreamMode::Independent,
+            "precomposed input requires an independent sink"
+        );
+        Self::configure(
+            transport,
+            backend,
+            EncodedSourceOptions::default(),
+            weld_client::SurfaceStreamMode::Composited,
+        )
+    }
+
+    /// All submitted work has completed and reached the sink.
+    pub fn is_idle(&self) -> bool {
+        self.output.is_empty()
+            && self.state.as_ref().is_none_or(|state| {
+                state.in_flight.is_none() && state.pending.is_empty() && state.output.is_empty()
+            })
+    }
+
+    fn configure(
+        transport: T,
+        backend: Box<dyn EncodeBackend>,
+        options: EncodedSourceOptions,
+        input_mode: weld_client::SurfaceStreamMode,
     ) -> Result<Self> {
         let mut port = Self::new(transport, backend);
         let configured = (|| -> Result<()> {
@@ -1018,7 +1051,7 @@ impl<T: EncodedSourceTransport> EncodedSourcePort<T> {
                 .as_mut()
                 .context("encoded source state unavailable")?
                 .backend
-                .configure_stream_mode(port.transport.stream_mode())?;
+                .configure_stream_mode(input_mode)?;
             if let Some(budget) = options.bitrate_budget {
                 port.set_bitrate_budget(budget)?;
             }

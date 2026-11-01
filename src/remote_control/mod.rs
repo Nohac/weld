@@ -662,6 +662,24 @@ struct NativeCapture {
     backend: Option<SourceCapture>,
 }
 impl Capture for NativeCapture {
+    fn recording_backend(
+        &mut self,
+        codec: weld_media::VideoCodec,
+    ) -> Result<Box<dyn weld_hoist_encoded::EncodeBackend>> {
+        let wake = self.wake.clone();
+        weld_hoist_encoded::encode_backend(
+            self.render_node
+                .clone()
+                .context("GPU recording unavailable")?,
+            codec,
+            None,
+            move || {
+                if let Err(error) = wake.notify() {
+                    tracing::warn!(%error, "could not wake recording encoder");
+                }
+            },
+        )
+    }
     fn begin(&mut self, frame: &ComposedBuffer) -> Result<Box<dyn CaptureJob>> {
         if self.backend.is_none() {
             self.backend = Some(SourceCapture::new(

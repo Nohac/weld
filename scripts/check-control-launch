@@ -152,24 +152,13 @@ def main():
 
 
 def window_rpc(control, method, params):
-    with socket.socket(socket.AF_UNIX) as connection:
-        connection.settimeout(10)
-        connection.connect(str(control))
-        body = json.dumps({"Window": {"jsonrpc": "2.0", "id": "validation", "method": method, "params": params}}).encode()
-        connection.sendall(len(body).to_bytes(4, "little") + body)
-        def exact(length):
-            data = bytearray()
-            while len(data) < length:
-                chunk = connection.recv(length - len(data))
-                if not chunk:
-                    raise RuntimeError("window RPC disconnected before reply")
-                data.extend(chunk)
-            return data
-        length = int.from_bytes(exact(4), "little")
-        assert length <= 16 * 1024 * 1024
-        response = json.loads(exact(length))["Window"]
-        assert response["id"] == "validation", response
-        return response
+    root = Path(__file__).resolve().parent.parent
+    request = {"jsonrpc": "2.0", "id": "validation", "method": method, "params": params}
+    result = subprocess.run([str(root / "target/debug/weldctl"), "--socket", str(control), "rpc"],
+                            input=json.dumps(request), text=True, capture_output=True, check=True, timeout=40)
+    response = json.loads(result.stdout)
+    assert response["id"] == "validation", response
+    return response
 
 
 def check_file_drag(ctl, control, host, run, parent, owner):
@@ -335,6 +324,8 @@ def check_windows(ctl, control, host, run, display, accessibility_app, text_app,
                 "window_request_control",
                 "window_accessibility",
                 "window_peek",
+                "window_record", "window_recording_info", "window_recording_frame",
+                "window_recording_sheet", "window_recording_export", "window_recording_release",
             }
             result = request(3, "tools/call", {"name": "window_get", "arguments": {"id": window["id"]}})
             assert not result.get("isError"), result

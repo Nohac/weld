@@ -1,7 +1,7 @@
 # Native window control
 
 `weldctl` exposes the running compositor's managed-window inventory through CLI,
-native JSON-RPC dispatch and stdio MCP. Windows include occupied applications and
+public JSON-RPC and stdio MCP. Windows include occupied applications and
 vacant persistent slots. The standard nested and DRM assemblies publish the same
 domain-owned inventory used by Sway IPC.
 
@@ -332,9 +332,11 @@ window management is unavailable.
 
 The implementation pins `server-less` at
 `885c740e772edf98719cccf74fe5867b3fbcbb63` with CLI, JSON-RPC, MCP and JSON Schema
-features. The service owns queries over an owned snapshot; the socket client
-forwards calls to it. Macros generate service RPC dispatch and client CLI/MCP
-interfaces. Schemars derives the field-level schemas from the wire types.
+features. The service owns queries over an owned snapshot. A shared Rust
+`tarpc::service` contract generates the internal client and server interfaces;
+public adapters make typed calls through that client. `server-less` generates
+the public CLI, JSON-RPC and MCP interfaces. Schemars derives field-level schemas
+from the wire types, including recording options and compact input rows.
 
 ```sh
 weldctl --session weld-0 window get --output-schema
@@ -345,22 +347,89 @@ weldctl --session weld-0 window --manual --json
 The last command exports a method-keyed catalogue containing descriptions,
 input schemas and output schemas. These commands work without a running host.
 
-The native control socket retains its four-byte little-endian length-prefixed
-JSON records. A window query is a `Window` request containing JSON-RPC:
+The private same-user Unix socket carries bounded tarpc/MessagePack messages.
+Its request limit is 64 KiB and its response limit is 96 MiB. Socket credentials,
+private directory ownership and bounded connection admission remain enforced.
+Blocking native operations and media inspection run on service workers.
+Build/install Weld and `weldctl` together when changing this private contract.
 
-```json
-{"Window":{"jsonrpc":"2.0","id":"example","method":"get","params":{"id":"0"}}}
+For a public JSON-RPC request or batch, send JSON to `weldctl rpc` on stdin:
+
+```sh
+printf '%s' '{"jsonrpc":"2.0","id":"example","method":"get","params":{"id":"0"}}' | weldctl --session weld-0 rpc
 ```
 
-The response contains `Window` with the matching JSON-RPC result/error and ID.
-One window RPC request is accepted per connection. The existing same-user,
-bounded control listener owns framing and connection lifetime.
+The response is ordinary JSON-RPC with the matching result/error and ID.
+The adapter translates it into a typed internal call.
 
 Upstream's current OpenRPC generator uses syntactic type inference and emits
 generic object schemas for custom types. It also camel-cases names independently
 of the RPC dispatcher. The validated schema path here uses its Schemars-backed
 CLI output. MCP's generated input schemas cover the simple string/integer
-parameters used by this service; richer parameters need another contract check.
+parameters used by this service; structured recording and input parameters use
+their Schemars-derived definitions.
+
+## Window recordings
+
+`record` retains every composed update offered to the shared streaming encoder,
+including the initial retained frame. AV1 is the default; H.264 is selectable.
+Source composition, native buffer ownership, encoder workers, pacing and
+backpressure use the existing encoded-hoist implementation. Encoder saturation
+or pacing can coalesce updates; completed recordings report that count alongside
+the number of submitted updates and encoded frames. `dropped_frames` is `null`
+until the encoder drains. The timeline describes updates observed by the
+recording consumer, which may already reflect upstream commit coalescing.
+
+```sh
+weldctl window record --control w12 --options '{"duration_ms":700}' --json
+weldctl window recording-info --recording RECORDING_ID --include-frames true --json
+weldctl window recording-sheet --recording RECORDING_ID --options '{"frames":10,"width":1500,"height":400}' --output sheet.png
+weldctl window recording-frame --recording RECORDING_ID --options '{"at_ms":350}' --output frame.png
+weldctl window recording-export --recording RECORDING_ID --output clip.mkv
+weldctl window recording-release --recording RECORDING_ID
+```
+
+The MCP equivalents are `window_record`, `window_recording_info`,
+`window_recording_frame`, `window_recording_sheet`, `window_recording_export`
+and `window_recording_release`. Frame and sheet calls return PNG image content
+directly. `record` waits for completion by default; `wait:false` returns the ID
+immediately so other input calls can execute during recording. Completion waits
+are notification-driven. Status queries default to summary metadata; request
+`include_frames:true` for the full observed timestamp/revision timeline.
+
+Recording options accept `region:{x,y,width,height}` in original window-local
+logical coordinates, `codec:"av1"|"h264"`, and `after_sequence` to start with
+a commit newer than an existing input checkpoint. Checkpoint waits use the
+ordinary five-second request bound. A crop is composed before encoding. The
+recorded rectangle and pixel dimensions stay fixed; shrinking the application
+past that rectangle fails the recording explicitly.
+
+Contact sheets accept `start_ms`/`end_ms`, `frames`, combined `width`/`height`,
+and an optional `region` contained in the recorded logical rectangle. Tiles
+are ordered left-to-right, top-to-bottom and preserve proportions with
+letterboxing. Metadata gives each tile's image rectangle, actual observation
+timestamp and original frame revision. Time sampling chooses the most recent
+recorded frame at or before each requested time and retains repeated tiles
+during static intervals. Single frames accept either `index` or `at_ms`.
+Inspection begins decoding at the preceding keyframe. Export remuxes the
+original compressed packets and observation timestamps into Matroska.
+Inspection crops hardware-coded padding to the visible recording extent;
+Matroska export carries the corresponding frame-cropping metadata.
+
+Current resource bounds are four retained recordings, ten seconds per recording,
+2,400 observed updates, 32 MiB of encoded data per recording, and 16 megapixels
+per encoded frame. Inspection allows two concurrent workers, up to 100 tiles,
+and combined image dimensions up to 4096×4096. Encoder capability errors remain
+explicit. These are service resource budgets; frame and tile counts are separate.
+
+Each recording retains its original occupant's View permission. Revocation,
+replacement and explicit release invalidate access, including an inspection
+already in progress. A two-minute idle lease is renewed by inspection/status
+requests. Expired entries are removed on host deadlines. Encoded recordings
+live in bounded session memory and disappear on restart. Export scratch files
+use anonymous file descriptors and are reclaimed on process exit. Explicit
+PNG/video exports are user-owned files and survive lease expiry; exports refuse
+to overwrite an existing path.
 
 ## MCP
 
@@ -373,6 +442,7 @@ weldctl --session weld-0 mcp
 The generated tools include inventory `list`, `find`, `get`, `resolve`, `wait`;
 input `input`, `pointer`, `click`, `button`, `key`, `press_key`, `chord`, `type_text`, `scroll`;
 viewport `resize`, `scale`; and `capture`, `capture_after`, `accessibility`, all prefixed `window_`.
+Recording tools are listed in [Window recordings](#window-recordings).
 MCP `window_list` defaults to control-enabled windows, including waiting persistent
 slots. Pass `{"all_windows":true}` for the whole inventory. CLI/RPC `list` retains
 the full inventory; `find` provides explicit application and control filters.
@@ -456,6 +526,12 @@ input handoff, with immediate completion when access becomes available.
 The 2026-10-14 Draftship validation motivates these additions; the current frame
 checkpoint supplies a bounded newer-frame observation for screenshot-based tests.
 
+Timed scenarios should coordinate recording and the existing input scheduler
+on one monotonic timeline, with actions at offsets from recording start and
+requested/actual dispatch times in the result. Smooth pointer movement belongs
+in the input scheduler. Recording itself owns observation and encoding; scenario
+orchestration is a subsequent addition.
+
 ## Validation
 
 ```sh
@@ -464,6 +540,9 @@ scripts/check-control-launch --nested
 scripts/check-control-launch --nested --accessibility-app /path/to/zenity
 scripts/check-control-launch --nested --xwayland
 scripts/check-control-launch --nested --xwayland --text-app /path/to/zenity
+scripts/check-window-recording
+cargo test --locked -p weldwm -p weld-recording --test recording
+cargo test --locked -p weldwm -p weld-recording --test media -- --ignored
 ```
 
 Validated against a real nested Foot window: CLI/direct RPC result agreement,

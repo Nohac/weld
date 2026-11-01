@@ -1,11 +1,13 @@
 //! Remote window-control requests serviced by the shared native client relay.
 
 mod permissions;
+mod recording;
 mod runtime;
 mod sequence;
 pub use permissions::{Capabilities, Capability};
 pub use runtime::registration;
 pub use sequence::{InputAction, InputKey, InputSequenceResult, KeyState};
+pub use weld_recording;
 
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -150,6 +152,7 @@ pub enum Operation {
         factor: Option<f64>,
     },
     Capture,
+    Record(weld_recording::Options),
     CaptureAfter {
         sequence: String,
         timeout_ms: u32,
@@ -158,11 +161,15 @@ pub enum Operation {
 
 impl Operation {
     fn is_capture(&self) -> bool {
-        matches!(self, Self::Capture | Self::CaptureAfter { .. })
+        matches!(
+            self,
+            Self::Capture | Self::CaptureAfter { .. } | Self::Record(_)
+        )
     }
 }
 
 pub enum Reply {
+    Recording(weld_recording::Info),
     Input(InputReceipt),
     Sequence(InputSequenceResult),
     Snapshot(Snapshot),
@@ -291,6 +298,7 @@ impl ControlRegistry {
 
 #[derive(Clone)]
 pub struct RemoteControlClient {
+    recordings: recording::Archive,
     sender: mpsc::SyncSender<Command>,
     grants: Arc<Mutex<ControlRegistry>>,
     wake: Arc<dyn Fn() + Send + Sync>,
@@ -442,6 +450,13 @@ impl RemoteControlClient {
 /// Native image backend retains leases until its asynchronous readback completes.
 pub trait Capture {
     fn begin(&mut self, frame: &ComposedBuffer) -> Result<Box<dyn CaptureJob>>;
+    /// Create the streaming encoder backend for a bounded recording.
+    fn recording_backend(
+        &mut self,
+        _codec: weld_media::VideoCodec,
+    ) -> Result<Box<dyn weld_hoist_encoded::EncodeBackend>> {
+        anyhow::bail!("recording encoder unavailable")
+    }
 }
 pub trait CaptureJob {
     fn poll(&mut self) -> Option<Result<String>>;

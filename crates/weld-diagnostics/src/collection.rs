@@ -30,7 +30,7 @@ impl fmt::Display for CollectionStatus {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DiagnosticCollection {
     pub bundle: ReportBundle,
     pub status: CollectionStatus,

@@ -1,13 +1,14 @@
-//! Native window queries shared by generated RPC dispatch and the command client.
+//! Window service and public adapters over the typed native control contract.
 
 #[cfg(test)]
 mod tests;
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize, de::DeserializeOwned};
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
 use std::{
     fmt,
+    io::Write,
     path::PathBuf,
     sync::{
         Arc, Mutex,
@@ -18,6 +19,10 @@ use std::{
 };
 use tokio::sync::{Semaphore, watch};
 use weld_accessibility::Snapshot as AccessibilitySnapshot;
+use weld_remote_control::weld_recording::{
+    FrameOptions, Image as RecordingImage, Info as RecordingInfo, Options as RecordingOptions,
+    SheetOptions, Video as RecordingVideo,
+};
 use weld_remote_control::{
     Capabilities, InputAction, InputReceipt, InputSequenceResult, Operation, RemoteControlClient,
     Reply, Snapshot, Viewport,
@@ -83,6 +88,7 @@ pub struct WindowService {
     controller: Arc<Mutex<Option<RemoteControlClient>>>,
     administrator: Arc<Mutex<Option<Administrator>>>,
     accessibility_calls: Arc<Semaphore>,
+    recording_calls: Arc<Semaphore>,
 }
 
 type Administrator = Arc<dyn Fn(ControlCommand, Duration) -> Result<(), String> + Send + Sync>;
@@ -155,11 +161,19 @@ impl Default for WindowService {
             controller: Default::default(),
             administrator: Default::default(),
             accessibility_calls: Arc::new(Semaphore::new(2)),
+            recording_calls: Arc::new(Semaphore::new(2)),
         }
     }
 }
 
 impl WindowService {
+    fn controller(&self) -> Result<RemoteControlClient, String> {
+        self.controller
+            .lock()
+            .map_err(|_| "controller service unavailable")?
+            .clone()
+            .ok_or_else(|| "remote control unavailable".into())
+    }
     pub fn attach_controller(
         &self,
         controller: RemoteControlClient,
@@ -223,7 +237,7 @@ impl WindowService {
     fn send_input(&self, control: String, operation: Operation) -> Result<InputReceipt, String> {
         match self.operate(control, operation)? {
             Reply::Input(receipt) => Ok(receipt),
-            Reply::Snapshot(_) | Reply::Sequence(_) => {
+            Reply::Snapshot(_) | Reply::Sequence(_) | Reply::Recording(_) => {
                 Err("input returned an unexpected result".into())
             }
         }
@@ -232,7 +246,9 @@ impl WindowService {
     fn snapshot(&self, control: String, operation: Operation) -> Result<Snapshot, String> {
         match self.operate(control, operation)? {
             Reply::Snapshot(snapshot) => Ok(snapshot),
-            Reply::Input(_) | Reply::Sequence(_) => Err("capture returned no pixels".into()),
+            Reply::Input(_) | Reply::Sequence(_) | Reply::Recording(_) => {
+                Err("capture returned no pixels".into())
+            }
         }
     }
 
@@ -290,8 +306,87 @@ impl WindowService {
     }
 }
 
-#[server_less::jsonrpc]
 impl WindowService {
+    /// Record all composed updates through the streaming encoder. wait defaults to true; false returns the recording ID immediately.
+    pub fn record(
+        &self,
+        control: String,
+        options: RecordingOptions,
+        wait: Option<bool>,
+    ) -> Result<RecordingInfo, String> {
+        let duration = options.duration_ms;
+        let Reply::Recording(mut info) = self.operate(control, Operation::Record(options))? else {
+            return Err("recording returned an unexpected result".into());
+        };
+        if wait.unwrap_or(true) {
+            let controller = self.controller()?;
+            info = controller
+                .wait_recording(&info.id, Duration::from_millis(u64::from(duration) + 6000))
+                .map_err(|error| error.to_string())?;
+        }
+        info.frames.clear();
+        Ok(info)
+    }
+    /// Inspect a temporary recording and renew its two-minute idle lease.
+    pub fn recording_info(
+        &self,
+        recording: String,
+        include_frames: Option<bool>,
+    ) -> Result<RecordingInfo, String> {
+        let mut info = self
+            .controller()?
+            .recording_info(&recording)
+            .map_err(|error| error.to_string())?;
+        if !include_frames.unwrap_or(false) {
+            info.frames.clear();
+        }
+        Ok(info)
+    }
+    /// Decode one frame of a completed recording by index or timestamp.
+    pub fn recording_frame(
+        &self,
+        recording: String,
+        options: FrameOptions,
+    ) -> Result<RecordingImage, String> {
+        let _permit = self
+            .recording_calls
+            .try_acquire()
+            .map_err(|_| "recording inspection busy")?;
+        self.controller()?
+            .recording_frame(&recording, options)
+            .map_err(|error| error.to_string())
+    }
+    /// Generate a contact sheet from a completed recording with a bounded time range and output raster.
+    pub fn recording_sheet(
+        &self,
+        recording: String,
+        options: SheetOptions,
+    ) -> Result<RecordingImage, String> {
+        let _permit = self
+            .recording_calls
+            .try_acquire()
+            .map_err(|_| "recording inspection busy")?;
+        self.controller()?
+            .recording_sheet(&recording, options)
+            .map_err(|error| error.to_string())
+    }
+    /// Remux retained encoded packets into a timestamped Matroska video.
+    pub fn recording_video(&self, recording: String) -> Result<RecordingVideo, String> {
+        let _permit = self
+            .recording_calls
+            .try_acquire()
+            .map_err(|_| "recording inspection busy")?;
+        self.controller()?
+            .recording_video(&recording)
+            .map_err(|error| error.to_string())
+    }
+    /// Cancel or delete a recording immediately.
+    pub fn recording_release(&self, recording: String) -> Result<String, String> {
+        self.controller()?
+            .recording_release(&recording)
+            .map_err(|error| error.to_string())?;
+        Ok("released".into())
+    }
     /// Ask the local user to release an existing control grant's input. Waits until available or timeout (default/max 30000ms). Permissions and ownership remain under local control.
     pub fn request_control(
         &self,
@@ -653,40 +748,96 @@ impl WindowClient {
         Self { socket }
     }
 
-    fn request<T: DeserializeOwned>(&self, method: &str, params: Value) -> Result<T, String> {
-        let response = crate::call(
-            &self.socket,
-            &crate::Request::Window(json!({
-                "jsonrpc": "2.0", "id": "window", "method": method, "params": params
-            })),
-        )
-        .map_err(|error| error.to_string())?;
-        let crate::Response::Window(response) = response else {
-            return Err("unexpected window response".into());
-        };
-        if let Some(error) = response.get("error") {
-            return Err(error
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("window request failed")
-                .to_owned());
-        }
-        let value = response.get("result").ok_or("window result absent")?;
-        serde_json::from_value(value.clone()).map_err(|error| error.to_string())
+    fn call<
+        T,
+        F: std::future::Future<Output = Result<Result<T, String>, tarpc::client::RpcError>>,
+    >(
+        &self,
+        operation: impl FnOnce(crate::rpc::WeldRpcClient, tarpc::context::Context) -> F,
+    ) -> Result<T, String> {
+        crate::rpc::call(&self.socket, operation)?
     }
 }
 
 #[server_less::cli(name = "window")]
 #[server_less::mcp(namespace = "window")]
+#[server_less::jsonrpc]
 impl WindowClient {
+    /// Record all observed composed frames using the streaming encoder. options: duration_ms (1..10000), optional region {x,y,width,height}, codec av1 (default) or h264, and after_sequence. wait defaults true; false returns immediately so input can run during recording. Idle lease is two minutes.
+    pub fn record(
+        &self,
+        control: String,
+        options: RecordingOptions,
+        wait: Option<bool>,
+    ) -> Result<RecordingInfo, String> {
+        self.call(
+            |client, context| async move { client.record(context, control, options, wait).await },
+        )
+    }
+    /// Read recording status, frame count and final dropped-frame count; renews the idle lease. Set include_frames to include the full timestamp/revision timeline.
+    pub fn recording_info(
+        &self,
+        recording: String,
+        include_frames: Option<bool>,
+    ) -> Result<RecordingInfo, String> {
+        self.call(|client, context| async move {
+            client
+                .recording_info(context, recording, include_frames)
+                .await
+        })
+    }
+    /// View one recorded frame. options selects index or at_ms (default 0), optional width/height and logical region. Optional output saves a PNG without overwriting an existing file.
+    pub fn recording_frame(
+        &self,
+        recording: String,
+        options: FrameOptions,
+        output: Option<String>,
+    ) -> Result<RecordingImage, String> {
+        let image: RecordingImage = self.call(|client, context| async move {
+            client.recording_frame(context, recording, options).await
+        })?;
+        if let Some(output) = output {
+            save_recording_file(&output, &image.png_base64)?;
+        }
+        Ok(image)
+    }
+    /// View a contact sheet from an existing recording. options: frames (1..100), width/height (combined image, at most 4096 each), optional start_ms/end_ms and logical region. Tiles run left-to-right, top-to-bottom; metadata gives actual timestamps and revisions. Optional output saves a PNG.
+    pub fn recording_sheet(
+        &self,
+        recording: String,
+        options: SheetOptions,
+        output: Option<String>,
+    ) -> Result<RecordingImage, String> {
+        let image: RecordingImage = self.call(|client, context| async move {
+            client.recording_sheet(context, recording, options).await
+        })?;
+        if let Some(output) = output {
+            save_recording_file(&output, &image.png_base64)?;
+        }
+        Ok(image)
+    }
+    /// Export a recording to a retained Matroska (.mkv) file. Refuses to overwrite; exported files remain user-owned after the temporary recording expires.
+    pub fn recording_export(&self, recording: String, output: String) -> Result<String, String> {
+        let video: RecordingVideo = self.call(|client, context| async move {
+            client.recording_video(context, recording).await
+        })?;
+        save_recording_file(&output, &video.data_base64)?;
+        Ok(output)
+    }
+    /// Cancel or delete the temporary recording, including its retained encoded frames.
+    pub fn recording_release(&self, recording: String) -> Result<String, String> {
+        self.call(
+            |client, context| async move { client.recording_release(context, recording).await },
+        )
+    }
     /// Enable or revoke remote control. This administrative command is available through the local CLI.
     pub fn control(&self, id: String, enabled: bool) -> Result<String, String> {
-        self.request("control", json!({"id":id,"enabled":enabled}))
+        self.call(|client, context| async move { client.control(context, id, enabled).await })
     }
 
     /// Show a controlled application in a local desktop frame.
     pub fn peek(&self, control: String, visible: Option<bool>) -> Result<String, String> {
-        self.request("peek", json!({"control":control,"visible":visible}))
+        self.call(|client, context| async move { client.peek(context, control, visible).await })
     }
 
     /// Replace remote-control permissions through the local administrative CLI. Omitted flags disable their capability.
@@ -698,14 +849,15 @@ impl WindowClient {
         pointer: bool,
         resize: bool,
     ) -> Result<String, String> {
-        self.request(
-            "permissions",
-            json!({"id":id,"view":view,"keyboard":keyboard,"pointer":pointer,"resize":resize}),
-        )
+        self.call(|client, context| async move {
+            client
+                .permissions(context, id, view, keyboard, pointer, resize)
+                .await
+        })
     }
     /// Move the controller pointer in window-local logical coordinates.
     pub fn pointer(&self, control: String, x: f64, y: f64) -> Result<InputReceipt, String> {
-        self.request("pointer", json!({"control":control,"x":x,"y":y}))
+        self.call(|client, context| async move { client.pointer(context, control, x, y).await })
     }
     /// Click a Linux pointer button (272 left, 273 right, 274 middle).
     pub fn click(
@@ -715,9 +867,8 @@ impl WindowClient {
         y: f64,
         button: u32,
     ) -> Result<InputReceipt, String> {
-        self.request(
-            "click",
-            json!({"control":control,"x":x,"y":y,"button":button}),
+        self.call(
+            |client, context| async move { client.click(context, control, x, y, button).await },
         )
     }
     /// Send a button edge at the last pointer position; release every pressed button.
@@ -727,10 +878,9 @@ impl WindowClient {
         button: u32,
         pressed: bool,
     ) -> Result<InputReceipt, String> {
-        self.request(
-            "button",
-            json!({"control":control,"button":button,"pressed":pressed}),
-        )
+        self.call(|client, context| async move {
+            client.button(context, control, button, pressed).await
+        })
     }
     /// Send an evdev key edge; release every pressed key. Host keymap remappings apply.
     pub fn key(
@@ -739,22 +889,23 @@ impl WindowClient {
         keycode: u32,
         pressed: bool,
     ) -> Result<InputReceipt, String> {
-        self.request(
-            "key",
-            json!({"control":control,"keycode":keycode,"pressed":pressed}),
+        self.call(
+            |client, context| async move { client.key(context, control, keycode, pressed).await },
         )
     }
     /// Press and release one evdev key atomically. Host keymap remappings apply.
     pub fn press_key(&self, control: String, keycode: u32) -> Result<InputReceipt, String> {
-        self.request("press_key", json!({"control":control,"keycode":keycode}))
+        self.call(
+            |client, context| async move { client.press_key(context, control, keycode).await },
+        )
     }
     /// Press ordered evdev keys, then release in reverse order. Validates the whole chord first.
     pub fn chord(&self, control: String, keycodes: Vec<u32>) -> Result<InputReceipt, String> {
-        self.request("chord", json!({"control":control,"keycodes":keycodes}))
+        self.call(|client, context| async move { client.chord(context, control, keycodes).await })
     }
     /// Type a full Unicode string (1–4096 UTF-8 bytes) into a native Wayland window without changing the clipboard. Newlines press Enter; tabs press Tab. No implicit Enter is added. Release held remote keys first. XWayland is unsupported.
     pub fn type_text(&self, control: String, text: String) -> Result<InputReceipt, String> {
-        self.request("type_text", json!({"control":control,"text":text}))
+        self.call(|client, context| async move { client.type_text(context, control, text).await })
     }
     /// Ask the local user to release input for an existing control ID or slot shorthand. Highlights Interact and waits up to timeout_ms (default/max 30000), returning immediately when remote input becomes available. Timeout, revocation or occupant replacement ends the wait. Local ownership and permissions change only through the user's existing controls.
     pub fn request_control(
@@ -762,10 +913,9 @@ impl WindowClient {
         control: String,
         timeout_ms: Option<u32>,
     ) -> Result<String, String> {
-        self.request(
-            "request_control",
-            json!({"control":control,"timeout_ms":timeout_ms}),
-        )
+        self.call(|client, context| async move {
+            client.request_control(context, control, timeout_ms).await
+        })
     }
     /// Run 1–64 compact rows: ["p",keys,hold_ms?,gap_ms?] presses/releases; ["d",keys,gap_ms?] holds; ["u",keys,gap_ms?] releases; ["w",ms] waits; ["t",text] types. keys is one evdev number/XKB name or a list of up to 16; groups dispatch together. Omitted/null timings use key_hold_ms/key_interval_ms; typing_interval_ms paces text characters. Global timings are 0–1000ms, default 0. Use a nonzero hold for frame-polled games. Total planned duration ≤25s, text ≤4096 bytes. Balance downs/ups within the call and release before text. Interruption retires held remote input. Text requires native Wayland; keys also support XWayland. Returns completed progress; inspect application reactions separately.
     pub fn input(
@@ -776,10 +926,18 @@ impl WindowClient {
         key_interval_ms: Option<u32>,
         key_hold_ms: Option<u32>,
     ) -> Result<InputSequenceResult, String> {
-        self.request(
-            "input",
-            json!({"control":control,"actions":actions,"typing_interval_ms":typing_interval_ms,"key_interval_ms":key_interval_ms,"key_hold_ms":key_hold_ms}),
-        )
+        self.call(|client, context| async move {
+            client
+                .input(
+                    context,
+                    control,
+                    actions,
+                    typing_interval_ms,
+                    key_interval_ms,
+                    key_hold_ms,
+                )
+                .await
+        })
     }
     /// Scroll at logical x/y. With --wheel, deltas are notches; otherwise logical pixels in one completed finger gesture. Positive is right/down.
     pub fn scroll(
@@ -791,22 +949,35 @@ impl WindowClient {
         vertical: f64,
         wheel: bool,
     ) -> Result<InputReceipt, String> {
-        self.request("scroll", json!({"control":control,"x":x,"y":y,"horizontal":horizontal,"vertical":vertical,"wheel":wheel}))
+        self.call(|client, context| async move {
+            client
+                .scroll(
+                    context,
+                    control,
+                    crate::rpc::Scroll {
+                        x,
+                        y,
+                        horizontal,
+                        vertical,
+                        wheel,
+                    },
+                )
+                .await
+        })
     }
     /// Resize the application's logical viewport while preserving the desktop peek's geometry.
     pub fn resize(&self, control: String, width: u32, height: u32) -> Result<InputReceipt, String> {
-        self.request(
-            "resize",
-            json!({"control":control,"width":width,"height":height}),
+        self.call(
+            |client, context| async move { client.resize(context, control, width, height).await },
         )
     }
     /// Request app rendering density (for example 1.5). Omit factor to restore the output's scale. Requires resize permission; capture reports the actual scale.
     pub fn scale(&self, control: String, factor: Option<f64>) -> Result<InputReceipt, String> {
-        self.request("scale", json!({"control":control,"factor":factor}))
+        self.call(|client, context| async move { client.scale(context, control, factor).await })
     }
     /// Read a synchronized PNG of the controlled window and its contained popups.
     pub fn capture(&self, control: String) -> Result<Snapshot, String> {
-        self.request("capture", json!({"control":control}))
+        self.call(|client, context| async move { client.capture(context, control).await })
     }
     /// Capture a commit newer than an input receipt's sequence, with a 1..5000 ms timeout. Check pixels for the intended UI result.
     pub fn capture_after(
@@ -815,10 +986,11 @@ impl WindowClient {
         sequence: String,
         timeout_ms: u32,
     ) -> Result<Snapshot, String> {
-        self.request(
-            "capture_after",
-            json!({"control":control,"sequence":sequence,"timeout_ms":timeout_ms}),
-        )
+        self.call(|client, context| async move {
+            client
+                .capture_after(context, control, sequence, timeout_ms)
+                .await
+        })
     }
     /// Inspect a native window's accessibility tree with View permission. Query matches name/ID substrings, role matches exactly (both case-insensitive). max_nodes limits results (default 256, maximum 1024); max_depth limits traversal (default/maximum 24, root is 0).
     pub fn accessibility(
@@ -829,10 +1001,11 @@ impl WindowClient {
         query: Option<String>,
         role: Option<String>,
     ) -> Result<AccessibilitySnapshot, String> {
-        self.request(
-            "accessibility",
-            json!({"control":control,"max_nodes":max_nodes,"max_depth":max_depth,"query":query,"role":role}),
-        )
+        self.call(|client, context| async move {
+            client
+                .accessibility(context, control, max_nodes, max_depth, query, role)
+                .await
+        })
     }
     /// Filter windows by exact app ID, occupancy and enabled control policy.
     pub fn find(
@@ -843,28 +1016,45 @@ impl WindowClient {
         owner: Option<String>,
         launch_id: Option<String>,
     ) -> Result<WindowCatalogue, String> {
-        self.request(
-            "find",
-            json!({"app_id":app_id,"occupied":occupied,"controlled":controlled,"owner":owner,"launch_id":launch_id}),
-        )
+        self.call(|client, context| async move {
+            client
+                .find(context, app_id, occupied, controlled, owner, launch_id)
+                .await
+        })
     }
     /// List managed windows, including vacant persistent slots.
     pub fn list(&self) -> Result<WindowCatalogue, String> {
-        self.request("list", json!({}))
+        self.call(|client, context| async move { client.list(context).await })
     }
 
     /// Inspect a managed window by its session-local identity.
     pub fn get(&self, id: String) -> Result<WindowInfo, String> {
-        self.request("get", json!({"id": id}))
+        self.call(|client, context| async move { client.get(context, id).await })
     }
 
     /// Resolve a copied slot shorthand (w12) or short incarnation control ID to its window and current permissions.
     pub fn resolve(&self, key: String) -> Result<WindowInfo, String> {
-        self.request("resolve", json!({"key":key}))
+        self.call(|client, context| async move { client.resolve(context, key).await })
     }
 
     /// Wait up to 20 seconds for a newer inventory revision.
     pub fn wait(&self, after: u32, timeout_ms: u32) -> Result<WindowCatalogue, String> {
-        self.request("wait", json!({"after": after, "timeout_ms": timeout_ms}))
+        self.call(|client, context| async move { client.wait(context, after, timeout_ms).await })
     }
+}
+
+fn save_recording_file(path: &str, encoded: &str) -> Result<(), String> {
+    let path = std::path::Path::new(path);
+    let parent = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+    let bytes = STANDARD
+        .decode(encoded)
+        .map_err(|error| error.to_string())?;
+    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+    file.write_all(&bytes).map_err(|error| error.to_string())?;
+    file.persist_noclobber(path)
+        .map_err(|error| error.to_string())?;
+    Ok(())
 }

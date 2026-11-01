@@ -32,6 +32,7 @@ use weld_hoist_core::{
 use weld_hoist_protocol::{DestinationEnvelope, DestinationMessage};
 
 struct State {
+    recordings: HashMap<String, ActiveRecording>,
     grants: HashMap<ClientSurfaceId, Arc<GrantState>>,
     views: SourceViews,
     input: ViewInput,
@@ -40,6 +41,12 @@ struct State {
     accepted: Vec<Pending>,
     checkpoints: HashMap<ClientSurfaceId, VecDeque<(u64, Option<u64>)>>,
     sequence: u64,
+}
+
+struct ActiveRecording {
+    grant: Arc<GrantState>,
+    recorder: weld_recording::Recorder,
+    error: Option<String>,
 }
 
 struct Port(Rc<RefCell<State>>);
@@ -80,6 +87,18 @@ impl HoistSourcePort for Port {
                                         });
                                 if next.is_some() || !commit.mapped {
                                     *viewport = next;
+                                }
+                            }
+                            for active in state
+                                .recordings
+                                .values_mut()
+                                .filter(|active| active.grant.surface == event.surface)
+                            {
+                                if active.error.is_none()
+                                    && let Err(error) =
+                                        active.recorder.observe(&commit, Instant::now())
+                                {
+                                    active.error = Some(error.to_string());
                                 }
                             }
                             state.frames.insert(event.surface, commit);
@@ -187,12 +206,14 @@ struct Capturing {
 }
 
 enum Execution {
+    Recorded(weld_recording::Info),
     Effects,
     Capture(Box<dyn CaptureJob>, Snapshot),
     Wait,
 }
 
 struct Adapter {
+    recordings: crate::recording::Archive,
     batch: Option<sequence::Batch>,
     keyboard_queries: Vec<weld_client::ClientKeyboardQuery>,
     source: ClientSourceId,
@@ -218,6 +239,7 @@ pub fn registration(
 ) -> (ClientAdapterRegistration, RemoteControlClient) {
     let (sender, requests) = mpsc::sync_channel(64);
     let state = Rc::new(RefCell::new(State {
+        recordings: HashMap::new(),
         grants: HashMap::new(),
         views: SourceViews::new(SurfaceStreamMode::Composited),
         input: ViewInput::default(),
@@ -227,7 +249,9 @@ pub fn registration(
         checkpoints: HashMap::new(),
         sequence: 0,
     }));
+    let recordings = crate::recording::Archive::default();
     let adapter = Adapter {
+        recordings: recordings.clone(),
         batch: None,
         keyboard_queries: Vec::new(),
         source,
@@ -251,6 +275,7 @@ pub fn registration(
             PassthroughClientImporter,
         ),
         RemoteControlClient {
+            recordings,
             sender,
             grants: Arc::new(Mutex::new(ControlRegistry::default())),
             wake: Arc::new(wake),
@@ -259,6 +284,40 @@ pub fn registration(
 }
 
 impl Adapter {
+    fn progress_recordings(&mut self) {
+        let now = Instant::now();
+        self.recordings.cleanup(now);
+        let mut state = self.state.borrow_mut();
+        let ids: Vec<_> = state.recordings.keys().cloned().collect();
+        for id in ids {
+            if !self.recordings.active(&id) {
+                state.recordings.remove(&id);
+                continue;
+            }
+            let Some(active) = state.recordings.get_mut(&id) else {
+                continue;
+            };
+            let result = if let Some(error) = active.error.take() {
+                Err(anyhow::anyhow!(error))
+            } else {
+                active.recorder.tick(now)
+            };
+            match result {
+                Ok(true) => {
+                    if let Some(active) = state.recordings.remove(&id) {
+                        let clip = active.recorder.finish();
+                        self.recordings.update(clip.info.clone(), Some(clip));
+                    }
+                }
+                Ok(false) => self.recordings.update(active.recorder.info(), None),
+                Err(error) => {
+                    self.recordings.fail(&id, error.to_string());
+                    state.recordings.remove(&id);
+                }
+            }
+        }
+    }
+
     fn synchronize_input_ownership(&mut self) {
         let mut state = self.state.borrow_mut();
         for (surface, grant) in &state.grants {
@@ -390,6 +449,43 @@ impl Adapter {
             })),
         };
         match pending.operation.clone() {
+            Operation::Record(options) => {
+                options.validate()?;
+                if let Some(sequence) = &options.after_sequence {
+                    let sequence = sequence.parse::<u64>().context("invalid input sequence")?;
+                    let (_, revision) = state
+                        .checkpoints
+                        .get(&surface)
+                        .and_then(|points| points.iter().find(|(id, _)| *id == sequence))
+                        .context("input checkpoint expired or belongs to another window")?;
+                    if revision.is_some_and(|revision| frame.revision.raw() <= revision) {
+                        return Ok(Execution::Wait);
+                    }
+                }
+                self.recordings.ensure_capacity()?;
+                let backend = self.capture.recording_backend(options.codec.into())?;
+                let id = uuid::Uuid::new_v4().simple().to_string();
+                let recorder = weld_recording::Recorder::new(
+                    id.clone(),
+                    surface,
+                    frame.clone(),
+                    options,
+                    backend,
+                    Instant::now(),
+                )?;
+                let info = recorder.info();
+                self.recordings
+                    .insert(pending.grant.clone(), info.clone())?;
+                state.recordings.insert(
+                    id,
+                    ActiveRecording {
+                        grant: pending.grant.clone(),
+                        recorder,
+                        error: None,
+                    },
+                );
+                return Ok(Execution::Recorded(info));
+            }
             Operation::Sequence { .. } => {
                 anyhow::bail!("input sequence requires scheduled execution")
             }
@@ -724,6 +820,13 @@ impl ClientAdapter for Adapter {
         Some(self.upstream)
     }
     fn next_deadline(&self) -> Option<Instant> {
+        let recording_deadline = self
+            .state
+            .borrow()
+            .recordings
+            .values()
+            .filter_map(|active| active.recorder.next_deadline())
+            .min();
         self.capturing
             .iter()
             .filter(|capture| !capture.replied)
@@ -731,6 +834,8 @@ impl ClientAdapter for Adapter {
             .chain(self.waiting.iter().map(|pending| pending.deadline))
             .chain(self.relay.next_deadline())
             .chain(self.batch.as_ref().map(sequence::Batch::deadline))
+            .chain(recording_deadline)
+            .chain(self.recordings.next_deadline())
             .min()
     }
     fn drain_events(&mut self, events: &mut ClientEventQueue) {
@@ -792,6 +897,9 @@ impl ClientAdapter for Adapter {
                     let _ = pending.reply.send(Err("window capture busy".into()));
                 }
                 Command::Operation(pending) => match self.execute(&pending) {
+                    Ok(Execution::Recorded(info)) => {
+                        let _ = pending.reply.send(Ok(Reply::Recording(info)));
+                    }
                     Ok(Execution::Capture(job, snapshot)) => self.capturing.push(Capturing {
                         pending,
                         job,
@@ -814,8 +922,12 @@ impl ClientAdapter for Adapter {
         }
         self.progress_sequence(Instant::now());
         self.relay.drain_events(events);
+        self.progress_recordings();
         for pending in std::mem::take(&mut self.waiting) {
             match self.execute(&pending) {
+                Ok(Execution::Recorded(info)) => {
+                    let _ = pending.reply.send(Ok(Reply::Recording(info)));
+                }
                 Ok(Execution::Capture(job, snapshot)) => self.capturing.push(Capturing {
                     pending,
                     job,

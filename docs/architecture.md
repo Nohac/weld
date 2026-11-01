@@ -54,6 +54,17 @@ Weld is a workspace of reusable layers and one standard distribution:
   local input is released. RPC timeout cancels the request and wakes policy cleanup;
   dropping a pending window request completes its waiter. The UI consumes a
   `ControlRequested` marker for the Interact-button attention state.
+- `weld-recording` owns bounded encoded clips and frame/contact-sheet/video
+  inspection. Its in-process sink consumes the existing `EncodedSourcePort`,
+  retaining packet boundaries and original observation timestamps. Cropped
+  composed views enter the ordinary streaming encoder backend. Inspection and
+  remuxing run off the native host thread. `weld-remote-control` owns the recording
+  archive, occupant-scoped View authorization, idle leases and explicit release;
+  its host deadlines retire expired or revoked recordings. Completion waits use
+  notifications. `weld-control` exposes the same operations through CLI/MCP and
+  public JSON-RPC, over a generated tarpc Rust contract on the private Unix socket.
+  Public adapters serialize image content for their clients; the native service
+  retains its same-user credential checks and bounded request/response framing.
 - `weld-remote-control-ui` mounts capability controls into SSD's `FrameHeader`
   using child relationships. The distribution publishes the active grant's
   permissions and handles UI requests; the native control owner enforces them.

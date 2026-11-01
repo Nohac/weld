@@ -75,7 +75,10 @@ impl ServerHandler for WindowMcp {
         let client = self.client.clone();
         let capture = matches!(
             request.name.as_ref(),
-            "window_capture" | "window_capture_after"
+            "window_capture"
+                | "window_capture_after"
+                | "window_recording_frame"
+                | "window_recording_sheet"
         );
         let result = tokio::task::spawn_blocking(move || {
             let _permit = permit;
@@ -124,6 +127,25 @@ pub fn run(socket: PathBuf) -> Result<()> {
         .map(serde_json::from_value)
         .collect::<Result<Vec<Tool>, _>>()?;
     for tool in &mut tools {
+        let recording_schema = match tool.name.as_ref() {
+            "window_record" => Some(parameter_schema::<
+                weld_remote_control::weld_recording::Options,
+            >()?),
+            "window_recording_frame" => Some(parameter_schema::<
+                weld_remote_control::weld_recording::FrameOptions,
+            >()?),
+            "window_recording_sheet" => Some(parameter_schema::<
+                weld_remote_control::weld_recording::SheetOptions,
+            >()?),
+            _ => None,
+        };
+        if let Some(schema) = recording_schema {
+            Arc::make_mut(&mut tool.input_schema)
+                .get_mut("properties")
+                .and_then(serde_json::Value::as_object_mut)
+                .context("recording tool properties absent")?
+                .insert("options".into(), schema);
+        }
         if tool.name == "window_input" {
             // The upstream macro emits primitive parameter types; publish the
             // action union from the same Rust type used by CLI/RPC dispatch.
@@ -147,6 +169,7 @@ pub fn run(socket: PathBuf) -> Result<()> {
                 | "window_find"
                 | "window_resolve"
                 | "window_accessibility"
+                | "window_recording_info"
         );
         tool.annotations = Some(ToolAnnotations::new().read_only(read_only));
     }
@@ -164,4 +187,13 @@ pub fn run(socket: PathBuf) -> Result<()> {
         service.waiting().await?;
         Ok(())
     })
+}
+
+fn parameter_schema<T: schemars::JsonSchema>() -> Result<serde_json::Value> {
+    Ok(serde_json::to_value(
+        schemars::generate::SchemaSettings::default()
+            .with(|settings| settings.inline_subschemas = true)
+            .into_generator()
+            .into_root_schema_for::<T>(),
+    )?)
 }
