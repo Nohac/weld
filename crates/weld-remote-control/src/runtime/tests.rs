@@ -762,6 +762,20 @@ fn drive_sequence(
     adapter: &mut dyn ClientAdapter,
     response: mpsc::Receiver<Result<Reply, String>>,
 ) -> (crate::InputSequenceResult, Vec<(Instant, ClientInputEvent)>) {
+    let (result, inputs) = drive_input(adapter, response);
+    (
+        result,
+        inputs
+            .into_iter()
+            .filter(|(_, input)| matches!(input.event, InputEventKind::Keyboard { .. }))
+            .collect(),
+    )
+}
+
+fn drive_input(
+    adapter: &mut dyn ClientAdapter,
+    response: mpsc::Receiver<Result<Reply, String>>,
+) -> (crate::InputSequenceResult, Vec<(Instant, ClientInputEvent)>) {
     let deadline = Instant::now() + Duration::from_secs(2);
     let mut inputs = Vec::new();
     let mut events = ClientEventQueue::default();
@@ -771,9 +785,7 @@ fn drive_sequence(
         adapter.drain_effects(&mut effects);
         let now = Instant::now();
         for effect in effects {
-            if let ClientAdapterEffect::Input(input) = effect
-                && matches!(input.event, InputEventKind::Keyboard { .. })
-            {
+            if let ClientAdapterEffect::Input(input) = effect {
                 inputs.push((now, input));
             }
         }
@@ -786,6 +798,93 @@ fn drive_sequence(
         assert!(now < deadline, "sequence did not complete");
         std::thread::sleep(Duration::from_millis(1));
     }
+}
+
+#[test]
+fn absolute_offsets_and_smooth_drag_reach_native_input_and_report_progress() {
+    let mut fixture = SequenceFixture::new();
+    let response = pending(&fixture.client, &fixture.grant.state, Operation::Sequence {
+        actions: serde_json::from_str(r#"[["m",2,3],["at",20],["b",272,true],["m",22,13,60],["b",272,false],["at",120],["p",57,5,0]]"#).expect("actions"),
+        typing_interval_ms: 0, key_interval_ms: 0, key_hold_ms: 0,
+    });
+    let (result, inputs) = drive_input(&mut *fixture.adapter, response);
+    assert!(result.complete, "{:?}", result.error);
+    assert_eq!(result.completed_actions, 7);
+    assert_eq!(result.action_times_ms.len(), 7);
+    assert!(result.action_times_ms[1] >= 20);
+    assert!(result.action_times_ms[5] >= 120);
+    let positions: Vec<_> = inputs
+        .iter()
+        .filter_map(|(_, input)| match input.event {
+            InputEventKind::PointerMotion { position, .. } => Some((position.x, position.y)),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        positions.len() >= 4,
+        "smooth motion has intermediate samples"
+    );
+    assert_eq!(positions.first(), Some(&(2., 3.)));
+    assert_eq!(positions.last(), Some(&(22., 13.)));
+    assert!(
+        positions
+            .windows(2)
+            .all(|pair| pair[0].0 <= pair[1].0 && pair[0].1 <= pair[1].1)
+    );
+}
+
+#[test]
+fn timed_out_drag_releases_pointer_button_and_invalid_tail_has_no_effects() {
+    let mut fixture = SequenceFixture::new();
+    let response = pending_until(
+        &fixture.client,
+        &fixture.grant.state,
+        Operation::Sequence {
+            actions: serde_json::from_str(
+                r#"[["m",2,3],["b",272,true],["w",1000],["b",272,false]]"#,
+            )
+            .expect("actions"),
+            typing_interval_ms: 0,
+            key_interval_ms: 0,
+            key_hold_ms: 0,
+        },
+        Instant::now() + Duration::from_millis(40),
+    );
+    let (result, inputs) = drive_input(&mut *fixture.adapter, response);
+    assert!(!result.complete);
+    let buttons: Vec<_> = inputs
+        .iter()
+        .filter_map(|(_, input)| match input.event {
+            InputEventKind::PointerButton { state, .. } => Some(state),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        buttons.len(),
+        2,
+        "down and cleanup release both reach the client"
+    );
+    assert_ne!(buttons[0], buttons[1]);
+    let response = pending(
+        &fixture.client,
+        &fixture.grant.state,
+        Operation::Sequence {
+            actions: serde_json::from_str(r#"[["p",57],["m",9000,3]]"#).expect("actions"),
+            typing_interval_ms: 0,
+            key_interval_ms: 0,
+            key_hold_ms: 0,
+        },
+    );
+    fixture
+        .adapter
+        .drain_events(&mut ClientEventQueue::default());
+    let mut effects = Vec::new();
+    fixture.adapter.drain_effects(&mut effects);
+    assert!(response.try_recv().expect("reply").is_err());
+    assert!(
+        effects.is_empty(),
+        "whole-plan bounds validation precedes even the first key"
+    );
 }
 
 #[test]

@@ -310,7 +310,7 @@ def check_windows(ctl, control, host, run, display, accessibility_app, text_app,
             list_tool = next(tool for tool in tools if tool["name"] == "window_list")
             input_tool = next(tool for tool in tools if tool["name"] == "window_input")
             action_schema = input_tool["inputSchema"]["properties"]["actions"]["items"]
-            assert len(action_schema["anyOf"]) == 5, action_schema
+            assert {row["prefixItems"][0]["enum"][0] for row in action_schema["anyOf"]} == {"t", "p", "d", "u", "w", "at", "m", "b"}, action_schema
             assert all(row["type"] == "array" for row in action_schema["anyOf"]), action_schema
             assert "all_windows" in list_tool["inputSchema"]["properties"], list_tool
             assert {tool["name"] for tool in tools} == {
@@ -324,7 +324,7 @@ def check_windows(ctl, control, host, run, display, accessibility_app, text_app,
                 "window_request_control",
                 "window_accessibility",
                 "window_peek",
-                "window_record", "window_recording_info", "window_recording_frame",
+                "window_record", "window_record_input", "window_recording_info", "window_recording_frame",
                 "window_recording_sheet", "window_recording_export", "window_recording_release",
             }
             result = request(3, "tools/call", {"name": "window_get", "arguments": {"id": window["id"]}})

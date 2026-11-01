@@ -93,6 +93,22 @@ def main():
             else:
                 raise AssertionError("released recording still readable")
 
+            timeline = {"actions": [["at", 100], ["p", 57, 30, 0], ["m", 5, 5],
+                                    ["b", 272, True], ["m", 100, 60, 100], ["b", 272, False],
+                                    ["at", 500], ["p", 57, 20, 0]]}
+            combined = json.loads(subprocess.check_output([*ctl, "window", "record-input", "--control", control,
+                                   "--options", json.dumps({**options, "duration_ms": 900}),
+                                   "--input", json.dumps(timeline), "--json"], text=True, timeout=30))
+            assert combined["recording"]["status"] == "complete", combined
+            assert combined["input"]["complete"], combined
+            assert combined["input"]["completed_actions"] == 8, combined
+            times = combined["input"]["action_times_ms"]
+            assert times[0] >= 100 and times[6] >= 500 and times[-1] < 900, combined
+            assert times[4] - times[3] >= 100, combined
+            (run / "record-input.json").write_text(json.dumps(combined, indent=2))
+            rpc("recording_release", recording=combined["recording"]["id"])
+            print("PASS single-call recording, absolute offsets, grouped keyboard input and smooth pointer drag", flush=True)
+
             pending = rpc("record", control=control, options={"duration_ms": 5000}, wait=False)
             rpc("input", control=control, actions=[["p", "a"]])
             rpc("permissions", id=target["id"], view=False, keyboard=True, pointer=True, resize=True)
@@ -124,7 +140,12 @@ def main():
                 tools = request(2, "tools/list", {})["tools"]
                 schema = next(tool for tool in tools if tool["name"] == "window_record")["inputSchema"]
                 assert "duration_ms" in schema["properties"]["options"]["properties"]
-                info = request(3, "tools/call", {"name": "window_record", "arguments": {"control": control, "options": {**options, "codec": "h264"}}})["structuredContent"]
+                schema = next(tool for tool in tools if tool["name"] == "window_record_input")["inputSchema"]
+                assert "actions" in schema["properties"]["input"]["properties"]
+                combined = request(3, "tools/call", {"name": "window_record_input", "arguments": {"control": control, "options": {**options, "codec": "h264"}, "input": {"actions": [["at", 100], ["p", "a", 30, 0]]}}})["structuredContent"]
+                assert combined["input"]["complete"], combined
+                assert combined["input"]["action_times_ms"][0] >= 100, combined
+                info = combined["recording"]
                 assert info["status"] == "complete", info
                 image = request(4, "tools/call", {"name": "window_recording_sheet", "arguments": {"recording": info["id"], "options": sheet_options}})
                 assert any(item["type"] == "image" and item["mimeType"] == "image/png" for item in image["content"])

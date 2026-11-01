@@ -86,6 +86,11 @@ pub struct Recorder {
 }
 
 impl Recorder {
+    /// Monotonic origin shared with a host-scheduled input sequence.
+    pub fn started(&self) -> Instant {
+        self.started
+    }
+
     pub fn new(
         id: String,
         surface: ClientSurfaceId,

@@ -24,8 +24,8 @@ use weld_remote_control::weld_recording::{
     SheetOptions, Video as RecordingVideo,
 };
 use weld_remote_control::{
-    Capabilities, InputAction, InputReceipt, InputSequenceResult, Operation, RemoteControlClient,
-    Reply, Snapshot, Viewport,
+    Capabilities, InputAction, InputReceipt, InputSequenceOptions, InputSequenceResult, Operation,
+    RecordedInput, RemoteControlClient, Reply, Snapshot, Viewport,
 };
 
 /// Logical compositor coordinates.
@@ -167,6 +167,32 @@ impl Default for WindowService {
 }
 
 impl WindowService {
+    /// Record and execute a validated input timeline on the recording's monotonic clock.
+    pub fn record_input(
+        &self,
+        control: String,
+        options: RecordingOptions,
+        input: InputSequenceOptions,
+    ) -> Result<RecordedInput, String> {
+        let Reply::RecordedInput(mut result) =
+            self.operate(control, Operation::RecordInput { options, input })?
+        else {
+            return Err("recorded input returned an unexpected result".into());
+        };
+        match self.controller()?.wait_recording(
+            &result.recording.id,
+            Duration::from_millis(u64::from(result.recording.duration_ms) + 6000),
+        ) {
+            Ok(info) => result.recording = info,
+            Err(error) => {
+                result.recording.status = weld_remote_control::weld_recording::Status::Failed;
+                result.recording.error = Some(error.to_string());
+            }
+        }
+        result.recording.frames.clear();
+        Ok(result)
+    }
+
     fn controller(&self) -> Result<RemoteControlClient, String> {
         self.controller
             .lock()
@@ -237,18 +263,20 @@ impl WindowService {
     fn send_input(&self, control: String, operation: Operation) -> Result<InputReceipt, String> {
         match self.operate(control, operation)? {
             Reply::Input(receipt) => Ok(receipt),
-            Reply::Snapshot(_) | Reply::Sequence(_) | Reply::Recording(_) => {
-                Err("input returned an unexpected result".into())
-            }
+            Reply::Snapshot(_)
+            | Reply::Sequence(_)
+            | Reply::Recording(_)
+            | Reply::RecordedInput(_) => Err("input returned an unexpected result".into()),
         }
     }
 
     fn snapshot(&self, control: String, operation: Operation) -> Result<Snapshot, String> {
         match self.operate(control, operation)? {
             Reply::Snapshot(snapshot) => Ok(snapshot),
-            Reply::Input(_) | Reply::Sequence(_) | Reply::Recording(_) => {
-                Err("capture returned no pixels".into())
-            }
+            Reply::Input(_)
+            | Reply::Sequence(_)
+            | Reply::Recording(_)
+            | Reply::RecordedInput(_) => Err("capture returned no pixels".into()),
         }
     }
 
@@ -763,6 +791,18 @@ impl WindowClient {
 #[server_less::mcp(namespace = "window")]
 #[server_less::jsonrpc]
 impl WindowClient {
+    /// Record and run input in one call. Input actions share recording time zero: ["at",ms] waits for an offset, ["m",x,y,duration_ms?] moves (smoothly when duration > 0), ["b",button,pressed] changes a pointer button; existing p/d/u/t/w rows and timing defaults also work. The entire plan is validated first. Returns recording metadata and acknowledged input progress; inspect pixels separately with recording_sheet/frame.
+    pub fn record_input(
+        &self,
+        control: String,
+        options: RecordingOptions,
+        input: InputSequenceOptions,
+    ) -> Result<RecordedInput, String> {
+        self.call(|client, context| async move {
+            client.record_input(context, control, options, input).await
+        })
+    }
+
     /// Record all observed composed frames using the streaming encoder. options: duration_ms (1..10000), optional region {x,y,width,height}, codec av1 (default) or h264, and after_sequence. wait defaults true; false returns immediately so input can run during recording. Idle lease is two minutes.
     pub fn record(
         &self,
@@ -917,7 +957,7 @@ impl WindowClient {
             client.request_control(context, control, timeout_ms).await
         })
     }
-    /// Run 1–64 compact rows: ["p",keys,hold_ms?,gap_ms?] presses/releases; ["d",keys,gap_ms?] holds; ["u",keys,gap_ms?] releases; ["w",ms] waits; ["t",text] types. keys is one evdev number/XKB name or a list of up to 16; groups dispatch together. Omitted/null timings use key_hold_ms/key_interval_ms; typing_interval_ms paces text characters. Global timings are 0–1000ms, default 0. Use a nonzero hold for frame-polled games. Total planned duration ≤25s, text ≤4096 bytes. Balance downs/ups within the call and release before text. Interruption retires held remote input. Text requires native Wayland; keys also support XWayland. Returns completed progress; inspect application reactions separately.
+    /// Run 1–64 compact rows: ["p",keys,hold_ms?,gap_ms?] presses/releases; ["d",keys,gap_ms?] holds; ["u",keys,gap_ms?] releases; ["w",ms] waits; ["t",text] types; ["at",ms] waits until an offset from start; ["m",x,y,duration_ms?] moves the pointer; ["b",button,pressed] changes a pointer button. Establish a position with an immediate move before smooth movement or buttons. keys is one evdev number/XKB name or a list of up to 16; groups dispatch together. Omitted/null key timings use key_hold_ms/key_interval_ms; typing_interval_ms paces text characters. Global timings are 0–1000ms, default 0. Use a nonzero hold for frame-polled games. Total planned duration ≤25s, text ≤4096 bytes. Balance key/button downs and ups within the call; release keys before text. Interruption retires held input. Text requires native Wayland; keys also support XWayland. Returns progress and actual row completion offsets; inspect application reactions separately.
     pub fn input(
         &self,
         control: String,

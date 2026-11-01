@@ -6,7 +6,9 @@ mod runtime;
 mod sequence;
 pub use permissions::{Capabilities, Capability};
 pub use runtime::registration;
-pub use sequence::{InputAction, InputKey, InputSequenceResult, KeyState};
+pub use sequence::{
+    InputAction, InputKey, InputSequenceOptions, InputSequenceResult, KeyState, RecordedInput,
+};
 pub use weld_recording;
 
 use anyhow::{Context, Result, ensure};
@@ -153,6 +155,10 @@ pub enum Operation {
     },
     Capture,
     Record(weld_recording::Options),
+    RecordInput {
+        options: weld_recording::Options,
+        input: InputSequenceOptions,
+    },
     CaptureAfter {
         sequence: String,
         timeout_ms: u32,
@@ -169,6 +175,7 @@ impl Operation {
 }
 
 pub enum Reply {
+    RecordedInput(RecordedInput),
     Recording(weld_recording::Info),
     Input(InputReceipt),
     Sequence(InputSequenceResult),
@@ -410,12 +417,12 @@ impl RemoteControlClient {
             "local interaction owns this window"
         );
         ensure!(
-            grant.capabilities.allows(operation.capability()),
+            operation.allowed_by(grant.capabilities),
             "window capability is disabled"
         );
         let (reply, response) = mpsc::sync_channel(1);
         let timeout = match &operation {
-            Operation::Sequence { .. } => Duration::from_secs(30),
+            Operation::Sequence { .. } | Operation::RecordInput { .. } => Duration::from_secs(30),
             Operation::CaptureAfter { timeout_ms, .. } => {
                 ensure!(
                     (1..=5000).contains(timeout_ms),
@@ -440,7 +447,8 @@ impl RemoteControlClient {
             .context("remote control operation completion unknown; do not retry automatically")?
             .map_err(anyhow::Error::msg)?;
         ensure!(
-            matches!(&result, Reply::Sequence(_)) || grant.permit.is_authorized(),
+            matches!(&result, Reply::Sequence(_) | Reply::RecordedInput(_))
+                || grant.permit.is_authorized(),
             "window control revoked before delivery"
         );
         Ok(result)

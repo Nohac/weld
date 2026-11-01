@@ -368,10 +368,7 @@ impl Adapter {
             "local interaction interrupted remote input"
         );
         ensure!(
-            pending
-                .grant
-                .capabilities
-                .allows(pending.operation.capability()),
+            pending.operation.allowed_by(pending.grant.capabilities),
             "window capability is disabled"
         );
         ensure!(
@@ -486,7 +483,7 @@ impl Adapter {
                 );
                 return Ok(Execution::Recorded(info));
             }
-            Operation::Sequence { .. } => {
+            Operation::Sequence { .. } | Operation::RecordInput { .. } => {
                 anyhow::bail!("input sequence requires scheduled execution")
             }
             Operation::Pointer { x, y } => {
@@ -885,7 +882,9 @@ impl ClientAdapter for Adapter {
                 Command::Operation(pending)
                     if matches!(
                         pending.operation,
-                        Operation::Sequence { .. } | Operation::TypeText { .. }
+                        Operation::Sequence { .. }
+                            | Operation::TypeText { .. }
+                            | Operation::RecordInput { .. }
                     ) =>
                 {
                     self.start_sequence(pending, Instant::now());

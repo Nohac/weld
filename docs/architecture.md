@@ -65,6 +65,11 @@ Weld is a workspace of reusable layers and one standard distribution:
   public JSON-RPC, over a generated tarpc Rust contract on the private Unix socket.
   Public adapters serialize image content for their clients; the native service
   retains its same-user credential checks and bounded request/response framing.
+  Combined recording/input admission lives in the native remote-control scheduler:
+  it validates the plan, establishes the recorder's monotonic origin, then schedules
+  absolute offsets and relative input timing on that clock. Smooth pointer motion
+  samples current progress after stalls. Recording deadlines and input ownership
+  changes retire held keys/buttons; receipts include acknowledged row offsets.
 - `weld-remote-control-ui` mounts capability controls into SSD's `FrameHeader`
   using child relationships. The distribution publishes the active grant's
   permissions and handles UI requests; the native control owner enforces them.

@@ -128,7 +128,7 @@ pub fn run(socket: PathBuf) -> Result<()> {
         .collect::<Result<Vec<Tool>, _>>()?;
     for tool in &mut tools {
         let recording_schema = match tool.name.as_ref() {
-            "window_record" => Some(parameter_schema::<
+            "window_record" | "window_record_input" => Some(parameter_schema::<
                 weld_remote_control::weld_recording::Options,
             >()?),
             "window_recording_frame" => Some(parameter_schema::<
@@ -145,6 +145,16 @@ pub fn run(socket: PathBuf) -> Result<()> {
                 .and_then(serde_json::Value::as_object_mut)
                 .context("recording tool properties absent")?
                 .insert("options".into(), schema);
+        }
+        if tool.name == "window_record_input" {
+            Arc::make_mut(&mut tool.input_schema)
+                .get_mut("properties")
+                .and_then(serde_json::Value::as_object_mut)
+                .context("recorded input tool properties absent")?
+                .insert(
+                    "input".into(),
+                    parameter_schema::<weld_remote_control::InputSequenceOptions>()?,
+                );
         }
         if tool.name == "window_input" {
             // The upstream macro emits primitive parameter types; publish the

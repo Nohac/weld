@@ -163,6 +163,9 @@ weldctl --session weld-0 window input --params-json '{"control":"w6","actions":[
 | `["u", keys, gap_ms?]` | Release keys in the supplied order. |
 | `["w", milliseconds]` | Pause without sending input. |
 | `["t", "text"]` | Type literal Unicode text. |
+| `["at", milliseconds]` | Wait until an offset from sequence start, or recording start in `record-input`. |
+| `["m", x, y, duration_ms?]` | Move the pointer; zero/omitted duration jumps directly, positive duration interpolates from the previous remote position. |
+| `["b", button, pressed]` | Press/release a Linux pointer button (272 left, 273 right, 274 middle). |
 
 `keys` is an evdev number, an XKB name, or a list of up to 16 of either.
 Grouped transitions are queued in one native batch with one timestamp.
@@ -190,6 +193,17 @@ preserving spacing. `type-text` uses this executor at zero interval.
 Explicit downs and ups must balance within a sequence. Duplicate downs,
 unmatched ups, presses of already-held keys and text while keys are held are
 rejected before input is sent, including aliases that resolve to the same key.
+Pointer buttons also require balanced down/up pairs. Start with an immediate
+`m` row to establish a position before a smooth move or button event. All pointer
+targets are validated against the full application's logical viewport before
+any action runs. Smooth motion samples at most every eight milliseconds and
+skips obsolete intermediate positions after a host stall. Pointer-only plans
+require Pointer permission; keyboard rows require Keyboard permission.
+
+Absolute offsets must follow the planned end of preceding actions. At runtime,
+late actions remain ordered; holds and relative waits retain their requested
+duration. `action_times_ms` reports actual acknowledged completion offsets for
+each completed row, including waits, so callers can compare input with pixels.
 
 The response reports `complete`, `completed_actions`, `typed_characters`, the last
 `receipt`, and an optional `error`. Counts describe the prefix acknowledged by the
@@ -397,6 +411,30 @@ immediately so other input calls can execute during recording. Completion waits
 are notification-driven. Status queries default to summary metadata; request
 `include_frames:true` for the full observed timestamp/revision timeline.
 
+### Recording with input
+
+`window_record_input` / `weldctl window record-input` admits a recording and
+input plan together. Key-name resolution, permission checks, button/key balance,
+viewport bounds and the planned duration are validated before recording or input
+begins. Recording admission establishes the shared monotonic time zero, including
+when `after_sequence` waits for a newer frame. The call waits for input and recording
+completion and returns `{recording, input}`. The recording ID works with the same
+frame, sheet, export and release tools.
+
+```sh
+weldctl window record-input --control w12 \
+  --options '{"duration_ms":1000}' \
+  --input '{"actions":[["m",20,20],["at",100],["b",272,true],["m",200,100,300],["b",272,false],["at",700],["p","Return",40,0]]}' --json
+```
+
+`input` also accepts `typing_interval_ms`, `key_interval_ms` and `key_hold_ms`.
+The plan must end before the recording duration; leave a tail for application
+rendering. Input stops at that deadline if host/app delivery ran late. Local
+takeover, revocation, replacement, recording failure or release stops remaining
+input and retires held keys/buttons. Partial input progress remains explicit;
+inspect it before retrying. The recording contains application surfaces and
+contained popups; cursor imagery is separate from those pixels.
+
 Recording options accept `region:{x,y,width,height}` in original window-local
 logical coordinates, `codec:"av1"|"h264"`, and `after_sequence` to start with
 a commit newer than an existing input checkpoint. Checkpoint waits use the
@@ -520,17 +558,11 @@ execution, bounded text/value inspection with sensitive-field handling, and
 broader window association remain follow-ups. Mixed-version capability diagnostics
 would make method/field mismatches during upgrades easier to identify.
 Launch-bound window readiness, process filters, structured ownership refusals,
-general ownership-change subscriptions, and mixed pointer/keyboard batches remain
+general ownership-change subscriptions remain
 follow-ups. `request-control` already provides a bounded wait for local-to-remote
 input handoff, with immediate completion when access becomes available.
 The 2026-10-14 Draftship validation motivates these additions; the current frame
 checkpoint supplies a bounded newer-frame observation for screenshot-based tests.
-
-Timed scenarios should coordinate recording and the existing input scheduler
-on one monotonic timeline, with actions at offsets from recording start and
-requested/actual dispatch times in the result. Smooth pointer movement belongs
-in the input scheduler. Recording itself owns observation and encoding; scenario
-orchestration is a subsequent addition.
 
 ## Validation
 

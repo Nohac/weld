@@ -29,6 +29,21 @@ pub enum Wait {
     #[serde(rename = "w")]
     Tag,
 }
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub enum At {
+    #[serde(rename = "at")]
+    Tag,
+}
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub enum Move {
+    #[serde(rename = "m")]
+    Tag,
+}
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub enum Button {
+    #[serde(rename = "b")]
+    Tag,
+}
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(untagged)]
@@ -79,6 +94,13 @@ pub enum Action {
     Up(Up, Keys, #[serde(default)] Option<u32>),
     /// ["w", milliseconds]
     Wait(Wait, u32),
+    /// ["at", milliseconds_from_start]
+    At(At, u32),
+    /// ["m", x, y, duration_ms?]
+    #[schemars(extend("minItems" = 3))]
+    Move(Move, f64, f64, #[serde(default)] Option<u32>),
+    /// ["b", linux_button, pressed]
+    Button(Button, u32, bool),
 }
 
 impl From<Action> for InputAction {
@@ -104,6 +126,13 @@ impl From<Action> for InputAction {
                 hold_ms: None,
             },
             Action::Wait(_, wait_ms) => Self::Wait { wait_ms },
+            Action::At(_, at_ms) => Self::At { at_ms },
+            Action::Move(_, x, y, duration_ms) => Self::Move {
+                x,
+                y,
+                duration_ms: duration_ms.unwrap_or(0),
+            },
+            Action::Button(_, button, pressed) => Self::Button { button, pressed },
         }
     }
 }
@@ -131,6 +160,11 @@ impl From<InputAction> for Action {
                 ..
             } => Self::Up(Up::Tag, keys.into(), delay_ms),
             InputAction::Wait { wait_ms } => Self::Wait(Wait::Tag, wait_ms),
+            InputAction::At { at_ms } => Self::At(At::Tag, at_ms),
+            InputAction::Move { x, y, duration_ms } => {
+                Self::Move(Move::Tag, x, y, Some(duration_ms))
+            }
+            InputAction::Button { button, pressed } => Self::Button(Button::Tag, button, pressed),
         }
     }
 }

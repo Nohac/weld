@@ -1,6 +1,6 @@
 //! Immutable permissions belong to one revocable control handle.
 
-use crate::Operation;
+use crate::{InputAction, Operation};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -50,18 +50,27 @@ impl Capabilities {
 }
 
 impl Operation {
-    pub(crate) const fn capability(&self) -> Capability {
-        match self {
+    pub(crate) fn allowed_by(&self, capabilities: Capabilities) -> bool {
+        let actions_allowed = |actions: &[InputAction]| {
+            actions.iter().all(|action| match action {
+                InputAction::Text(_) | InputAction::Keys { .. } => capabilities.keyboard,
+                InputAction::Move { .. } | InputAction::Button { .. } => capabilities.pointer,
+                InputAction::Wait { .. } | InputAction::At { .. } => true,
+            })
+        };
+        let capability = match self {
+            Self::Sequence { actions, .. } => return actions_allowed(actions),
+            Self::RecordInput { input, .. } => {
+                return capabilities.view && actions_allowed(&input.actions);
+            }
             Self::Capture | Self::CaptureAfter { .. } | Self::Record(_) => Capability::View,
-            Self::Keys { .. }
-            | Self::Chord { .. }
-            | Self::TypeText { .. }
-            | Self::Sequence { .. } => Capability::Keyboard,
+            Self::Keys { .. } | Self::Chord { .. } | Self::TypeText { .. } => Capability::Keyboard,
             Self::Pointer { .. }
             | Self::Click { .. }
             | Self::Button { .. }
             | Self::Scroll { .. } => Capability::Pointer,
             Self::Resize { .. } | Self::Scale { .. } => Capability::Resize,
-        }
+        };
+        capabilities.allows(capability)
     }
 }

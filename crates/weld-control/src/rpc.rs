@@ -28,13 +28,18 @@ use tokio_util::{
 use weld_access::AccessAuthority;
 use weld_accessibility::Snapshot as AccessibilitySnapshot;
 use weld_remote_control::{
-    InputAction, InputReceipt, InputSequenceResult, Snapshot,
+    InputAction, InputReceipt, InputSequenceOptions, InputSequenceResult, RecordedInput, Snapshot,
     weld_recording::{FrameOptions, Image, Info, Options, SheetOptions, Video},
 };
 
 /// Rust client and server are generated together from this contract.
 #[tarpc::service]
 pub trait WeldRpc {
+    async fn record_input(
+        control: String,
+        options: Options,
+        input: InputSequenceOptions,
+    ) -> Result<RecordedInput, String>;
     async fn native(request: Request) -> Response;
     async fn record(control: String, options: Options, wait: Option<bool>) -> Result<Info, String>;
     async fn recording_info(
@@ -199,6 +204,16 @@ async fn blocking<T: Send + 'static>(
 }
 
 impl WeldRpc for Service {
+    async fn record_input(
+        self,
+        _: context::Context,
+        control: String,
+        options: Options,
+        input: InputSequenceOptions,
+    ) -> Result<RecordedInput, String> {
+        blocking(move || self.windows.record_input(control, options, input)).await
+    }
+
     async fn native(self, _: context::Context, request: Request) -> Response {
         match blocking(move || {
             let response = if let Request::Access(request) = request {

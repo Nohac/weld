@@ -1,4 +1,4 @@
-//! Validated keyboard sequences and bounded, deadline-paced execution plans.
+//! Validated input sequences and bounded, deadline-paced execution plans.
 
 mod wire;
 
@@ -65,7 +65,7 @@ impl InputKey {
     }
 }
 
-/// Text, a named key transition/chord, or an explicit pause.
+/// Compact keyboard, pointer and timing actions in window-local logical coordinates.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(from = "wire::Action", into = "wire::Action")]
 pub enum InputAction {
@@ -81,6 +81,50 @@ pub enum InputAction {
     Wait {
         wait_ms: u32,
     },
+    /// Wait until this offset from sequence/recording start.
+    At {
+        at_ms: u32,
+    },
+    /// Move from the preceding remote pointer position; zero duration jumps directly.
+    Move {
+        x: f64,
+        y: f64,
+        duration_ms: u32,
+    },
+    Button {
+        button: u32,
+        pressed: bool,
+    },
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct InputSequenceOptions {
+    pub actions: Vec<InputAction>,
+    #[serde(default)]
+    pub typing_interval_ms: u32,
+    #[serde(default)]
+    pub key_interval_ms: u32,
+    #[serde(default)]
+    pub key_hold_ms: u32,
+}
+
+impl std::str::FromStr for InputSequenceOptions {
+    type Err = serde_json::Error;
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        serde_json::from_str(value)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct RecordedInput {
+    pub recording: weld_recording::Info,
+    pub input: InputSequenceResult,
+}
+
+impl std::fmt::Display for RecordedInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}; {}", self.recording, self.input)
+    }
 }
 
 impl std::str::FromStr for InputAction {
@@ -100,6 +144,8 @@ pub struct InputSequenceResult {
     pub error: Option<String>,
     /// A dispatched step may have taken effect beyond the reported completed prefix.
     pub in_flight: bool,
+    /// Acknowledged completion offset for each completed row, on the recording clock when combined.
+    pub action_times_ms: Vec<u64>,
 }
 
 impl std::fmt::Display for InputSequenceResult {
@@ -119,11 +165,14 @@ pub(crate) struct Plan {
     key_interval_ms: u32,
     key_hold_ms: u32,
     pub has_text: bool,
+    pub duration: Duration,
 }
 
 pub(crate) enum Step {
     Input(InputStep),
     Wait(Duration),
+    At(Duration),
+    Move { x: f64, y: f64, duration: Duration },
 }
 
 pub(crate) struct InputStep {
@@ -192,6 +241,30 @@ impl Plan {
                     duration_ms += u64::from(*wait_ms);
                     continue;
                 }
+                InputAction::At { at_ms } => {
+                    ensure!(
+                        u64::from(*at_ms) >= duration_ms,
+                        "absolute offset precedes the planned completion of earlier actions"
+                    );
+                    duration_ms = u64::from(*at_ms);
+                    continue;
+                }
+                InputAction::Move {
+                    x,
+                    y,
+                    duration_ms: movement,
+                } => {
+                    ensure!(
+                        x.is_finite() && y.is_finite() && *x >= 0. && *y >= 0.,
+                        "invalid pointer position"
+                    );
+                    duration_ms += u64::from(*movement);
+                    continue;
+                }
+                InputAction::Button { button, .. } => {
+                    ensure!((272..=279).contains(button), "invalid pointer button");
+                    continue;
+                }
             };
             for key in keys {
                 key.validate(&mut names)?;
@@ -212,6 +285,7 @@ impl Plan {
             key_interval_ms,
             key_hold_ms,
             has_text,
+            duration: Duration::from_millis(duration_ms),
         })
     }
 
@@ -227,6 +301,7 @@ impl Plan {
         let mut codes = codes.into_iter();
         let mut steps = VecDeque::new();
         let mut held = HashSet::new();
+        let mut buttons = HashSet::new();
         for action in self.actions {
             if matches!(action, InputAction::Text(_)) {
                 ensure!(held.is_empty(), "release sequence keys before typing text");
@@ -316,11 +391,39 @@ impl Plan {
                 InputAction::Wait { wait_ms } => {
                     steps.push_back(Step::Wait(Duration::from_millis(u64::from(wait_ms))))
                 }
+                InputAction::At { at_ms } => {
+                    steps.push_back(Step::At(Duration::from_millis(u64::from(at_ms))))
+                }
+                InputAction::Move { x, y, duration_ms } => steps.push_back(Step::Move {
+                    x,
+                    y,
+                    duration: Duration::from_millis(u64::from(duration_ms)),
+                }),
+                InputAction::Button { button, pressed } => {
+                    ensure!(
+                        if pressed {
+                            buttons.insert(button)
+                        } else {
+                            buttons.remove(&button)
+                        },
+                        "pointer buttons must have balanced, distinct down/up transitions"
+                    );
+                    steps.push_back(Step::Input(InputStep {
+                        operation: Operation::Button { button, pressed },
+                        ends_action: true,
+                        characters: 0,
+                        delay_after: Duration::ZERO,
+                    }));
+                }
             }
         }
         ensure!(
             held.is_empty(),
             "sequence ends with held keys; add matching key up actions"
+        );
+        ensure!(
+            buttons.is_empty(),
+            "sequence ends with held pointer buttons"
         );
         Ok(steps)
     }
@@ -360,6 +463,50 @@ fn push_press(steps: &mut VecDeque<Step>, keys: Vec<u32>, hold_ms: u32, delay_ms
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn timeline_budget_balance_and_capabilities_cover_all_actions() {
+        for json in [
+            r#"[["w",20],["at",10]]"#,
+            r#"[["at",25001]]"#,
+            r#"[["m",-1,0]]"#,
+            r#"[["b",272,true]]"#,
+            r#"[["b",272,false]]"#,
+        ] {
+            let result = Plan::new(serde_json::from_str(json).expect("syntax"), 0, 0, 0)
+                .and_then(|plan| plan.resolve(vec![]));
+            assert!(result.is_err(), "{json}");
+        }
+        let input: InputSequenceOptions = serde_json::from_str(
+            r#"{"actions":[["m",2,3],["at",50],["m",20,10,100],["b",272,true],["b",272,false]]}"#,
+        )
+        .expect("options");
+        let plan = Plan::new(input.actions.clone(), 0, 0, 0).expect("plan");
+        assert_eq!(plan.duration, Duration::from_millis(150));
+        let operation = Operation::RecordInput {
+            options: weld_recording::Options {
+                duration_ms: 200,
+                region: None,
+                codec: Default::default(),
+                after_sequence: None,
+            },
+            input,
+        };
+        assert!(operation.allowed_by(crate::Capabilities {
+            view: true,
+            pointer: true,
+            ..Default::default()
+        }));
+        assert!(!operation.allowed_by(crate::Capabilities {
+            view: true,
+            keyboard: true,
+            ..Default::default()
+        }));
+        assert!(!operation.allowed_by(crate::Capabilities {
+            pointer: true,
+            ..Default::default()
+        }));
+    }
 
     fn key(name: &str, state: KeyState, delay_ms: Option<u32>) -> InputAction {
         InputAction::Keys {
@@ -540,10 +687,6 @@ mod tests {
 
     #[test]
     fn compact_rows_plan_numeric_groups_named_keys_and_timed_presses() {
-        let schema = serde_json::to_value(schemars::schema_for!(InputAction)).expect("schema");
-        for row in schema["anyOf"].as_array().expect("action alternatives") {
-            assert_eq!(row["minItems"], 2, "MCP must accept omitted timing fields");
-        }
         let actions = serde_json::from_str(
             r#"[
             ["p",57], ["d",[29,"a"],0], ["w",20], ["u",["a",29]],
