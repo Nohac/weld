@@ -1251,7 +1251,10 @@ favor of their final computed components. Native image-registry no-ops preserve
 change ticks, and stable surface material handles preserve their component ticks.
 
 Scene changes select full extraction and preparation, with a subsequent settling
-frame for render assets. Stable frames skip UI extraction, queueing, sorting and
+frame for render assets. Border-color-only changes prepare once: their colors
+are extracted directly into vertices and introduce no assets to settle.
+Concurrent asset, structural or other component changes preserve settlement.
+Stable frames skip UI extraction, queueing, sorting and
 bind-group preparation. Surface selectors refresh their bindings immediately
 before rendering on every frame. Bevy's normal extraction callback, asset
 uploads, device-error handling, output attachment setup, render graph and cleanup

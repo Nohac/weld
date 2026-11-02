@@ -1467,7 +1467,9 @@ mod tests {
         asset::{Assets, RenderAssetUsages},
         image::Image,
         math::Vec2,
-        prelude::{BackgroundColor, BorderRadius, BoxShadow, Color, PositionType, px},
+        prelude::{
+            BackgroundColor, BorderColor, BorderRadius, BoxShadow, Color, PositionType, UiRect, px,
+        },
         render::view::Msaa,
         text::TextFont,
         ui::{
@@ -2699,6 +2701,75 @@ mod tests {
             retired.0.is_empty() && retired.1.is_empty(),
             "removed selectors release cached GPU resources"
         );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn border_recolor_prepares_once_and_replays_matching_pixels() {
+        let (mut shell, _, device, queue) = crate::benchmark::rendering_shell_with_outputs(
+            vec![diagnostic_output(
+                PRIMARY_OUTPUT_ID,
+                LogicalPoint::ZERO,
+                true,
+                0.0,
+            )],
+            |_| {},
+        )
+        .expect("diagnostic GPU shell");
+        let border = shell
+            .app
+            .world_mut()
+            .spawn((
+                Node {
+                    width: px(32),
+                    height: px(32),
+                    border: UiRect::all(px(4)),
+                    ..Default::default()
+                },
+                BorderColor::all(Color::srgb(1., 0., 0.)),
+            ))
+            .id();
+        for tick in 0..8 {
+            shell.advance_main(tick);
+            render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        }
+        let before = render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        shell
+            .app
+            .world_mut()
+            .get_mut::<BorderColor>(border)
+            .expect("border")
+            .set_all(Color::srgb(0., 1., 0.));
+        shell.advance_main(10);
+        let changed = render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        assert_ne!(
+            before, changed,
+            "focus color reaches the first changed frame"
+        );
+        assert!(
+            shell
+                .app
+                .world()
+                .resource::<crate::retained_ui::RetainedUiStats>()
+                .last_prepared
+        );
+        let replay = render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        assert!(
+            !shell
+                .app
+                .world()
+                .resource::<crate::retained_ui::RetainedUiStats>()
+                .last_prepared,
+            "a border recolor has no render assets to settle on another frame"
+        );
+        assert_eq!(changed, replay);
+        shell
+            .app
+            .world_mut()
+            .resource_mut::<crate::retained_ui::RetainedUiSettings>()
+            .enabled = false;
+        let reference = render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        assert_eq!(replay, reference, "replay matches full preparation");
     }
 
     #[cfg(feature = "test-support")]

@@ -29,7 +29,10 @@ use bevy::{
     shader::Shader,
     sprite::Sprite,
     text::{Font, TextSpan},
-    ui::{ComputedUiRenderTargetInfo, ComputedUiTargetCamera, Node, UiScale, widget::ViewportNode},
+    ui::{
+        BorderColor, ComputedUiRenderTargetInfo, ComputedUiTargetCamera, Node, UiScale,
+        widget::ViewportNode,
+    },
     ui_render::{RenderUiSystems, clear_batches},
 };
 
@@ -66,6 +69,7 @@ impl Default for RetainedUiSettings {
 #[derive(Resource, Default)]
 struct SceneChanges {
     dirty: bool,
+    needs_settling: bool,
 }
 
 #[derive(Resource)]
@@ -182,6 +186,7 @@ fn detect_assets<A: Asset>(
     if let Some(messages) = messages {
         if cursor.len(&messages) > 0 || cursor.missed_messages(&messages) > 0 {
             changes.dirty = true;
+            changes.needs_settling = true;
             tracing::trace!(target: "weld_render_cache", asset = std::any::type_name::<A>(), "UI asset changed");
         }
         cursor.clear(&messages);
@@ -195,6 +200,7 @@ fn detect_resource<R: Resource>(
 ) {
     if resource.as_ref().is_some_and(|value| value.is_changed()) || resource.is_some() != *present {
         changes.dirty = true;
+        changes.needs_settling = true;
         tracing::trace!(target: "weld_render_cache", resource = std::any::type_name::<R>(), "UI dependency changed");
     }
     *present = resource.is_some();
@@ -248,6 +254,7 @@ fn detect_components(
         components.component_id::<Propagate<ComputedUiRenderTargetInfo>>(),
         components.component_id::<Inherited<ComputedUiRenderTargetInfo>>(),
     ];
+    let border_color = components.component_id::<BorderColor>();
     let mut current = (0, 0);
     for entity in &entities {
         current.0 += 1;
@@ -261,12 +268,16 @@ fn detect_components(
                 .is_some_and(|change| change.is_changed(ticks.last_run(), ticks.this_run()))
             {
                 changes.dirty = true;
+                // Border colors are extracted directly into the current frame's
+                // vertices. They introduce no assets or pipelines to settle.
+                changes.needs_settling |= Some(component) != border_color;
                 tracing::trace!(target: "weld_render_cache", component = ?components.get_info(component).map(|info| info.name()), "UI dependency changed");
             }
         }
     }
     if current != *counts || !continuous.is_empty() {
         changes.dirty = true;
+        changes.needs_settling = true;
         tracing::trace!(target: "weld_render_cache", structural = (current != *counts), continuous = !continuous.is_empty(), "UI preparation requirement");
     }
     *counts = current;
@@ -311,7 +322,7 @@ fn reset_renderer(world: &mut World) {
 
 pub(crate) fn render(app: &mut App) -> Result<()> {
     app.world_mut().run_schedule(CheckUiChanges);
-    let dirty = std::mem::take(&mut app.world_mut().resource_mut::<SceneChanges>().dirty);
+    let changes = std::mem::take(&mut *app.world_mut().resource_mut::<SceneChanges>());
     let enabled = app.world().resource::<RetainedUiSettings>().enabled;
     let render_app = app
         .get_sub_app_mut(RenderApp)
@@ -326,10 +337,11 @@ pub(crate) fn render(app: &mut App) -> Result<()> {
         .is_some_and(|cache| cache.waiting_pipelines().next().is_some());
     let mut state = render_app.world_mut().resource_mut::<PreparedUi>();
     let images_changed = state.images_tick != images_tick;
-    tracing::trace!(target: "weld_render_cache", scene_dirty = dirty, pending_pipeline, images_changed, "UI render dependencies");
-    let dirty = dirty || pending_pipeline || images_changed || state.retain != enabled;
+    tracing::trace!(target: "weld_render_cache", scene_dirty = changes.dirty, pending_pipeline, images_changed, "UI render dependencies");
+    let render_dirty = pending_pipeline || images_changed || state.retain != enabled;
+    let dirty = changes.dirty || render_dirty;
     state.images_tick = images_tick;
-    if dirty {
+    if changes.needs_settling || render_dirty {
         state.settling = 2;
     }
     state.rebuild = !enabled || dirty || state.settling > 0;
@@ -360,9 +372,49 @@ pub(crate) fn render(app: &mut App) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bevy::color::Color;
 
     #[derive(Component)]
     struct Style(u8);
+
+    #[test]
+    fn border_recolor_preserves_asset_and_structure_settlement() {
+        let mut app = App::new();
+        app.init_resource::<SceneChanges>()
+            .init_resource::<Messages<AssetEvent<Image>>>()
+            .add_systems(CheckUiChanges, (detect_components, detect_assets::<Image>));
+        let entity = app
+            .world_mut()
+            .spawn((Node::default(), BorderColor::default()))
+            .id();
+        assert!(check(&mut app));
+        app.world_mut()
+            .get_mut::<BorderColor>(entity)
+            .expect("border")
+            .set_all(Color::srgb(1., 0., 0.));
+        app.world_mut().run_schedule(CheckUiChanges);
+        let changes = std::mem::take(&mut *app.world_mut().resource_mut::<SceneChanges>());
+        assert!(changes.dirty);
+        assert!(!changes.needs_settling);
+
+        app.world_mut()
+            .get_mut::<BorderColor>(entity)
+            .expect("border")
+            .set_all(Color::srgb(0., 1., 0.));
+        app.world_mut()
+            .resource_mut::<Messages<AssetEvent<Image>>>()
+            .write(AssetEvent::Modified {
+                id: Default::default(),
+            });
+        app.world_mut().run_schedule(CheckUiChanges);
+        let changes = std::mem::take(&mut *app.world_mut().resource_mut::<SceneChanges>());
+        assert!(changes.dirty && changes.needs_settling);
+
+        app.world_mut().entity_mut(entity).remove::<BorderColor>();
+        app.world_mut().run_schedule(CheckUiChanges);
+        let changes = app.world().resource::<SceneChanges>();
+        assert!(changes.dirty && changes.needs_settling);
+    }
 
     #[test]
     fn expired_asset_events_still_invalidate_the_cached_scene() {
@@ -388,9 +440,9 @@ mod tests {
 
     fn check(app: &mut App) -> bool {
         app.world_mut().run_schedule(CheckUiChanges);
-        let dirty = std::mem::take(&mut app.world_mut().resource_mut::<SceneChanges>().dirty);
+        let changes = std::mem::take(&mut *app.world_mut().resource_mut::<SceneChanges>());
         app.world_mut().clear_trackers();
-        dirty
+        changes.dirty
     }
 
     #[test]

@@ -277,3 +277,123 @@ was enabled. The unchanged-layer/one-time-retirement regression also passes.
 The final untraced three-client smoke run, including that retirement correction,
 measures 4.375% CPU, 359.978 commits/second, zero main updates and zero desktop
 compositions (`paced-render-h1gfvhhl`, `hidden-final.log`).
+
+## Visible video and keyboard-focus follow-up
+
+After login, `/proc/2593748/exe` matches the installed `cb0a13ec` binary
+(SHA-256 `ce05ad4f79b75248b558d91fd69c64615acdd30244539cbde7275e6640e51edb`).
+Both `weld-session.target` and `graphical-session.target` are active. A new
+ten-second process sample measures 12.80% CPU, including 12.30% on the main
+thread. The following artifacts are under
+`target/validation/visible-cpu-2026-11-02/`.
+
+The user kept a playing browser video and an htop terminal visible for a
+30-second measurement. Weld consumes 9.16% user CPU and 2.42% kernel CPU,
+11.59% combined. The 999 Hz userspace capture contains 2,817 samples with
+zero losses. Its exact library-level sample shares are 81.90% in the statically
+linked executable, 8.98% in RADV, and 8.31% in libc. The executable includes
+Weld, Bevy, wgpu and Smithay; its share is not all application code. Flat
+symbols include ECS scheduling/component lookup, retained-scene checking,
+layout, native protocol servicing, wgpu command processing, copying and
+allocation. No individual leaf dominates. The kernel share remains unattributed
+by this userspace capture. Incomplete DWARF stacks are still unsuitable for
+inclusive caller attribution. See `video-cpu.json`, `video-libraries.csv`,
+`video-symbol-counts.csv` and the start/end window inventories.
+
+### Core placement changes CPU time substantially
+
+This Ryzen AI 9 365 exposes logical CPUs 0–7 with a maximum frequency near
+5.09 GHz and CPUs 8–19 near 3.32 GHz. Both groups use the `powersave` governor;
+maximum frequency is not a measurement of actual instantaneous frequency.
+An ABBA comparison pins only an isolated benchmark's main thread, after its
+producer processes have started. The live compositor's affinity and system
+power policy are unchanged. Each case uses the optimized current baseline,
+three real DMA-BUF producers at 60 Hz, 2240×1400 output at 60 Hz, four seconds
+warmup and ten seconds measurement. All compilation finishes first.
+
+| Main thread | Process CPU, % of one core | Userspace million instructions/s |
+| --- | ---: | ---: |
+| CPU 4, A | 6.00 | 60.71 |
+| CPU 8, B | 10.10 | 60.94 |
+| CPU 8, B | 9.70 | 60.46 |
+| CPU 4, A | 5.60 | 61.85 |
+
+All four runs sustain 59.90 compositions/s and about 180 client commits/s.
+Nearly equal instruction counts with a roughly 70% CPU-time difference show
+that utilization changes need not mean more compositor work. This experiment
+combines core choice with the machine's ordinary frequency/cache/scheduling
+behavior; it does not isolate maximum clock rate as the sole cause.
+
+Direct-draw controls, which retain native protocol/import/buffer lifecycle but
+omit the production Bevy scene, use 3.00% CPU / 25.20 million instructions/s
+on CPU 4 and 3.90% / 24.66 million on CPU 8. The production retained scene is
+therefore materially more expensive even without frequent policy updates.
+These differing render assemblies are causal controls, not an additive
+per-function decomposition. The normal path still executes Bevy's render
+lifecycle and redraws the output; partial Bevy scene damage and primary client
+direct scanout remain unsupported, as recorded in `docs/drm-presentation.md`.
+Native client acquisition/retirement and output acquisition/release also have
+their own GPU submission boundaries around Bevy rendering.
+
+### Keyboard focus adds work as well as exposing placement variation
+
+The user reproduced keyboard focus changes at roughly 2–3 Hz between the
+browser and htop. A 25-second recording sees per-second CPU reach 16–20%.
+The median interval is 15.82% CPU and 104.59 million userspace instructions.
+A subsequent 15-second observation, with the browser focused throughout,
+has medians of 12.85% and 90.47 million instructions. There are transient
+instruction spikes in both windows; this live comparison is not a constant
+video-content microbenchmark. The recorded last-running CPU frequently moves
+between the two groups. These once-per-second CPU IDs are endpoint observations,
+not full residency traces. User-only migration/context-switch counters returned
+zeros and are not evidence of no migrations.
+
+The isolated fixed-core controls distinguish the additional work:
+
+- One keyboard focus change/s on CPU 4 uses about 62–63 million instructions/s
+  and 6.1–6.2% CPU before the color change below, versus roughly 61 million
+  and 5.6–6.0% without focus changes.
+- Three changes/s on CPU 8 use 65.28/66.00 million instructions/s and
+  10.79/9.70% CPU in the two baseline runs.
+- One tab switch/s, which also changes visibility/layout, uses 80.48 million
+  instructions/s and 7.40% CPU on CPU 4. Tabs exercise related visibility work;
+  this is not a direct workspace-switch measurement.
+
+Both real work and placement variation contribute. Replacing Leafwing or
+limiting mouse input would not address this keyboard reproduction.
+
+### Border-only preparation
+
+A diagnostic focus trace identifies two changed `BorderColor` components,
+followed by full UI preparation and a further preparation frame even when
+there are no new scene, image or pipeline changes. Border colors are extracted
+directly into the current frame's vertices, so this extra asset-settling pass
+is unnecessary. Border-only invalidation now prepares once. Asset changes,
+structural changes, other component changes, pending pipelines and image
+registration changes retain their previous settlement behavior.
+
+The GPU regression fails before the change on the unwanted second preparation
+and passes afterward, checking immediate new pixels, retained replay and
+equality with full preparation. A focused policy regression checks concurrent
+asset changes and border removal. The application/distribution library suites
+pass 97 + 41 tests before adding that extra policy test; the final focused run
+passes both new regressions. Formatting and diff checks pass. Strict Clippy
+passes the changed application library but stops at the unchanged nested `if`
+in `src/master/mod.rs:398`, also present in `cb0a13ec`.
+
+The change removes proven redundant work, but no meaningful aggregate CPU
+improvement is established: at 3 Hz the after runs measure 66.27/64.93 million
+instructions/s and 9.80/10.20% CPU, overlapping the baseline. At 1 Hz the
+after runs also overlap normal variation. Diagnostic runs include unrelated
+image asset/registration changes that still require preparation; not every
+observed preparation belongs to a focus change. This small correction is not
+a solution to the entire steady video cost. It is committed source work and
+has not replaced the running executable.
+
+The first exploratory `steady.log`, `focus.log`, `tabbed.log` and
+`focus-trace.log` used an older saved profiling executable. They are excluded
+from the current-build comparisons above. `baseline-bench` was rebuilt from
+`cb0a13ec`; `after-bench` includes the border-only correction. The `core*`,
+`focus-before/after*`, `focus3-*`, `tabs-*` and `direct-*` logs record the
+current-build controls and their artifact directories. No timing comparison
+runs concurrently with compilation or diagnostic tracing.
