@@ -397,6 +397,9 @@ pub struct CaptureRequest {
 /// Scheduling work requested by one host surface event.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CompositionDemand {
+    /// Retain content until another opportunity; no local policy or render wake.
+    /// Independent client consumers continue servicing their own demand.
+    Deferred,
     /// Refresh surface content; ingress decides whether policy also needs updating.
     Content,
     /// Update application state and render once.

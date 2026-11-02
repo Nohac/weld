@@ -320,7 +320,7 @@ impl<Event: 'static> NativeRuntime<Event> {
                     // integration means no extra consumer retaining its buffer.
                     if let Some(app) = integration.application() {
                         let demand = app.enqueue_client_event(event);
-                        policy_dirty = true;
+                        policy_dirty |= demand != CompositionDemand::Deferred;
                         if let Some((driver, _)) = integration.native() {
                             driver.client_demand(demand);
                         }

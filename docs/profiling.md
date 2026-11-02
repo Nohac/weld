@@ -160,6 +160,13 @@ behavior and fractional scaling need separate measurements.
 The [initial comparison](performance/paced-render-2026-10-03.md) records the
 baseline and its limits.
 
+`--mode hidden` keeps real DMA-BUF clients producing while their local
+presentation activity and UI visibility are disabled. It checks that independent
+client progress does not require desktop compositions. No main or render work
+is expected after settling; per-composition metrics print `n/a` when the count
+is zero. The [November CPU investigation](performance/compositor-cpu-2026-11-02.md)
+records the matched control and the SHM binding-cache aging benchmark.
+
 ### Initial retained UI experiment (2026-10-17, `cddaba7`)
 
 The initial `test-support` presentation probe retained Bevy's prepared render entities,

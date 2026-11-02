@@ -594,6 +594,7 @@ impl NativeDriver<HostEvent> for DrmDriver {
     }
     fn client_demand(&mut self, demand: CompositionDemand) {
         match demand {
+            CompositionDemand::Deferred => return,
             CompositionDemand::Content => self.frame_state.request_content(),
             CompositionDemand::Ordinary => self.frame_state.request_composition(),
             CompositionDemand::Settle => self.frame_state.request_settled_composition(),

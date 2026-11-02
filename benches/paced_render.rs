@@ -6,16 +6,19 @@ use bevy::{
         component::Component,
         entity::Entity,
         query::{Added, With},
-        system::{Commands, Local, Query, Res},
+        resource::Resource,
+        system::{Commands, Local, Query, Res, ResMut},
     },
-    prelude::{Node, PositionType, px},
+    prelude::{Display, Node, PositionType, px},
     scene::{CommandsSceneExt, bsn},
 };
 use clap::{Parser, ValueEnum};
 use std::{path::PathBuf, time::Duration};
 use weld_app::{
     benchmark::{PresentationProbe, shell_for_host_with_probe},
-    surface::{ClientSurface, MappedSurface, SurfaceNode, SurfaceView},
+    surface::{
+        ClientSurface, MappedSurface, SurfaceAction, SurfaceActionQueue, SurfaceNode, SurfaceView,
+    },
 };
 use weld_core::{
     benchmark::{Options, SurfaceOnly, prepare},
@@ -41,6 +44,7 @@ enum Mode {
     Master,
     MinimalRetained,
     MasterRetained,
+    Hidden,
 }
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
@@ -207,10 +211,13 @@ fn main() -> Result<()> {
                         app.add_systems(Last, observe_focus);
                     }
                 }
-                Mode::Minimal | Mode::MinimalRetained | Mode::UiDirect => {
+                Mode::Minimal | Mode::MinimalRetained | Mode::UiDirect | Mode::Hidden => {
                     app.insert_resource(weld_app::retained_ui::RetainedUiSettings {
-                        enabled: matches!(mode, Mode::MinimalRetained),
+                        enabled: matches!(mode, Mode::MinimalRetained | Mode::Hidden),
                     });
+                    if matches!(mode, Mode::Hidden) {
+                        app.init_resource::<HiddenSurfaces>();
+                    }
                     app.add_systems(PreUpdate, mount_surfaces);
                 }
                 Mode::Surface
@@ -238,20 +245,26 @@ fn main() -> Result<()> {
             * 1000.0
     };
     let elapsed = report.elapsed.as_secs_f64();
-    let frames = report.compositions.max(1) as f64;
+    let per_frame = |value: f64| {
+        if report.compositions == 0 {
+            "n/a".to_owned()
+        } else {
+            format!("{:.3}", value / report.compositions as f64)
+        }
+    };
     println!(
         "POLICY updates={} focus_hz={} tabbed={}",
         report.policy_updates, args.focus_hz, args.tabbed
     );
     println!(
-        "RESULT mode={:?} decorations={:?} wall_s={:.3} cpu_pct={:.3} cpu_ms_per_frame={:.3} compositions={} composition_hz={:.3} commits={} commit_hz={:.3} ingress_replaced={} dmabuf={} shm={} inputs={} max_in_flight={} policy_us_per_frame={:.3} render_us_per_frame={:.3} ingress_age_p50_ms={:.3} ingress_age_p95_ms={:.3}",
+        "RESULT mode={:?} decorations={:?} wall_s={:.3} cpu_pct={:.3} cpu_ms_per_frame={} compositions={} composition_hz={:.3} commits={} commit_hz={:.3} ingress_replaced={} dmabuf={} shm={} inputs={} max_in_flight={} policy_us_per_frame={} render_us_per_frame={} ingress_age_p50_ms={:.3} ingress_age_p95_ms={:.3}",
         args.mode,
         args.decorations,
         elapsed,
         report.cpu_seconds / elapsed * 100.0,
-        report.cpu_seconds / frames * 1000.0,
+        per_frame(report.cpu_seconds * 1000.0),
         report.compositions,
-        frames / elapsed,
+        report.compositions as f64 / elapsed,
         report.commits,
         report.commits as f64 / elapsed,
         report.replaced_before_composition,
@@ -259,8 +272,8 @@ fn main() -> Result<()> {
         report.shm_buffers,
         report.inputs,
         report.max_in_flight,
-        report.policy_wall.as_secs_f64() / frames * 1e6,
-        report.render_wall.as_secs_f64() / frames * 1e6,
+        per_frame(report.policy_wall.as_secs_f64() * 1e6),
+        per_frame(report.render_wall.as_secs_f64() * 1e6),
         percentile(0.5),
         percentile(0.95)
     );
@@ -269,6 +282,9 @@ fn main() -> Result<()> {
 
 #[derive(Component, Clone, Default)]
 struct BenchSurface;
+
+#[derive(Resource, Default)]
+struct HiddenSurfaces;
 
 fn observe_focus(
     focus: Res<FocusedWindow>,
@@ -291,9 +307,16 @@ fn mount_surfaces(
     mut commands: Commands,
     surfaces: Query<(&ClientSurface, &MappedSurface), Added<MappedSurface>>,
     mounted: Query<(), With<BenchSurface>>,
+    hidden: Option<Res<HiddenSurfaces>>,
+    mut actions: ResMut<SurfaceActionQueue>,
 ) {
     for (index, (client, mapped)) in (mounted.iter().count()..).zip(&surfaces) {
         let node = Node {
+            display: if hidden.is_some() {
+                Display::None
+            } else {
+                Display::Flex
+            },
             position_type: PositionType::Absolute,
             left: px(index as f32 * mapped.logical_size.x),
             top: px(0.0),
@@ -302,6 +325,12 @@ fn mount_surfaces(
             ..Default::default()
         };
         let surface = client.surface;
+        if hidden.is_some() {
+            actions.push(SurfaceAction::SetPresentation {
+                surface,
+                rate: None,
+            });
+        }
         commands.spawn_scene(bsn! { BenchSurface template(move |_| Ok(SurfaceNode { surface, view: SurfaceView::WindowGeometry })) }).insert(node);
     }
 }

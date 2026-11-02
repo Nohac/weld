@@ -1099,6 +1099,26 @@ including a same-size commit. That one-shot observation completes window,
 floating-anchor and hoist resize settlement; later content returns to the light
 presentation path.
 
+Explicit local inactivity also controls desktop content admission. `AppShell`
+retains one coalesced snapshot for a hidden surface whose geometry, mapping,
+input regions and buffer inventory match its last admitted state. These pixels
+do not request a host policy/render opportunity and do not enter unrelated
+desktop compositions. Structural/control changes and pending resize
+acknowledgements still pass through ordinary admission. Publishing local
+visibility moves the latest snapshot back into the presentation inbox and
+rearms policy even if the client sends no further commit. The admission state
+keeps layout metadata separately from buffer leases and retires both on
+destruction. Unknown surfaces remain active until policy explicitly declares
+them inactive. Native protocol dispatch and independent remote consumers keep
+their existing cadence and callback ownership.
+
+The first deferred replacement detaches any older locally imported DMA-BUF for
+that layer and schedules its retirement through the ordinary render/completion
+boundary. This bounded cleanup prevents the old displayed lease plus the latest
+deferred lease from exhausting a small client buffer pool. Later hidden frames
+need no cleanup compositions. Layers without a replacement retain their current
+content so a partial update cannot discard an unchanged subsurface.
+
 Completed output frames carry sampled surface/layer identities and their admitted
 commit revisions. The renderer verifies current GPU bindings and prepared draw
 batches before reporting a sample. Smithay presentation-feedback objects remain

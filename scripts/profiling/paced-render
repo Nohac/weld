@@ -51,7 +51,7 @@ def collect_counters(process, log_path, directory, perf, seconds):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=(*LAYERS, "all"), default="all")
+    parser.add_argument("--mode", choices=(*LAYERS, "hidden", "all"), default="all")
     parser.add_argument("--repeat", type=int, default=1, help="repeat cases, reversing order every other pass")
     parser.add_argument("--perf", type=Path, help="optional perf binary for userspace instruction/cycle counters")
     parser.add_argument("--seconds", type=int, default=10)

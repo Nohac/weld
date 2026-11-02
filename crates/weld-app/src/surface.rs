@@ -584,6 +584,10 @@ pub struct SurfaceCommitRevisions {
 }
 
 impl SurfaceCommitRevisions {
+    pub(crate) fn awaits_commit(&self, surface: SurfaceId) -> bool {
+        self.policy_waiters.contains(&surface)
+    }
+
     pub fn revision(&self, surface: SurfaceId) -> u64 {
         self.revisions.get(&surface).copied().unwrap_or_default()
     }
@@ -661,6 +665,35 @@ pub(crate) fn has_surface_frame(world: &World) -> bool {
     world
         .get_resource::<SurfaceRegistry>()
         .is_some_and(|registry| registry.entries.values().any(|entry| entry.frame_ready))
+}
+
+/// Detach superseded hidden imports before retiring their native sampling leases.
+/// Unchanged layers remain retained until a replacement or lifecycle event arrives.
+pub(crate) fn retire_hidden_dmabuf_replacements(
+    world: &mut World,
+    surface: SurfaceId,
+    replacements: impl Iterator<Item = SurfaceLayerId>,
+) -> Vec<SurfaceLayerId> {
+    let Some(mut registry) = world.get_resource_mut::<SurfaceRegistry>() else {
+        return Vec::new();
+    };
+    let Some(entry) = registry.entries.get_mut(&surface) else {
+        return Vec::new();
+    };
+    let mut retired = Vec::new();
+    for layer in replacements {
+        let Some(buffer) = entry.buffers.get_mut(&layer) else {
+            continue;
+        };
+        let displayed = buffer.displayed_dmabuf.take().is_some();
+        let pending = buffer.pending_dmabuf.take().is_some();
+        if displayed || pending {
+            buffer.displayed_pixel_size = None;
+            buffer.encoding = SurfaceImageEncoding::Unbound;
+            retired.push(layer);
+        }
+    }
+    retired
 }
 
 pub(crate) fn referenced_dmabuf_ids(world: &World) -> HashSet<ImportId> {
@@ -2741,6 +2774,56 @@ pub(crate) mod tests {
         );
         app.update();
         assert!(benchmark_root_images(app.world()).is_empty());
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn hidden_replacements_retire_old_imports_once_and_preserve_unchanged_layers() {
+        let mut app = test_app();
+        let surface = SurfaceId::for_test(33);
+        register_window(&mut app, surface);
+        let mut snapshot = root_snapshot(None);
+        snapshot.buffers.push(buffer(2, None));
+        for (index, buffer) in snapshot.buffers.iter_mut().enumerate() {
+            let image = app
+                .world_mut()
+                .resource_mut::<Assets<Image>>()
+                .add(transparent_surface_image());
+            buffer.content = SurfaceBufferContent::RenderImage(SurfaceRenderImage {
+                import: ImportId::for_test(index as u64 + 1),
+                image,
+                encoding: SurfaceImageEncoding::EncodedOpaque,
+                y_inverted: false,
+                promoted: true,
+            });
+        }
+        enqueue_surface_event(app.world_mut(), snapshot_event(surface, snapshot));
+        app.update();
+        assert_eq!(referenced_dmabuf_ids(app.world()).len(), 2);
+        let replaced = SurfaceLayerId::new(1);
+        assert_eq!(
+            retire_hidden_dmabuf_replacements(app.world_mut(), surface, [replaced].into_iter()),
+            [replaced],
+        );
+        assert_eq!(
+            referenced_dmabuf_ids(app.world()),
+            HashSet::from([ImportId::for_test(2)])
+        );
+        assert!(
+            retire_hidden_dmabuf_replacements(app.world_mut(), surface, [replaced].into_iter())
+                .is_empty(),
+            "later hidden commits need no further GPU retirement opportunity",
+        );
+        let registry = app.world().resource::<SurfaceRegistry>();
+        let entry = registry
+            .entries
+            .get(&surface)
+            .expect("surface remains mapped");
+        assert_eq!(
+            entry.buffers[&replaced].encoding,
+            SurfaceImageEncoding::Unbound
+        );
+        assert!(app.world().get::<MappedSurface>(entry.entity).is_some());
     }
 
     #[test]

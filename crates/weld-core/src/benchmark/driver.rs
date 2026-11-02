@@ -247,6 +247,7 @@ impl NativeDriver<()> for Driver {
     }
     fn client_demand(&mut self, demand: CompositionDemand) {
         match demand {
+            CompositionDemand::Deferred => {}
             CompositionDemand::Content => self.clock.request_content(),
             CompositionDemand::Ordinary => self.clock.request_composition(),
             CompositionDemand::Settle => self.clock.request_settled_composition(),

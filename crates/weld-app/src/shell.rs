@@ -1,6 +1,7 @@
 //! Bevy-owned compositor scene rendered into a Weld-owned wgpu texture.
 
 mod diagnostics;
+mod presentation;
 
 use std::{
     collections::{HashMap, HashSet},
@@ -83,6 +84,8 @@ use weld_core::{
 };
 use weld_input::{KeyboardSettingsReader, PointerDeviceSettingsReader};
 
+use presentation::LocalPresentationState;
+
 #[cfg(test)]
 const PRIMARY_OUTPUT_ID: OutputId = OutputId::new(1);
 
@@ -101,6 +104,7 @@ pub struct AppShell {
     redraw_requests: RedrawRequests,
     dmabuf_importer: Option<DmabufImporter>,
     pending_surfaces: ClientPresentationInbox,
+    local_presentation: LocalPresentationState,
     // A native frame selects jitter-buffered content once, even when ingress
     // escalates that frame to a full application update.
     presentation_prepared: bool,
@@ -477,6 +481,7 @@ impl AppShell {
             redraw_requests,
             dmabuf_importer,
             pending_surfaces,
+            local_presentation: LocalPresentationState::default(),
             presentation_prepared: false,
             render_assets_pending: false,
             last_presentation_report: None,
@@ -746,6 +751,36 @@ impl AppShell {
     }
 
     pub fn enqueue_client_event(&mut self, event: ClientSurfaceEvent) -> CompositionDemand {
+        let deferred = self.local_presentation.defer_content(&event)
+            && self
+                .app
+                .world()
+                .get_resource::<crate::surface::SurfaceCommitRevisions>()
+                .is_some_and(|revisions| !revisions.awaits_commit(event.surface));
+        if deferred && let ClientSurfaceEventKind::Commit(commit) = event.kind {
+            let retired = crate::surface_impl::retire_hidden_dmabuf_replacements(
+                self.app.world_mut(),
+                event.surface,
+                commit.buffers.iter().filter_map(|buffer| {
+                    matches!(buffer.change, SurfaceBufferChange::Replaced { .. })
+                        .then_some(buffer.layer)
+                }),
+            );
+            // Retire a previously displayed allocation through the normal GPU
+            // completion path once. Keeping it alongside the newest deferred
+            // lease could otherwise exhaust a double-buffered hidden client.
+            self.render_assets_pending |= !retired.is_empty();
+            if let Some(importer) = &mut self.dmabuf_importer {
+                for layer in retired {
+                    importer.remove_layer(event.surface, layer);
+                }
+            }
+            self.local_presentation.defer(event.surface, commit);
+            return CompositionDemand::Deferred;
+        }
+        if let Some(previous) = self.local_presentation.take_deferred(event.surface) {
+            self.pending_surfaces.push(previous);
+        }
         match self.pending_surfaces.push(event) {
             PresentationDemand::Content => CompositionDemand::Content,
             PresentationDemand::Structure => CompositionDemand::Settle,
@@ -753,6 +788,7 @@ impl AppShell {
     }
 
     fn apply_client_event(&mut self, event: ClientSurfaceEvent) {
+        self.local_presentation.admit(&event);
         let ClientSurfaceEvent { surface, kind } = event;
         match kind {
             ClientSurfaceEventKind::Metadata(metadata) => enqueue_surface_event(
@@ -959,6 +995,12 @@ impl AppShell {
     pub fn take_client_requests(&mut self) -> Vec<ClientRequest> {
         let mut requests = Vec::new();
         for action in take_surface_actions(self.app.world_mut()) {
+            if let Some(event) = self.local_presentation.apply(&action) {
+                self.pending_surfaces.push(event);
+                // Visibility is published after the main schedule. Rearm the
+                // next opportunity even when the client produces no new frame.
+                self.render_assets_pending = true;
+            }
             requests.push(client_request(action));
         }
         requests
@@ -1416,6 +1458,9 @@ mod tests {
         ClientCommitRevision, ClientSurfaceCommit, ClientSurfaceEvent, ClientSurfaceEventKind,
     };
     use weld_core::surface::{Extent, SurfaceId};
+    use weld_core::{CompositionDemand, HostPolicy};
+
+    use crate::surface_impl::{SurfaceAction, SurfaceActionQueue};
 
     #[cfg(feature = "test-support")]
     use bevy::{
@@ -1918,6 +1963,119 @@ mod tests {
         shell.advance_main(12);
         assert!(!shell.pending_surfaces.has_pending());
         assert_eq!(shell.pending_surfaces.stats().selected, 2);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn hidden_content_defers_until_visible_but_resize_acknowledgements_reach_policy() {
+        let (mut shell, _, device, queue) = crate::benchmark::rendering_shell_with_outputs(
+            vec![diagnostic_output(
+                PRIMARY_OUTPUT_ID,
+                LogicalPoint::ZERO,
+                true,
+                0.0,
+            )],
+            |_| {},
+        )
+        .expect("off-screen GPU shell");
+        let surface = SurfaceId::for_test(1);
+        install_diagnostic_surface(&mut shell, surface, [0, 255, 0, 255]);
+        shell.app.world_mut().spawn((
+            SurfaceNode {
+                surface,
+                view: SurfaceView::FullSurface,
+            },
+            Node {
+                width: px(64),
+                height: px(64),
+                ..Default::default()
+            },
+        ));
+        for tick in 0..8 {
+            shell.advance_main(tick);
+            render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        }
+        shell
+            .app
+            .world_mut()
+            .resource_mut::<SurfaceActionQueue>()
+            .push(SurfaceAction::SetPresentation {
+                surface,
+                rate: None,
+            });
+        shell.take_client_requests();
+        let selected = shell.pending_surfaces.stats().selected;
+        for _ in 0..16 {
+            assert_eq!(
+                update_diagnostic_surface(&mut shell, surface, [255, 0, 0, 255]),
+                CompositionDemand::Deferred,
+            );
+        }
+        assert_eq!(shell.pending_surfaces.stats().selected, selected);
+        assert!(
+            !shell.pending_surfaces.has_pending(),
+            "hidden content bypasses unrelated presentation opportunities"
+        );
+        shell.advance_main(8);
+        assert_eq!(
+            shell.pending_surfaces.stats().selected,
+            selected,
+            "an unrelated policy update must not admit hidden pixels",
+        );
+        assert_eq!(
+            update_diagnostic_surface_extent(&mut shell, surface, 48, |_, _| [255, 0, 0, 255]),
+            CompositionDemand::Content,
+            "hidden geometry changes still wake application policy",
+        );
+        shell.advance_main(8);
+        assert_eq!(shell.pending_surfaces.stats().selected, selected + 1);
+        shell
+            .app
+            .world_mut()
+            .resource_mut::<SurfaceActionQueue>()
+            .push(SurfaceAction::Resize {
+                surface,
+                layout: weld_client::ToplevelLayout::Tiled,
+                logical_size: UVec2::splat(48),
+                resizing: false,
+                fullscreen: false,
+            });
+        shell.take_client_requests();
+        assert_eq!(
+            update_diagnostic_surface_extent(&mut shell, surface, 48, |_, _| [255, 0, 0, 255]),
+            CompositionDemand::Content,
+            "same-size resize acknowledgements must not be deferred",
+        );
+        shell.advance_main(9);
+        assert_eq!(
+            update_diagnostic_surface_extent(&mut shell, surface, 48, |_, _| [255, 0, 0, 255]),
+            CompositionDemand::Deferred,
+            "resize observation is one-shot",
+        );
+        shell
+            .app
+            .world_mut()
+            .resource_mut::<SurfaceActionQueue>()
+            .push(SurfaceAction::SetPresentation {
+                surface,
+                rate: Some(weld_client::PresentationRate::HZ_60),
+            });
+        shell.take_client_requests();
+        assert!(
+            shell.take_policy_wake(),
+            "showing retained content rearms admission without another client commit"
+        );
+        shell.advance_main(10);
+        assert_surface_pixel(
+            render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID),
+            [0, 0, 255, 255],
+        );
+        assert!(!shell.pending_surfaces.has_pending());
+        assert_eq!(
+            update_diagnostic_surface_extent(&mut shell, surface, 48, |_, _| [0, 255, 0, 255]),
+            CompositionDemand::Content,
+            "visible content resumes ordinary composition admission",
+        );
     }
 
     #[cfg(feature = "test-support")]
@@ -3137,8 +3295,12 @@ mod tests {
     }
 
     #[cfg(feature = "test-support")]
-    fn update_diagnostic_surface(shell: &mut AppShell, surface: SurfaceId, bgra: [u8; 4]) {
-        update_diagnostic_surface_extent(shell, surface, 32, |_, _| bgra);
+    fn update_diagnostic_surface(
+        shell: &mut AppShell,
+        surface: SurfaceId,
+        bgra: [u8; 4],
+    ) -> CompositionDemand {
+        update_diagnostic_surface_extent(shell, surface, 32, |_, _| bgra)
     }
 
     #[cfg(feature = "test-support")]
@@ -3147,8 +3309,8 @@ mod tests {
         surface: SurfaceId,
         size: u32,
         pixel: impl Fn(u32, u32) -> [u8; 4],
-    ) {
-        update_diagnostic_surface_scaled(shell, surface, size, size as f32, pixel);
+    ) -> CompositionDemand {
+        update_diagnostic_surface_scaled(shell, surface, size, size as f32, pixel)
     }
 
     #[cfg(feature = "test-support")]
@@ -3158,7 +3320,7 @@ mod tests {
         size: u32,
         logical_size: f32,
         pixel: impl Fn(u32, u32) -> [u8; 4],
-    ) {
+    ) -> CompositionDemand {
         let view = SurfaceContentView {
             source_x: 0.0,
             source_y: 0.0,
@@ -3211,7 +3373,7 @@ mod tests {
                     }],
                 },
             )),
-        });
+        })
     }
 
     #[cfg(feature = "test-support")]
