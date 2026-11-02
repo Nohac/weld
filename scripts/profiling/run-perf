@@ -416,6 +416,7 @@ record_perf() {
     local seconds="$3"
     "${perf_bin}" record \
         -e cpu-clock:u \
+        --user-callchains \
         -F "${frequency}" \
         -m "${mmap_pages}" \
         --call-graph "dwarf,${stack_bytes}" \

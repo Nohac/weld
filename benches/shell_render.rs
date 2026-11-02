@@ -3,7 +3,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use anyhow::Result;
+use anyhow::{Context, Result, ensure};
 use weld_app::{benchmark, input::GlobalShortcutPlugin};
 use weld_client::{
     ClientBufferId, ClientBufferLease, ClientBufferMetadata, ClientBufferUseId,
@@ -58,6 +58,9 @@ impl InputWorkload {
 }
 
 fn main() -> Result<()> {
+    if std::env::var_os("WELD_RENDER_BENCH_CACHE_AGING").is_some() {
+        return run_cache_aging();
+    }
     let frames = environment_usize("WELD_RENDER_BENCH_FRAMES", 600);
     let warmup_frames = environment_usize("WELD_RENDER_BENCH_WARMUP", 30);
     for (mapped_client, retained_client_commit, input) in [
@@ -78,6 +81,78 @@ fn main() -> Result<()> {
         )?;
     }
     Ok(())
+}
+
+/// Separate historical SHM updates from the cost of drawing unchanged content.
+/// Small images keep the unfixed cache-growth control bounded in memory.
+fn run_cache_aging() -> Result<()> {
+    let (mut shell, adapter) = benchmark::rendering_shell(configure_shell)?;
+    map_synthetic_client_with_size(&mut shell, 64, 64);
+    let requests = output_request();
+    let mut compositions = Vec::new();
+    for tick in 0..10 {
+        shell.advance_main(tick);
+        shell.render_outputs(&requests, &mut compositions)?;
+    }
+    let ticks_per_second = std::process::Command::new("getconf")
+        .arg("CLK_TCK")
+        .output()?;
+    ensure!(ticks_per_second.status.success(), "getconf CLK_TCK failed");
+    let ticks_per_second = std::str::from_utf8(&ticks_per_second.stdout)?
+        .trim()
+        .parse::<f64>()?;
+    ensure!(ticks_per_second > 0.0, "invalid CPU clock frequency");
+    let frames = environment_usize("WELD_RENDER_BENCH_FRAMES", 1000);
+    let mut previous = 0;
+    for updates in [0_u32, 256, 1024, 4096] {
+        for generation in previous..updates {
+            shell.enqueue_client_event(surface_snapshot_with_size(
+                SyntheticContent::Pixels(vec![generation.to_le_bytes()[0]; 64 * 64 * 4]),
+                64,
+                64,
+            ));
+            shell.advance_main(generation);
+            shell.render_outputs(&requests, &mut compositions)?;
+            shell.wait_for_gpu_for_benchmark()?;
+        }
+        previous = updates;
+        for _ in 0..5 {
+            shell.render_outputs(&requests, &mut compositions)?;
+        }
+        shell.wait_for_gpu_for_benchmark()?;
+        let cpu_before = cpu_ticks()?;
+        let started = Instant::now();
+        for _ in 0..frames {
+            shell.render_outputs(&requests, &mut compositions)?;
+            shell.wait_for_gpu_for_benchmark()?;
+        }
+        let elapsed = started.elapsed();
+        let cpu_seconds = (cpu_ticks()? - cpu_before) as f64 / ticks_per_second;
+        println!(
+            "CACHE_AGING adapter={:?} shm_updates={updates} unchanged_frames={frames} cpu_us_per_frame={:.3} wall_us_per_frame={:.3}",
+            adapter.name,
+            cpu_seconds * 1e6 / frames as f64,
+            micros_per_frame(elapsed, frames),
+        );
+    }
+    Ok(())
+}
+
+fn cpu_ticks() -> Result<u64> {
+    let stat = std::fs::read_to_string("/proc/self/stat")?;
+    let (_, fields) = stat
+        .rsplit_once(')')
+        .context("invalid process CPU counters")?;
+    let mut fields = fields.split_whitespace();
+    let user = fields
+        .nth(11)
+        .context("missing user CPU counter")?
+        .parse::<u64>()?;
+    let system = fields
+        .next()
+        .context("missing system CPU counter")?
+        .parse::<u64>()?;
+    Ok(user + system)
 }
 
 fn run_case(
@@ -160,6 +235,10 @@ fn configure_shell(app: &mut bevy::app::App) {
 }
 
 fn map_synthetic_client(shell: &mut benchmark::AppShell) {
+    map_synthetic_client_with_size(shell, CLIENT_WIDTH, CLIENT_HEIGHT);
+}
+
+fn map_synthetic_client_with_size(shell: &mut benchmark::AppShell, width: u32, height: u32) {
     std::hint::black_box(shell.enqueue_client_event(ClientSurfaceEvent {
         surface: CLIENT_SURFACE,
         kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(ToplevelState {
@@ -168,13 +247,11 @@ fn map_synthetic_client(shell: &mut benchmark::AppShell) {
             hints: Default::default(),
         })),
     }));
-    std::hint::black_box(
-        shell.enqueue_client_event(surface_snapshot(SyntheticContent::Pixels(vec![
-            0;
-            CLIENT_WIDTH as usize * CLIENT_HEIGHT as usize
-                * 4
-        ]))),
-    );
+    std::hint::black_box(shell.enqueue_client_event(surface_snapshot_with_size(
+        SyntheticContent::Pixels(vec![0; width as usize * height as usize * 4]),
+        width,
+        height,
+    )));
 }
 
 fn enqueue_retained_commit(shell: &mut benchmark::AppShell) {
@@ -187,16 +264,23 @@ enum SyntheticContent {
 }
 
 fn surface_snapshot(content: SyntheticContent) -> ClientSurfaceEvent {
+    surface_snapshot_with_size(content, CLIENT_WIDTH, CLIENT_HEIGHT)
+}
+
+fn surface_snapshot_with_size(
+    content: SyntheticContent,
+    width: u32,
+    height: u32,
+) -> ClientSurfaceEvent {
     let view = SurfaceContentView {
         source_x: 0.0,
         source_y: 0.0,
-        source_width: CLIENT_WIDTH as f32,
-        source_height: CLIENT_HEIGHT as f32,
-        logical_width: CLIENT_WIDTH as f32,
-        logical_height: CLIENT_HEIGHT as f32,
+        source_width: width as f32,
+        source_height: height as f32,
+        logical_width: width as f32,
+        logical_height: height as f32,
     };
-    let metadata =
-        ClientBufferMetadata::new(weld_client::Extent::new(CLIENT_WIDTH, CLIENT_HEIGHT), true);
+    let metadata = ClientBufferMetadata::new(weld_client::Extent::new(width, height), true);
     let change = match content {
         SyntheticContent::Retained => SurfaceBufferChange::Retained { metadata },
         SyntheticContent::Pixels(bgra_pixels) => SurfaceBufferChange::Replaced {

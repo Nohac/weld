@@ -85,11 +85,14 @@ use weld_input::{KeyboardSettingsReader, PointerDeviceSettingsReader};
 
 #[cfg(test)]
 const PRIMARY_OUTPUT_ID: OutputId = OutputId::new(1);
+
+#[cfg(feature = "test-support")]
+type BenchmarkPresentation = fn(&mut App, &[CompositionOutputFrame]) -> Result<bool>;
+
 pub struct AppShell {
     app: App,
     #[cfg(feature = "test-support")]
-    pub(crate) benchmark_presentation:
-        Option<fn(&mut App, &[CompositionOutputFrame]) -> Result<bool>>,
+    pub(crate) benchmark_presentation: Option<BenchmarkPresentation>,
     keyboard_settings: KeyboardSettingsReader,
     pointer_device_settings: PointerDeviceSettingsReader,
     output_preferences: OutputPreferencesReader,
@@ -2488,13 +2491,29 @@ mod tests {
             ready_bindings.1,
             "new image generations reuse unchanged parameter buffers"
         );
+        assert_eq!(
+            binding_cache_allocations(&shell.app).0.len(),
+            1,
+            "replacing pixels retires the previous generation's GPU binding"
+        );
+        for tick in 21..29 {
+            update_diagnostic_surface(&mut shell, surface, [255, 0, 0, 255]);
+            shell.advance_main(tick);
+            assert_surface_pixel(
+                render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID),
+                [0, 0, 255, 255],
+            );
+            let allocations = binding_cache_allocations(&shell.app);
+            assert_eq!(allocations.0.len(), 1, "SHM history must remain bounded");
+            assert_eq!(allocations.1, ready_bindings.1);
+        }
         shell
             .app
             .world_mut()
             .get_mut::<Node>(parent)
             .expect("parent")
             .display = bevy::ui::Display::None;
-        for tick in 21..23 {
+        for tick in 29..31 {
             shell.advance_main(tick);
             render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
         }
@@ -2504,7 +2523,7 @@ mod tests {
             .get_mut::<Node>(parent)
             .expect("parent")
             .display = bevy::ui::Display::Flex;
-        for tick in 23..27 {
+        for tick in 31..35 {
             shell.advance_main(tick);
             render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
         }
@@ -2515,7 +2534,7 @@ mod tests {
             "hide/show restores the same image"
         );
         shell.app.world_mut().entity_mut(parent).despawn();
-        shell.advance_main(28);
+        shell.advance_main(36);
         render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
         let retired = binding_cache_allocations(&shell.app);
         assert!(

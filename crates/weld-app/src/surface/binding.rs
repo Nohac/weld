@@ -41,7 +41,7 @@ struct PublishedSurfaceBinding {
 #[derive(Resource, Clone, Default)]
 struct PublishedSurfaceBindings {
     desired: HashMap<AssetId<SurfaceUiMaterial>, PublishedSurfaceBinding>,
-    valid_images: HashSet<AssetId<Image>>,
+    image_generations: HashMap<AssetId<Image>, u64>,
     material_parameters: HashMap<AssetId<SurfaceUiMaterial>, SurfaceParameterKey>,
 }
 
@@ -115,9 +115,16 @@ pub(super) fn configure_render_app(render_app: &mut SubApp) {
 
 pub(crate) fn publish_surface_bindings(
     app: &mut App,
-    mut valid_images: HashSet<AssetId<Image>>,
+    valid_images: HashSet<AssetId<Image>>,
 ) -> bool {
     let mut assets_changed = false;
+    // Imported images retain their identity across buffer-pool rotations. SHM
+    // uploads replace the GPU image behind a stable asset ID, so only its latest
+    // generation can remain cached.
+    let mut image_generations = valid_images
+        .into_iter()
+        .map(|image| (image, 0))
+        .collect::<HashMap<_, _>>();
     let selectors = app
         .world()
         .get_resource::<MaterialSelectorRegistry>()
@@ -143,7 +150,7 @@ pub(crate) fn publish_surface_bindings(
         };
         let (image, generation, encoding, y_inverted) = if let Some(displayed) =
             &buffer.displayed_dmabuf
-            && valid_images.contains(&displayed.image.id())
+            && image_generations.contains_key(&displayed.image.id())
         {
             (
                 displayed.image.id(),
@@ -154,9 +161,14 @@ pub(crate) fn publish_surface_bindings(
         } else if buffer.encoding != SurfaceImageEncoding::Unbound {
             (buffer.image.id(), buffer.generation, buffer.encoding, false)
         } else {
-            (buffer.image.id(), 0, SurfaceImageEncoding::Unbound, false)
+            (
+                buffer.image.id(),
+                buffer.generation,
+                SurfaceImageEncoding::Unbound,
+                false,
+            )
         };
-        valid_images.insert(buffer.image.id());
+        image_generations.insert(buffer.image.id(), buffer.generation);
         resolved.push((
             material_id,
             selector,
@@ -169,7 +181,7 @@ pub(crate) fn publish_surface_bindings(
     }
 
     let mut published = PublishedSurfaceBindings {
-        valid_images,
+        image_generations,
         ..Default::default()
     };
     for (material_id, selector, mut material, image, generation, encoding, y_inverted) in resolved {
@@ -229,7 +241,7 @@ fn prepare_surface_bindings(
 ) {
     cache.bindings.retain(|key, _| {
         published.material_parameters.get(&key.material) == Some(&key.parameters)
-            && published.valid_images.contains(&key.image)
+            && published.image_generations.get(&key.image) == Some(&key.generation)
     });
     cache.parameters.retain(|material, buffer| {
         published.material_parameters.get(material) == Some(&(*buffer.get()).into())
