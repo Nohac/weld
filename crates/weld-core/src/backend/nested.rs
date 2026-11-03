@@ -41,7 +41,7 @@ use winit::{
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, OwnedDisplayHandle},
     platform::pump_events::{EventLoopExtPumpEvents, PumpStatus},
     raw_window_handle::{HasDisplayHandle, RawDisplayHandle},
-    window::{Window, WindowAttributes, WindowId},
+    window::{CursorGrabMode, Window, WindowAttributes, WindowId},
 };
 
 enum NestedEvent {
@@ -147,6 +147,13 @@ pub(crate) fn prepare(options: RunOptions, signals: Signals) -> Result<PreparedH
                 signals,
                 shutdown_event: || NestedEvent::Command(HostCommand::Exit),
             })?;
+            // The parent supports whole-window locking. Surface-region
+            // confinement cannot be mirrored through Winit's Wayland API.
+            runtime
+                .state
+                .data
+                .server
+                .configure_local_pointer_constraints(true, false);
             if let Some(host_wake_fd) = host_wake_fd {
                 // Winit remains the sole reader. The duplicate descriptor only wakes
                 // calloop so the next outer-loop iteration can pump host events.
@@ -243,6 +250,19 @@ impl NativeDriver<NestedEvent> for NestedDriver {
         if !crate::runtime::finish_capture(&mut self.pending_capture, shell)? {
             return Ok(false);
         }
+        self.host.sync_pointer_grab(&mut state.data.server);
+        if let Some(event) = state
+            .data
+            .server
+            .take_pointer_warp(state.clients.active_pointer_route())
+            && let crate::input::RawSeatEventKind::PointerMotion { position, .. } = event.event
+        {
+            self.host.input.warp(position, event.time);
+            if let Some(window) = &self.host.window {
+                let _ = window
+                    .set_cursor_position(winit::dpi::LogicalPosition::new(position.x, position.y));
+            }
+        }
         let pump_status = {
             let _pump_span =
                 tracing::trace_span!(target: crate::PROFILE_TARGET, "winit_pump_events").entered();
@@ -281,6 +301,10 @@ impl NativeDriver<NestedEvent> for NestedDriver {
             let mut event_count = 0_usize;
             for event in self.host.input.drain() {
                 let event = state.data.server.resolve_input(event);
+                let event = state
+                    .data
+                    .server
+                    .constrain_local_input(event, state.clients.active_pointer_route());
                 if state.data.server.dispatch_file_drag_input(&event) {
                     continue;
                 }
@@ -745,6 +769,7 @@ fn apply_nested_cursor(
 }
 
 struct NestedHost {
+    pointer_grabbed: bool,
     cursor_image: CursorImage,
     cursor_configuration: crate::cursor::CursorConfiguration,
     cursor_scale: f64,
@@ -763,6 +788,7 @@ struct NestedHost {
 impl NestedHost {
     fn new(started_at: Instant) -> Self {
         Self {
+            pointer_grabbed: false,
             cursor_image: CursorImage::default(),
             cursor_configuration: crate::cursor::CursorConfiguration::default(),
             cursor_scale: 1.0,
@@ -781,6 +807,34 @@ impl NestedHost {
 
     fn event_time(&self) -> u32 {
         self.started_at.elapsed().as_millis() as u32
+    }
+
+    fn sync_pointer_grab(&mut self, server: &mut ServerState) {
+        let locked =
+            server.local_pointer_constraint() == Some(crate::server::PointerConstraintMode::Locked);
+        if locked == self.pointer_grabbed {
+            return;
+        }
+        let Some(window) = &self.window else {
+            return;
+        };
+        let mode = if locked {
+            CursorGrabMode::Locked
+        } else {
+            CursorGrabMode::None
+        };
+        match window.set_cursor_grab(mode) {
+            Ok(()) => {
+                self.pointer_grabbed = locked;
+                self.input.set_relative_mode(locked);
+            }
+            Err(error) => {
+                warn!(%error, "parent desktop could not change pointer lock");
+                self.pointer_grabbed = false;
+                self.input.set_relative_mode(false);
+                server.configure_local_pointer_constraints(false, false);
+            }
+        }
     }
 
     fn refresh_scale_factor(&mut self) {
@@ -802,7 +856,7 @@ impl ApplicationHandler for NestedHost {
         _device_id: DeviceId,
         event: DeviceEvent,
     ) {
-        self.input.handle_device_event(event);
+        self.input.handle_device_event(event, self.event_time());
     }
 
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {

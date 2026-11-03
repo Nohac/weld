@@ -15,6 +15,7 @@ mod layer;
 mod output;
 #[cfg(test)]
 mod output_tests;
+mod pointer_constraints;
 mod popup;
 mod presentation;
 pub(crate) mod presentation_time;
@@ -36,6 +37,7 @@ pub(crate) use adapter::{
     WaylandClientBridge, WaylandClientWork, registration as client_registration,
 };
 pub(crate) use output::{OutputDescriptor, OutputMetrics, ServerOutputDefinition};
+pub(crate) use pointer_constraints::PointerConstraintMode;
 pub use surface_tree::{
     PendingSurfaceBufferContent, PendingSurfaceBufferUpdate, PendingSurfaceTreeSnapshot,
 };
@@ -72,6 +74,7 @@ use smithay::{
         drm_syncobj::DrmSyncPointSource,
         fractional_scale::FractionalScaleManagerState,
         output::OutputManagerState,
+        pointer_constraints::PointerConstraintsState,
         pointer_gestures::PointerGesturesState,
         relative_pointer::RelativePointerManagerState,
         selection::{data_device::DataDeviceState, ext_data_control, wlr_data_control},
@@ -112,6 +115,7 @@ pub struct ServerState {
     _presentation_time: smithay::wayland::presentation::PresentationState,
     session_lock: session_lock::SessionLock,
     file_drag: file_drag::FileDragState,
+    pointer_constraints: pointer_constraints::PointerConstraints,
     xdg_shell_state: XdgShellState,
     activation: smithay::wayland::xdg_activation::XdgActivationState,
     xwayland: xwayland::XwaylandState,
@@ -219,6 +223,7 @@ impl ServerState {
         let cursor_shape_manager_state = CursorShapeManagerState::new::<Self>(&display_handle);
         let pointer_gestures_state = PointerGesturesState::new::<Self>(&display_handle);
         RelativePointerManagerState::new::<Self>(&display_handle);
+        PointerConstraintsState::new::<Self>(&display_handle);
         let shm_state = ShmState::new::<Self>(&display_handle, []);
         let dmabuf_protocol = DmabufProtocol::new(&display_handle, dmabuf_capabilities)?;
         let viewporter_state = ViewporterState::new::<Self>(&display_handle);
@@ -375,6 +380,7 @@ impl ServerState {
             _presentation_time: presentation_time,
             session_lock,
             file_drag: file_drag::FileDragState::default(),
+            pointer_constraints: pointer_constraints::PointerConstraints::default(),
             xdg_shell_state,
             activation,
             xwayland,
@@ -510,6 +516,7 @@ impl ServerState {
     pub fn flush_clients(&mut self) {
         self.poll_file_drag();
         self.cleanup_input_bindings();
+        self.refresh_pointer_constraints();
         self.popup_manager.cleanup();
         let ended = self
             .input_seats()

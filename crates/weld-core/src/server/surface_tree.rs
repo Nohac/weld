@@ -588,6 +588,21 @@ impl SurfaceTreeState {
         node.surface.alive().then(|| node.surface.clone())
     }
 
+    pub(super) fn input_region(
+        &self,
+        layer: SurfaceLayerId,
+    ) -> Option<(&WlSurface, &[Rectangle<i32, Logical>])> {
+        let node = self.nodes.iter().find(|node| {
+            self.buffers
+                .get(&node.object_id)
+                .is_some_and(|buffer| buffer.layer == layer && buffer.client_mapped)
+        })?;
+        let buffer = self.buffers.get(&node.object_id)?;
+        node.surface
+            .alive()
+            .then_some((&node.surface, buffer.input.rects.as_slice()))
+    }
+
     fn placement(
         &self,
         object_id: &ObjectId,
@@ -648,7 +663,7 @@ fn displayed_root_bounds(
     )
 }
 
-fn effective_region(
+pub(super) fn effective_region(
     region: &RegionAttributes,
     bounds: Rectangle<i32, Logical>,
 ) -> Vec<Rectangle<i32, Logical>> {

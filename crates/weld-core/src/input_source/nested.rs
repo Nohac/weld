@@ -21,6 +21,7 @@ pub struct NestedAdapter {
     pointer_position: Option<InputPosition>,
     active_scroll_axes: ActiveScrollAxes,
     pending_unaccelerated: Option<InputDelta>,
+    relative_mode: bool,
 }
 
 impl NestedAdapter {
@@ -35,12 +36,29 @@ impl NestedAdapter {
         self.events.drain(..)
     }
 
-    pub fn handle_device_event(&mut self, event: DeviceEvent) {
+    pub fn handle_device_event(&mut self, event: DeviceEvent, time: u32) {
         if let DeviceEvent::MouseMotion { delta: (x, y) } = event
             && self.pointer_position.is_some()
             && x.is_finite()
             && y.is_finite()
         {
+            if self.relative_mode {
+                if let Some(position) = self.pointer_position {
+                    let delta = InputDelta::new(x, y);
+                    self.events.push_back(RawSeatEvent::new(
+                        RawSeatEventKind::PointerMotion {
+                            position,
+                            relative: Some(RelativeMotion {
+                                delta,
+                                unaccelerated: delta,
+                                time_micros: u64::from(time) * 1000,
+                            }),
+                        },
+                        time,
+                    ));
+                }
+                return;
+            }
             let pending = self
                 .pending_unaccelerated
                 .get_or_insert_with(InputDelta::default);
@@ -49,9 +67,26 @@ impl NestedAdapter {
         }
     }
 
+    pub(crate) fn set_relative_mode(&mut self, enabled: bool) {
+        self.relative_mode = enabled;
+        self.pending_unaccelerated = None;
+    }
+
+    pub(crate) fn warp(&mut self, position: InputPosition, time: u32) {
+        self.pointer_position = Some(position);
+        self.events.push_back(RawSeatEvent::new(
+            RawSeatEventKind::PointerMotion {
+                position,
+                relative: None,
+            },
+            time,
+        ));
+    }
+
     pub fn handle_window_event(&mut self, event: WindowEvent, scale_factor: f64, time: u32) {
         match event {
             WindowEvent::Focused(false) => {
+                self.relative_mode = false;
                 self.pointer_position = None;
                 self.pending_unaccelerated = None;
                 self.cancel_active_scroll(time);
@@ -62,6 +97,9 @@ impl NestedAdapter {
             // the previously focused client automatically.
             WindowEvent::Focused(true) => {}
             WindowEvent::CursorMoved { position, .. } => {
+                if self.relative_mode {
+                    return;
+                }
                 let position = logical_input_position(position, scale_factor);
                 // Winit retains raw device deltas but only exposes accelerated
                 // motion as parent-transformed positions. Pair the raw sample
@@ -311,7 +349,10 @@ mod tests {
             position: PhysicalPosition::new(x, 40.0),
         };
         adapter.handle_window_event(motion(20.0), 2.0, 1);
-        adapter.handle_device_event(winit::event::DeviceEvent::MouseMotion { delta: (9.0, -2.0) });
+        adapter.handle_device_event(
+            winit::event::DeviceEvent::MouseMotion { delta: (9.0, -2.0) },
+            2,
+        );
         adapter.handle_window_event(motion(30.0), 2.0, 2);
         let events = adapter.drain().collect::<Vec<_>>();
         assert!(matches!(
@@ -394,6 +435,33 @@ mod tests {
                 vertical_stop: true,
             }
         );
+    }
+
+    #[test]
+    fn locked_nested_pointer_delivers_raw_motion_without_absolute_events() {
+        let mut adapter = super::NestedAdapter::default();
+        adapter.warp(InputPosition::new(20., 30.), 1);
+        adapter.drain().for_each(drop);
+        adapter.set_relative_mode(true);
+        adapter.handle_device_event(
+            winit::event::DeviceEvent::MouseMotion {
+                delta: (300., -200.),
+            },
+            2,
+        );
+        let events: Vec<_> = adapter.drain().collect();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0].event,
+            crate::input::RawSeatEventKind::PointerMotion { position, relative: Some(relative) }
+                if position == InputPosition::new(20., 30.)
+                    && relative.delta == crate::input::InputDelta::new(300., -200.)
+                    && relative.unaccelerated == relative.delta));
+        adapter.handle_window_event(winit::event::WindowEvent::Focused(false), 1., 3);
+        assert!(!adapter.relative_mode);
+        assert!(matches!(
+            adapter.drain().next().expect("focus loss").event,
+            crate::input::RawSeatEventKind::HostFocusLost
+        ));
     }
 
     #[test]

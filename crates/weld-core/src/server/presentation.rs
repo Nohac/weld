@@ -169,6 +169,12 @@ pub(super) fn take_callbacks(root: SurfaceId, surface: &WlSurface) -> Vec<Surfac
 }
 
 impl ServerState {
+    pub(super) fn local_surface_is_visible(&self, surface: SurfaceId) -> bool {
+        self.presentation_claims
+            .local
+            .get(&surface)
+            .is_none_or(Option::is_some)
+    }
     #[cfg(feature = "test-support")]
     pub(crate) fn staged_callback_count(&self) -> usize {
         self.staged_frame_callbacks
@@ -202,6 +208,7 @@ impl ServerState {
         }
         let was_native = self.presentation_claims.native(surface);
         self.presentation_claims.local.insert(surface, rate);
+        self.refresh_pointer_constraints();
         self.transition_callback_owner(surface, was_native);
         tracing::trace!(target: "weld_surface_diag", ?surface, ?rate, was_native,
             native = self.presentation_claims.native(surface),

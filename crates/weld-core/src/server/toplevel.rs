@@ -18,8 +18,8 @@ use smithay::{
     wayland::{
         buffer::BufferHandler,
         compositor::{
-            CompositorClientState, CompositorHandler, CompositorState, SurfaceAttributes,
-            add_blocker, add_pre_commit_hook, get_role, with_states,
+            BufferAssignment, CompositorClientState, CompositorHandler, CompositorState,
+            SurfaceAttributes, add_blocker, add_pre_commit_hook, get_role, with_states,
         },
         dmabuf::get_dmabuf,
         drm_syncobj::DrmSyncobjCachedState,
@@ -894,6 +894,24 @@ impl CompositorHandler for ServerState {
         let Some(toplevel) = self.toplevels.get(surface_id) else {
             return;
         };
+        // Smithay resets xdg's initial-configure state on buffer detachment.
+        // Retire the old surface and its input before the fresh-configure path
+        // can return; otherwise an unmapped window retains its cached buffer.
+        let detached = with_states(&root, |states| {
+            matches!(
+                states
+                    .cached_state
+                    .get::<SurfaceAttributes>()
+                    .current()
+                    .buffer,
+                Some(BufferAssignment::Removed)
+            )
+        });
+        if detached && toplevel.tree.client_mapped(&root) {
+            self.presentation_requested = true;
+            self.update_surface_tree(surface_id, &root);
+            return;
+        }
         if matches!(&toplevel.surface, WindowSurface::Xdg(window) if !window.is_initial_configure_sent())
         {
             self.discard_surface_feedback(surface_id, &root);

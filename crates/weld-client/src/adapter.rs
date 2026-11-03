@@ -524,6 +524,13 @@ impl ClientRuntime {
         }
     }
 
+    /// Current resolved route, including an ordinary button capture.
+    /// Native hosts use its mapping to enforce surface-local pointer constraints
+    /// before publishing desktop motion to application hit testing.
+    pub fn active_pointer_route(&self) -> Option<ClientPointerRoute> {
+        self.captured_or_current_pointer_route().ok().flatten()
+    }
+
     /// Publishes application pointer policy and settles adapter focus immediately.
     pub fn publish_pointer_route(
         &mut self,

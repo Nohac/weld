@@ -226,7 +226,12 @@ The X11 root cursor uses Weld's shared cursor theme and follows configuration
 updates; client-defined cursor artwork remains application-owned.
 
 X11 fullscreen requests use the shared window policy, including output-sized
-configuration and restoration. Minimize policy, pointer locking and confinement, X11/Wayland clipboard
+configuration and restoration. Pointer locking/confinement and XFixes cursor
+hiding now use the native Wayland constraints path. A private XWayland regression
+checks XGrabPointer, hidden cursor delivery, movement and release; individual
+games and physical-device acceptance remain separate checks. See
+[pointer locking and hiding](cursor-feedback.md#pointer-locking-and-hiding).
+Minimize policy, X11/Wayland clipboard
 and drag-and-drop bridging, X11-specific scale policy, resize increments/aspect
 hints, and application activation requests need separate validation or support.
 Floating resize constraints cover minimum/maximum dimensions; tiled/fullscreen

@@ -223,7 +223,8 @@ impl Dispatch<wl_seat::WlSeat, u32> for Observer {
                     seat.get_keyboard(qh, *id);
                 }
                 if capabilities.contains(wl_seat::Capability::Pointer) {
-                    seat.get_pointer(qh, *id);
+                    let pointer = seat.get_pointer(qh, *id);
+                    state.constraints.pointers.insert(*id, pointer);
                 }
             }
             _ => {}
@@ -429,6 +430,16 @@ impl Dispatch<wl_pointer::WlPointer, u32> for Observer {
                 state.input.last_button_serial = Some(serial);
             }
             wl_pointer::Event::Leave { .. } => state.input.pointer_leaves += 1,
+            wl_pointer::Event::Enter { serial, .. } => {
+                state.constraints.enters.insert(*id, serial);
+            }
+            wl_pointer::Event::Motion {
+                surface_x,
+                surface_y,
+                ..
+            } => {
+                state.constraints.motions.push((*id, surface_x, surface_y));
+            }
             _ => {}
         }
     }

@@ -24,7 +24,6 @@ use smithay::{
     },
     utils::{Logical, SERIAL_COUNTER},
     wayland::{
-        pointer_constraints::PointerConstraintsHandler,
         seat::WaylandFocus,
         selection::{
             SelectionHandler,
@@ -174,11 +173,18 @@ impl ServerState {
                     state,
                 },
             ) => {
-                let target = position.map(|local_position| SurfaceHit {
-                    surface,
-                    layer,
-                    local_position,
-                });
+                let target = position
+                    .map(|local_position| SurfaceHit {
+                        surface,
+                        layer,
+                        local_position,
+                    })
+                    .or_else(|| {
+                        input_seat
+                            .pointer_target
+                            .get()
+                            .filter(|target| target.surface == surface && target.layer == layer)
+                    });
                 self.apply_pointer_button(
                     input_seat,
                     host_position.unwrap_or(input_seat.pointer_position.get()),
@@ -383,6 +389,7 @@ impl ServerState {
             return;
         };
         self.apply_toplevel_focus(input_seat, requested);
+        self.refresh_pointer_constraint(input_seat);
     }
 
     pub(super) fn begin_pointer_move(
@@ -608,8 +615,8 @@ impl ServerState {
     fn apply_pointer_motion(
         &mut self,
         input_seat: &InputSeat,
-        position: InputPosition,
-        target: Option<SurfaceHit>,
+        mut position: InputPosition,
+        mut target: Option<SurfaceHit>,
         relative: Option<RelativeMotion>,
         time: u32,
     ) {
@@ -617,7 +624,9 @@ impl ServerState {
             warn!("ignored pointer motion because the seat has no pointer");
             return;
         };
+        let locked = self.constrain_pointer_delivery(input_seat, &mut position, &mut target);
         input_seat.pointer_position.set(position);
+        input_seat.pointer_target.set(target);
         let focus = self.pointer_focus(position, target);
         if !pointer.is_grabbed()
             && let Some((surface, _)) = &focus
@@ -629,15 +638,17 @@ impl ServerState {
             pointer.is_grabbed(),
             input_seat.ordinary_implicit_grab.get(),
         );
-        pointer.motion(
-            self,
-            focus.clone(),
-            &MotionEvent {
-                location: compositor_point(position),
-                serial: SERIAL_COUNTER.next_serial(),
-                time: InputTime::from_millis(time),
-            },
-        );
+        if !locked {
+            pointer.motion(
+                self,
+                focus.clone(),
+                &MotionEvent {
+                    location: compositor_point(position),
+                    serial: SERIAL_COUNTER.next_serial(),
+                    time: InputTime::from_millis(time),
+                },
+            );
+        }
         if let Some(relative) = relative.filter(|motion| motion.is_finite()) {
             pointer.relative_motion(
                 self,
@@ -650,6 +661,7 @@ impl ServerState {
             );
         }
         pointer.frame(self);
+        self.refresh_pointer_constraint(input_seat);
         self.set_shell_cursor_ownership(input_seat, shell_owns_cursor);
         self.retry_pending_focus(input_seat, pointer.is_grabbed());
     }
@@ -657,8 +669,8 @@ impl ServerState {
     fn apply_pointer_button(
         &mut self,
         input_seat: &InputSeat,
-        position: InputPosition,
-        target: Option<SurfaceHit>,
+        mut position: InputPosition,
+        mut target: Option<SurfaceHit>,
         button: u32,
         state: ButtonState,
         time: u32,
@@ -675,7 +687,9 @@ impl ServerState {
         {
             return;
         }
+        let locked = self.constrain_pointer_delivery(input_seat, &mut position, &mut target);
         input_seat.pointer_position.set(position);
+        input_seat.pointer_target.set(target);
         let serial = SERIAL_COUNTER.next_serial();
         let focus = self.pointer_focus(position, target);
         let pointer_was_grabbed = pointer.is_grabbed();
@@ -697,15 +711,17 @@ impl ServerState {
             pointer_was_grabbed,
             input_seat.ordinary_implicit_grab.get(),
         );
-        pointer.motion(
-            self,
-            focus,
-            &MotionEvent {
-                location: compositor_point(position),
-                serial,
-                time: InputTime::from_millis(time),
-            },
-        );
+        if !locked {
+            pointer.motion(
+                self,
+                focus,
+                &MotionEvent {
+                    location: compositor_point(position),
+                    serial,
+                    time: InputTime::from_millis(time),
+                },
+            );
+        }
         match state {
             ButtonState::Pressed => {
                 if input_seat.pressed_pointer_buttons.borrow_mut().is_empty()
@@ -936,6 +952,7 @@ impl ServerState {
     }
 
     fn release_seat_pointer(&mut self, input_seat: &InputSeat, time: u32) {
+        input_seat.pointer_target.set(None);
         if let Some(gesture) = input_seat.active_gesture.take() {
             self.apply_pointer_gesture(input_seat, gesture.cancelled(), time);
         }
@@ -1297,9 +1314,6 @@ fn transition_pending_focus(
         }
     }
 }
-
-// Required by Smithay's WlSurface pointer target; no constraints global is advertised yet.
-impl PointerConstraintsHandler for ServerState {}
 
 impl SeatHandler for ServerState {
     fn touch_down_grab(

@@ -394,6 +394,39 @@ struct DrmDriver {
     session_locked: bool,
 }
 
+impl DrmDriver {
+    fn dispatch_desktop_input(
+        &mut self,
+        state: &mut HostState<HostEvent>,
+        app: &mut dyn ApplicationHost,
+        event: RawSeatEvent,
+    ) {
+        let route = state.clients.active_pointer_route();
+        let mut event = state.data.server.constrain_local_input(event, route);
+        if state.data.server.dispatch_file_drag_input(&event) {
+            return;
+        }
+        if let RawSeatEventKind::PointerMotion { position, .. } = &mut event.event {
+            *position = self.input.set_pointer_position(*position);
+            self.desktop.set_cursor_position(*position);
+            self.presentation_schedule.request_present_all();
+            self.frame_state.request_present();
+        }
+        let forward = app.enqueue_input_event(event.clone());
+        state
+            .data
+            .server
+            .suppress_local_modifiers(app.suppressed_local_modifiers());
+        if forward {
+            state
+                .clients
+                .dispatch_unconsumed_input(event.into_runtime());
+            state.data.server.apply_pending_client_work();
+        }
+        self.input_pending = true;
+    }
+}
+
 impl NativeDriver<HostEvent> for DrmDriver {
     fn prepare_dispatch(
         &mut self,
@@ -402,6 +435,13 @@ impl NativeDriver<HostEvent> for DrmDriver {
     ) -> Result<bool> {
         self.input
             .update_keyboard_leds(state.data.server.keyboard_leds());
+        if let Some(event) = state
+            .data
+            .server
+            .take_pointer_warp(state.clients.active_pointer_route())
+        {
+            self.dispatch_desktop_input(state, app, event);
+        }
         if !crate::runtime::finish_capture(&mut self.pending_capture, app)? {
             return Ok(false);
         }
@@ -564,27 +604,7 @@ impl NativeDriver<HostEvent> for DrmDriver {
                         if state.data.server.dispatch_lock_input(&event) {
                             continue;
                         }
-                        if state.data.server.dispatch_file_drag_input(&event) {
-                            continue;
-                        }
-                        if matches!(event.event, RawSeatEventKind::PointerMotion { .. }) {
-                            self.desktop
-                                .set_cursor_position(self.input.pointer_position());
-                            self.presentation_schedule.request_present_all();
-                            self.frame_state.request_present();
-                        }
-                        let forward = application.enqueue_input_event(event.clone());
-                        state
-                            .data
-                            .server
-                            .suppress_local_modifiers(application.suppressed_local_modifiers());
-                        if forward {
-                            state
-                                .clients
-                                .dispatch_unconsumed_input(event.into_runtime());
-                            state.data.server.apply_pending_client_work();
-                        }
-                        self.input_pending = true;
+                        self.dispatch_desktop_input(state, application, event);
                     }
                 }
             }

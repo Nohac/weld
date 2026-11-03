@@ -1430,6 +1430,28 @@ stay continuous across render targets. The final release is delivered in that
 captured space, then the unchanged pointer position is immediately republished
 on its current output so stationary picking does not retain the old target.
 
+Native pointer constraints (`zwp_pointer_constraints_v1`) belong to the
+application-visible seat. A focused, mapped, locally visible surface can lock
+the pointer or confine it to the intersection of its committed constraint and
+input regions. The DRM host corrects desktop motion before application hit
+testing and rebases libinput's position; device-relative deltas remain unchanged.
+Locked delivery suppresses absolute `wl_pointer.motion` while preserving relative
+motion, buttons and scrolling. Confinement clips the motion path through the
+region, including holes, and respects the published affine client mapping.
+Keyboard focus loss, local hiding, unmapping, controller retirement and host
+focus loss release constraints. Persistent constraints can reactivate when
+eligible; one-shot constraints cannot. A committed unlock-position hint is
+applied only while its client still owns the current local pointer route.
+
+Remote constraints remain scoped to their controller's application seat and
+cannot capture the physical desktop pointer. Nested validation forwards local
+locks to the parent Winit window and uses raw device motion while locked. A
+parent that rejects locking causes local constraints to be disabled for that
+nested session. Nested surface-region confinement is declined because Winit's
+Wayland backend cannot mirror an arbitrary child region to the parent cursor.
+Physical DRM supports both operations. Cursor hiding remains client-controlled
+and independent of pointer locking; see [Client cursor feedback](cursor-feedback.md).
+
 The libinput adapter preserves each device's default acceleration profile and
 speed, configures supported tap and clickfinger behavior, and retains swipe,
 pinch, hold, scroll, cancellation, and timestamps in backend-neutral events.

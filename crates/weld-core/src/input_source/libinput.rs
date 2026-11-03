@@ -260,6 +260,12 @@ impl LibinputAdapter {
         self.last_event_time_msec
     }
 
+    /// Rebase device integration after native confinement or a cursor hint warp.
+    pub(crate) fn set_pointer_position(&mut self, position: InputPosition) -> InputPosition {
+        self.pointer = self.topology.constrain(position);
+        self.pointer
+    }
+
     pub const fn pointer_position(&self) -> InputPosition {
         self.pointer
     }
@@ -435,8 +441,8 @@ mod tests {
     use super::{ActiveGesture, LibinputAdapter};
     use crate::input::{
         InputDelta, InputPosition, PointerGesture, PointerGestureKind, RawScrollPhase,
-        RawScrollSource, RawSeatEvent, RawSeatEventKind, TouchpadHold, TouchpadPinch,
-        TouchpadSwipe,
+        RawScrollSource, RawSeatEvent, RawSeatEventKind, RelativeMotion, TouchpadHold,
+        TouchpadPinch, TouchpadSwipe,
     };
     use crate::{
         output::{OutputConfiguration, OutputId, OutputLayout, OutputScale, OutputTopology},
@@ -458,6 +464,22 @@ mod tests {
 
     fn adapter(width: u32, height: u32) -> LibinputAdapter {
         LibinputAdapter::new(topology(width, height, 1.0))
+    }
+
+    #[test]
+    fn constrained_pointer_rebases_the_next_device_delta() {
+        let mut adapter = adapter(1920, 1080);
+        adapter.set_pointer_position(InputPosition::new(100., 200.));
+        let relative = RelativeMotion {
+            delta: InputDelta::new(10., 5.),
+            unaccelerated: InputDelta::new(8., 4.),
+            time_micros: 1_000,
+        };
+        adapter.relative_motion(relative, 1);
+        adapter.set_pointer_position(InputPosition::new(100., 200.));
+        assert!(matches!(adapter.relative_motion(relative, 2).event,
+            RawSeatEventKind::PointerMotion { position, relative: Some(delivered) }
+                if position == InputPosition::new(110., 205.) && delivered == relative));
     }
 
     #[test]
