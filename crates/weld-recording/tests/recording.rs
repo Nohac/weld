@@ -2,6 +2,7 @@ use anyhow::Result;
 use std::{
     cell::RefCell,
     rc::Rc,
+    sync::{Arc, mpsc},
     time::{Duration, Instant},
 };
 use weld_client::{
@@ -20,6 +21,7 @@ use weld_recording::{Codec, Options, Recorder, Region, Status};
 
 struct Encoder {
     completed: Vec<EncodeCompletion>,
+    payload_bytes: usize,
     sizes: Rc<RefCell<Vec<Extent>>>,
 }
 impl EncodeBackend for Encoder {
@@ -51,7 +53,7 @@ impl EncodeBackend for Encoder {
                     EncodedFrameKind::Delta
                 },
                 timestamp_micros: request.timestamp_micros,
-                payload: vec![1],
+                payload: vec![1; self.payload_bytes],
             }),
         });
         Ok(())
@@ -107,9 +109,11 @@ fn recording_reuses_stream_coalescing_and_keeps_original_observation_times() {
     let sizes = Rc::new(RefCell::new(Vec::new()));
     let encoder = Encoder {
         completed: vec![],
+        payload_bytes: 1,
         sizes: sizes.clone(),
     };
     let surface = ClientSurfaceId::new(ClientId::new(ClientSourceId::new(0), 1), 1);
+    let (wake, awakened) = mpsc::channel();
     let mut recorder = Recorder::new(
         "test".into(),
         surface,
@@ -127,6 +131,9 @@ fn recording_reuses_stream_coalescing_and_keeps_original_observation_times() {
         },
         Box::new(encoder),
         now,
+        Arc::new(move || {
+            let _ = wake.send(());
+        }),
     )
     .expect("recorder");
     recorder
@@ -138,17 +145,8 @@ fn recording_reuses_stream_coalescing_and_keeps_original_observation_times() {
     recorder
         .observe(&commit(13), now + Duration::from_millis(30))
         .expect("observe");
-    for _ in 0..5 {
-        recorder
-            .tick(now + Duration::from_millis(100))
-            .expect("drain");
-    }
-    assert!(
-        recorder
-            .tick(now + Duration::from_millis(100))
-            .expect("complete")
-    );
-    let clip = recorder.finish();
+    drain(&mut recorder, now + Duration::from_millis(100), &awakened);
+    let clip = recorder.finish().expect("stored clip");
     assert!(matches!(clip.info.status, Status::Complete));
     assert_eq!(clip.info.submitted_frames, 4);
     assert_eq!(
@@ -198,5 +196,78 @@ fn recording_rejects_invalid_limits_and_out_of_bounds_crop() {
         }
         .validate(100., 100.)
         .is_err()
+    );
+}
+
+fn drain(recorder: &mut Recorder, end: Instant, awakened: &mpsc::Receiver<()>) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !recorder.tick(end).expect("drain recording") {
+        assert!(Instant::now() < deadline, "storage did not finish");
+        let _ = awakened.recv_timeout(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn ten_minute_recording_outlives_old_frame_and_duration_limits() {
+    let now = Instant::now();
+    let options = Options {
+        duration_ms: 600_000,
+        codec: Codec::Av1,
+        region: None,
+        after_sequence: None,
+    };
+    assert!(options.validate().is_ok());
+    assert!(
+        Options {
+            duration_ms: 600_001,
+            ..options.clone()
+        }
+        .validate()
+        .is_err()
+    );
+    let (wake, awakened) = mpsc::channel();
+    let encoder = Encoder {
+        completed: vec![],
+        payload_bytes: 1024,
+        sizes: Rc::new(RefCell::new(Vec::new())),
+    };
+    let surface = ClientSurfaceId::new(ClientId::new(ClientSourceId::new(0), 1), 1);
+    let mut recorder = Recorder::new(
+        "long".into(),
+        surface,
+        commit(1),
+        options,
+        Box::new(encoder),
+        now,
+        Arc::new(move || {
+            let _ = wake.send(());
+        }),
+    )
+    .expect("recorder");
+    // Exercise all 36,000 updates without a ten-minute wall-clock sleep. Await each
+    // storage notification so this test does not benchmark temporary-file speed.
+    for index in 1..=36_000_u64 {
+        awakened
+            .recv_timeout(Duration::from_secs(5))
+            .expect("storage completion");
+        let time = now + Duration::from_micros(index * 600_000_000 / 36_000);
+        recorder.observe(&commit(index + 1), time).expect("observe");
+        recorder.tick(time).expect("encode");
+    }
+    drain(&mut recorder, now + Duration::from_secs(600), &awakened);
+    let clip = recorder.finish().expect("clip");
+    assert!(clip.info.bytes > 32 * 1024 * 1024);
+    assert_eq!(clip.info.frame_count, 36_001);
+    assert_eq!(clip.info.dropped_frames, Some(0));
+    assert_eq!(clip.info.frames.last().expect("last").time_us, 600_000_000);
+    assert_eq!(clip.info.expires_after_idle_ms, 1_800_000);
+    assert_eq!(
+        clip.frames
+            .last()
+            .expect("packet")
+            .unit
+            .bytes()
+            .expect("read"),
+        vec![1; 1024]
     );
 }

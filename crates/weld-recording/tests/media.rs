@@ -34,6 +34,8 @@ fn av1_and_h264_recordings_can_be_scrubbed_cropped_and_remuxed() -> Result<()> {
                 "1",
                 "-bf",
                 "0",
+                "-g",
+                "2",
             ])
             .arg(&path)
             .output()?;
@@ -67,7 +69,10 @@ fn av1_and_h264_recordings_can_be_scrubbed_cropped_and_remuxed() -> Result<()> {
                     timestamp_micros: info.time_us,
                     payload: packet.data().unwrap_or_default().to_vec(),
                 };
-                EncodedFrame { info, unit }
+                EncodedFrame {
+                    info,
+                    unit: unit.into(),
+                }
             })
             .collect();
         ensure!(frames.len() == 5, "fixture packet count");
@@ -88,9 +93,9 @@ fn av1_and_h264_recordings_can_be_scrubbed_cropped_and_remuxed() -> Result<()> {
             dropped_frames: Some(0),
             frame_count: frames.len() as u32,
             frames: frames.iter().map(|frame| frame.info.clone()).collect(),
-            bytes: frames.iter().map(|frame| frame.unit.payload.len()).sum(),
+            bytes: frames.iter().map(|frame| frame.unit.len()).sum(),
             error: None,
-            expires_after_idle_ms: 120_000,
+            expires_after_idle_ms: weld_recording::IDLE_RETENTION_MS,
         };
         let mut clip = Clip { info, frames };
         let image = weld_recording::frame(
@@ -138,7 +143,7 @@ fn av1_and_h264_recordings_can_be_scrubbed_cropped_and_remuxed() -> Result<()> {
         let video =
             weld_recording::video(&clip, || Ok(())).context(format!("{codec:?} video export"))?;
         let exported = directory.path().join(format!("export-{extension}.mkv"));
-        fs::write(&exported, STANDARD.decode(video.data_base64)?)?;
+        fs::write(&exported, STANDARD.decode(video.chunk(0)?.data_base64)?)?;
         let mut demux = ffmpeg_next::format::input(&exported)?;
         let stream = demux
             .streams()
@@ -174,7 +179,7 @@ fn av1_and_h264_recordings_can_be_scrubbed_cropped_and_remuxed() -> Result<()> {
         }
         let video = weld_recording::video(&clip, || Ok(()))?;
         let cropped = directory.path().join(format!("cropped-{extension}.mkv"));
-        fs::write(&cropped, STANDARD.decode(video.data_base64)?)?;
+        fs::write(&cropped, STANDARD.decode(video.chunk(0)?.data_base64)?)?;
         let output = Command::new("ffmpeg")
             .args(["-v", "error", "-i"])
             .arg(&cropped)
@@ -187,6 +192,38 @@ fn av1_and_h264_recordings_can_be_scrubbed_cropped_and_remuxed() -> Result<()> {
             (120, 80),
             "container cropping excludes coded padding"
         );
+        // An unrequested middle GOP must not be decoded for a sparse sheet.
+        // Emptying it makes a sequential decoder fail; the last keyframe remains
+        // independently decodable, including when spread across ten minutes.
+        assert_eq!(clip.frames[2].unit.kind, EncodedFrameKind::Keyframe);
+        assert_eq!(clip.frames[4].unit.kind, EncodedFrameKind::Keyframe);
+        clip.frames[2].unit = EncodedAccessUnit {
+            frame: MediaFrameId::new(MediaStreamId::new(1), StreamGeneration::new(1), 2),
+            codec: name,
+            kind: EncodedFrameKind::Keyframe,
+            timestamp_micros: 0,
+            payload: vec![],
+        }
+        .into();
+        clip.info.duration_ms = 600_000;
+        for (index, frame) in clip.frames.iter_mut().enumerate() {
+            frame.info.time_us = index as u64 * 120_000_000;
+        }
+        let sparse = weld_recording::sheet(
+            &clip,
+            SheetOptions {
+                start_ms: None,
+                end_ms: None,
+                frames: 2,
+                width: 240,
+                height: 80,
+                region: None,
+            },
+            || Ok(()),
+        )?;
+        assert_eq!(sparse.tiles[0].frame.index, 0);
+        assert_eq!(sparse.tiles[1].frame.index, 4);
+        assert_eq!(sparse.tiles[1].frame.time_us, 480_000_000);
     }
     Ok(())
 }

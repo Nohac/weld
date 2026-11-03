@@ -1,11 +1,15 @@
 //! Recording sink over the same encoded source port used by streaming.
 
-use crate::{Clip, EncodedFrame, FrameInfo, Info, MAX_BYTES, MAX_FRAMES, Options, Region, Status};
+use crate::{
+    Clip, FrameInfo, IDLE_RETENTION_MS, Info, MAX_BYTES, MAX_FRAMES, Options, Region, Status,
+    storage::Storage,
+};
 use anyhow::{Context, Result, ensure};
 use std::{
     cell::RefCell,
     collections::HashMap,
     rc::Rc,
+    sync::Arc,
     time::{Duration, Instant},
 };
 use weld_client::{
@@ -20,11 +24,10 @@ use weld_hoist_encoded::{
 use weld_hoist_protocol::{DestinationEnvelope, SourceMessage};
 use weld_media::{EncodedAccessUnit, MediaFrameId};
 
-#[derive(Default)]
 struct Collected {
     metadata: HashMap<u64, FrameInfo>,
     packets: HashMap<MediaFrameId, EncodedAccessUnit>,
-    frames: Vec<EncodedFrame>,
+    storage: Storage,
     bytes: usize,
 }
 #[derive(Clone)]
@@ -35,10 +38,18 @@ impl EncodedSourceTransport for Sink {
         packet: SourceTransportPacket,
     ) -> HoistPortResult<SendStatus<SourceTransportPacket>> {
         let mut data = self.0.borrow_mut();
+        if matches!(&packet, SourceTransportPacket::Media(_))
+            && !data.storage.has_capacity(data.packets.len())
+        {
+            return Ok(SendStatus::Busy(packet));
+        }
         match packet {
             SourceTransportPacket::Media(media) => {
                 if data.bytes.saturating_add(media.access_unit.payload.len()) > MAX_BYTES {
-                    return Err("recording exceeds the 32 MiB encoded budget".into());
+                    return Err("recording exceeds the 2 GiB encoded budget".into());
+                }
+                if media.access_unit.payload.len() > 32 * 1024 * 1024 {
+                    return Err("recording packet exceeds 32 MiB".into());
                 }
                 data.bytes += media.access_unit.payload.len();
                 data.packets
@@ -54,12 +65,19 @@ impl EncodedSourceTransport for Sink {
                                 .packets
                                 .remove(&buffer.frame)
                                 .ok_or("recording media missing")?;
-                            let mut info = data
+                            let info = data
                                 .metadata
                                 .remove(&commit.revision.raw())
                                 .ok_or("recording timestamp missing")?;
-                            info.index = data.frames.len() as u32;
-                            data.frames.push(EncodedFrame { info, unit });
+                            // The source emits commits in order. Earlier revisions were
+                            // coalesced and will never produce another packet.
+                            data.metadata
+                                .retain(|revision, _| *revision > commit.revision.raw());
+                            data.storage.push(info, unit).map_err(
+                                |error| -> Box<dyn std::error::Error + Send + Sync> {
+                                    error.into()
+                                },
+                            )?;
                         }
                     }
                 }
@@ -68,7 +86,8 @@ impl EncodedSourceTransport for Sink {
         Ok(SendStatus::Sent)
     }
     fn media_headroom(&self) -> bool {
-        true
+        let data = self.0.borrow();
+        data.storage.has_capacity(data.packets.len())
     }
     fn drain(&self) -> HoistPortResult<Vec<DestinationEnvelope>> {
         Ok(Vec::new())
@@ -98,6 +117,7 @@ impl Recorder {
         options: Options,
         backend: Box<dyn EncodeBackend>,
         now: Instant,
+        wake: Arc<dyn Fn() + Send + Sync>,
     ) -> Result<Self> {
         options.validate()?;
         let scene = scene(&initial)?;
@@ -118,7 +138,12 @@ impl Recorder {
             u64::from(width) * u64::from(height) <= 16_777_216,
             "recording exceeds the 16 megapixel frame budget"
         );
-        let collected = Rc::new(RefCell::new(Collected::default()));
+        let collected = Rc::new(RefCell::new(Collected {
+            metadata: HashMap::new(),
+            packets: HashMap::new(),
+            bytes: 0,
+            storage: Storage::new(wake)?,
+        }));
         let port = EncodedSourcePort::composed_input(Sink(collected.clone()), backend)?;
         let info = Info {
             id,
@@ -134,7 +159,7 @@ impl Recorder {
             frames: Vec::new(),
             bytes: 0,
             error: None,
-            expires_after_idle_ms: 120_000,
+            expires_after_idle_ms: IDLE_RETENTION_MS,
         };
         let mut recorder = Self {
             port,
@@ -184,7 +209,8 @@ impl Recorder {
         self.port
             .progress_after_destination()
             .map_err(|error| anyhow::anyhow!("{error}"))?;
-        Ok(now >= self.end() && self.port.is_idle())
+        let storage_idle = self.collected.borrow().storage.is_idle()?;
+        Ok(now >= self.end() && self.port.is_idle() && storage_idle)
     }
 
     fn submit(&mut self, source_frame: &ClientSurfaceCommit, now: Instant) -> Result<()> {
@@ -242,21 +268,25 @@ impl Recorder {
         Ok(())
     }
 
+    pub fn timeline(&self) -> crate::Timeline {
+        self.collected.borrow().storage.timeline()
+    }
+
     pub fn info(&self) -> Info {
         let mut info = self.info.clone();
         let data = self.collected.borrow();
-        info.frames = data.frames.iter().map(|frame| frame.info.clone()).collect();
         info.bytes = data.bytes;
-        info.frame_count = info.frames.len() as u32;
+        info.frame_count = data.storage.frame_count() as u32;
         info
     }
 
-    pub fn finish(self) -> Clip {
+    pub fn finish(self) -> Result<Clip> {
         let mut info = self.info();
         info.status = Status::Complete;
         info.dropped_frames = Some(info.submitted_frames.saturating_sub(info.frame_count));
-        let frames = std::mem::take(&mut self.collected.borrow_mut().frames);
-        Clip { info, frames }
+        let frames = self.collected.borrow_mut().storage.finish()?;
+        info.frames = frames.iter().map(|frame| frame.info.clone()).collect();
+        Ok(Clip { info, frames })
     }
 }
 

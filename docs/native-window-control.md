@@ -454,18 +454,27 @@ original compressed packets and observation timestamps into Matroska.
 Inspection crops hardware-coded padding to the visible recording extent;
 Matroska export carries the corresponding frame-cropping metadata.
 
-Current resource bounds are four retained recordings, ten seconds per recording,
-2,400 observed updates, 32 MiB of encoded data per recording, and 16 megapixels
+Current resource bounds are four retained recordings, ten minutes per recording
+(`duration_ms` from 1 through 600000), 144,001 observed updates (240 Hz plus the
+initial frame), 2 GiB of encoded data per recording, and 16 megapixels
 per encoded frame. Inspection allows two concurrent workers, up to 100 tiles,
 and combined image dimensions up to 4096×4096. Encoder capability errors remain
 explicit. These are service resource budgets; frame and tile counts are separate.
 
 Each recording retains its original occupant's View permission. Revocation,
 replacement and explicit release invalidate access, including an inspection
-already in progress. A two-minute idle lease is renewed by inspection/status
-requests. Expired entries are removed on host deadlines. Encoded recordings
-live in bounded session memory and disappear on restart. Export scratch files
-use anonymous file descriptors and are reclaimed on process exit. Explicit
+already in progress. A 30-minute idle lease starts again when capture completes
+(or fails) and is renewed by inspection/status requests. Expired entries are
+removed on host deadlines, even without further requests. Encoded packets are
+spooled to anonymous temporary files on a bounded storage worker; the host thread
+does not write packets to disk. Slow storage applies encoder backpressure, and
+completion waits for pending writes. These files and cached Matroska exports are
+reclaimed on release/expiry or process exit; they do not survive a restart.
+Temporary storage uses the process's temporary directory, so its filesystem
+capacity still applies. Export transfers use 1 MiB chunks rather than loading the
+entire video into one RPC response. Waiting recording calls allow the requested
+duration plus admission/drain time. Sparse contact sheets decode only the
+keyframe ranges containing their selected tiles. Explicit
 PNG/video exports are user-owned files and survive lease expiry; exports refuse
 to overwrite an existing path.
 

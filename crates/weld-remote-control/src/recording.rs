@@ -10,9 +10,12 @@ use std::{
     },
     time::{Duration, Instant},
 };
-use weld_recording::{Clip, FrameOptions, Image, Info, SheetOptions, Status, Video};
+use weld_recording::{
+    Clip, FrameOptions, IDLE_RETENTION_MS, Image, Info, SheetOptions, Status, Timeline, Video,
+    VideoFile,
+};
 
-const IDLE_LEASE: Duration = Duration::from_secs(120);
+const IDLE_LEASE: Duration = Duration::from_millis(IDLE_RETENTION_MS as u64);
 const MAX_RECORDINGS: usize = 4;
 
 struct Entry {
@@ -20,7 +23,9 @@ struct Entry {
     live: Arc<AtomicBool>,
     expires: Instant,
     info: Info,
+    timeline: Timeline,
     clip: Option<Arc<Clip>>,
+    video: Arc<Mutex<Option<VideoFile>>>,
 }
 impl Drop for Entry {
     fn drop(&mut self) {
@@ -43,7 +48,7 @@ impl Archive {
         );
         Ok(())
     }
-    pub fn insert(&self, grant: Arc<GrantState>, info: Info) -> Result<()> {
+    pub fn insert(&self, grant: Arc<GrantState>, info: Info, timeline: Timeline) -> Result<()> {
         let mut entries = self
             .0
             .lock()
@@ -56,7 +61,9 @@ impl Archive {
                 live: Arc::new(AtomicBool::new(true)),
                 expires: Instant::now() + IDLE_LEASE,
                 info,
+                timeline,
                 clip: None,
+                video: Arc::new(Mutex::new(None)),
             },
         );
         Ok(())
@@ -69,11 +76,15 @@ impl Archive {
         })
     }
     pub fn update(&self, info: Info, clip: Option<Clip>) {
+        self.update_at(info, clip, Instant::now());
+    }
+    fn update_at(&self, info: Info, clip: Option<Clip>, now: Instant) {
         if let Ok(mut entries) = self.0.lock()
             && let Some(entry) = entries.get_mut(&info.id)
         {
             entry.info = info;
             if let Some(clip) = clip {
+                entry.expires = now + IDLE_LEASE;
                 entry.clip = Some(Arc::new(clip));
                 self.1.notify_all();
             }
@@ -83,6 +94,8 @@ impl Archive {
         if let Ok(mut entries) = self.0.lock()
             && let Some(entry) = entries.get_mut(id)
         {
+            entry.expires = Instant::now() + IDLE_LEASE;
+            entry.timeline = Timeline::default();
             entry.info.status = Status::Failed;
             entry.info.error = Some(error);
             self.1.notify_all();
@@ -150,8 +163,17 @@ impl RemoteControlClient {
                 .map_err(|_| anyhow::anyhow!("recording archive unavailable"))?;
         }
     }
-    pub fn recording_info(&self, id: &str) -> Result<Info> {
-        self.recordings.read(id, |entry| Ok(entry.info.clone()))
+    pub fn recording_info(&self, id: &str, include_frames: bool) -> Result<Info> {
+        self.recordings.read(id, |entry| {
+            let mut info = entry.info.summary();
+            if include_frames {
+                info.frames = match &entry.clip {
+                    Some(clip) => clip.info.frames.clone(),
+                    None => entry.timeline.frames()?,
+                };
+            }
+            Ok(info)
+        })
     }
     fn inspect_recording<T>(
         &self,
@@ -187,8 +209,20 @@ impl RemoteControlClient {
             weld_recording::sheet(clip, options, validate)
         })
     }
-    pub fn recording_video(&self, id: &str) -> Result<Video> {
-        self.inspect_recording(id, |clip, validate| weld_recording::video(clip, validate))
+    pub fn recording_video(&self, id: &str, offset: u64) -> Result<Video> {
+        let cache = self.recordings.read(id, |entry| Ok(entry.video.clone()))?;
+        self.inspect_recording(id, |clip, validate| {
+            let mut cache = cache
+                .lock()
+                .map_err(|_| anyhow::anyhow!("recording export unavailable"))?;
+            if cache.is_none() {
+                *cache = Some(weld_recording::video(clip, validate)?);
+            }
+            cache
+                .as_ref()
+                .context("recording export unavailable")?
+                .chunk(offset)
+        })
     }
     pub fn recording_release(&self, id: &str) -> Result<()> {
         self.recordings
@@ -245,17 +279,39 @@ mod tests {
             frames: vec![],
             bytes: 0,
             error: None,
-            expires_after_idle_ms: 120_000,
+            expires_after_idle_ms: IDLE_RETENTION_MS,
         };
-        archive.insert(grant.clone(), info.clone()).expect("insert");
+        archive
+            .insert(grant.clone(), info.clone(), Timeline::default())
+            .expect("insert");
         let live = archive
             .read("clip", |entry| Ok(entry.live.clone()))
             .expect("reader");
-        archive.cleanup(Instant::now() + IDLE_LEASE + Duration::from_secs(1));
+        let completion = Instant::now() + Duration::from_secs(600);
+        archive.cleanup(completion);
+        assert!(
+            live.load(Ordering::Acquire),
+            "capture must outlive the old lease"
+        );
+        archive.update_at(
+            info.summary(),
+            Some(Clip {
+                info: info.clone(),
+                frames: vec![],
+            }),
+            completion,
+        );
+        assert_eq!(archive.next_deadline(), Some(completion + IDLE_LEASE));
+        archive.cleanup(completion + IDLE_LEASE - Duration::from_millis(1));
+        assert!(
+            live.load(Ordering::Acquire),
+            "retain for thirty minutes after completion"
+        );
+        archive.cleanup(completion + IDLE_LEASE);
         assert!(!live.load(Ordering::Acquire));
         assert!(archive.read("clip", |_| Ok(())).is_err());
         archive
-            .insert(grant.clone(), info.clone())
+            .insert(grant.clone(), info.clone(), Timeline::default())
             .expect("reuse capacity");
         let before = archive.0.lock().expect("archive")["clip"].expires;
         archive.read("clip", |_| Ok(())).expect("renew");
@@ -271,9 +327,11 @@ mod tests {
             .expect("reader");
         client.recording_release("clip").expect("release");
         assert!(!live.load(Ordering::Acquire));
-        archive.insert(grant.clone(), info).expect("insert again");
+        archive
+            .insert(grant.clone(), info, Timeline::default())
+            .expect("insert again");
         grant.permit.end();
-        assert!(client.recording_info("clip").is_err());
+        assert!(client.recording_info("clip", false).is_err());
         archive.cleanup(Instant::now());
         assert!(archive.0.lock().expect("archive").is_empty());
     }

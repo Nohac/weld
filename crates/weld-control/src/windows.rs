@@ -355,20 +355,15 @@ impl WindowService {
         info.frames.clear();
         Ok(info)
     }
-    /// Inspect a temporary recording and renew its two-minute idle lease.
+    /// Inspect a temporary recording and renew its 30-minute idle lease.
     pub fn recording_info(
         &self,
         recording: String,
         include_frames: Option<bool>,
     ) -> Result<RecordingInfo, String> {
-        let mut info = self
-            .controller()?
-            .recording_info(&recording)
-            .map_err(|error| error.to_string())?;
-        if !include_frames.unwrap_or(false) {
-            info.frames.clear();
-        }
-        Ok(info)
+        self.controller()?
+            .recording_info(&recording, include_frames.unwrap_or(false))
+            .map_err(|error| error.to_string())
     }
     /// Decode one frame of a completed recording by index or timestamp.
     pub fn recording_frame(
@@ -399,13 +394,17 @@ impl WindowService {
             .map_err(|error| error.to_string())
     }
     /// Remux retained encoded packets into a timestamped Matroska video.
-    pub fn recording_video(&self, recording: String) -> Result<RecordingVideo, String> {
+    pub fn recording_video(
+        &self,
+        recording: String,
+        offset: u64,
+    ) -> Result<RecordingVideo, String> {
         let _permit = self
             .recording_calls
             .try_acquire()
             .map_err(|_| "recording inspection busy")?;
         self.controller()?
-            .recording_video(&recording)
+            .recording_video(&recording, offset)
             .map_err(|error| error.to_string())
     }
     /// Cancel or delete a recording immediately.
@@ -798,21 +797,30 @@ impl WindowClient {
         options: RecordingOptions,
         input: InputSequenceOptions,
     ) -> Result<RecordedInput, String> {
-        self.call(|client, context| async move {
-            client.record_input(context, control, options, input).await
-        })
+        options.validate().map_err(|error| error.to_string())?;
+        crate::rpc::call_with_timeout(
+            &self.socket,
+            recording_timeout(options.duration_ms),
+            |client, context| async move { client.record_input(context, control, options, input).await },
+        )?
     }
 
-    /// Record all observed composed frames using the streaming encoder. options: duration_ms (1..10000), optional region {x,y,width,height}, codec av1 (default) or h264, and after_sequence. wait defaults true; false returns immediately so input can run during recording. Idle lease is two minutes.
+    /// Record all observed composed frames using the streaming encoder. options: duration_ms (1..600000), optional region {x,y,width,height}, codec av1 (default) or h264, and after_sequence. wait defaults true; false returns immediately so input can run during recording. Idle retention is 30 minutes after completion or last inspection.
     pub fn record(
         &self,
         control: String,
         options: RecordingOptions,
         wait: Option<bool>,
     ) -> Result<RecordingInfo, String> {
-        self.call(
-            |client, context| async move { client.record(context, control, options, wait).await },
-        )
+        options.validate().map_err(|error| error.to_string())?;
+        let timeout = if wait.unwrap_or(true) {
+            recording_timeout(options.duration_ms)
+        } else {
+            Duration::from_secs(40)
+        };
+        crate::rpc::call_with_timeout(&self.socket, timeout, |client, context| async move {
+            client.record(context, control, options, wait).await
+        })?
     }
     /// Read recording status, frame count and final dropped-frame count; renews the idle lease. Set include_frames to include the full timestamp/revision timeline.
     pub fn recording_info(
@@ -858,10 +866,38 @@ impl WindowClient {
     }
     /// Export a recording to a retained Matroska (.mkv) file. Refuses to overwrite; exported files remain user-owned after the temporary recording expires.
     pub fn recording_export(&self, recording: String, output: String) -> Result<String, String> {
-        let video: RecordingVideo = self.call(|client, context| async move {
-            client.recording_video(context, recording).await
-        })?;
-        save_recording_file(&output, &video.data_base64)?;
+        let path = std::path::Path::new(&output);
+        let parent = path
+            .parent()
+            .filter(|parent| !parent.as_os_str().is_empty())
+            .unwrap_or_else(|| std::path::Path::new("."));
+        let mut file =
+            tempfile::NamedTempFile::new_in(parent).map_err(|error| error.to_string())?;
+        let mut offset = 0;
+        loop {
+            let id = recording.clone();
+            let video: RecordingVideo = crate::rpc::call_with_timeout(
+                &self.socket,
+                Duration::from_secs(120),
+                |client, context| async move { client.recording_video(context, id, offset).await },
+            )??;
+            let bytes = STANDARD
+                .decode(&video.data_base64)
+                .map_err(|error| error.to_string())?;
+            if video.offset != offset
+                || (bytes.is_empty() && offset < video.total_bytes)
+                || offset + bytes.len() as u64 > video.total_bytes
+            {
+                return Err("invalid recording export chunk".into());
+            }
+            file.write_all(&bytes).map_err(|error| error.to_string())?;
+            offset += bytes.len() as u64;
+            if offset == video.total_bytes {
+                break;
+            }
+        }
+        file.persist_noclobber(path)
+            .map_err(|error| error.to_string())?;
         Ok(output)
     }
     /// Cancel or delete the temporary recording, including its retained encoded frames.
@@ -1097,4 +1133,9 @@ fn save_recording_file(path: &str, encoded: &str) -> Result<(), String> {
     file.persist_noclobber(path)
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn recording_timeout(duration_ms: u32) -> Duration {
+    // Admission/checkpoint waits, input scheduling, encoder drain and RPC overhead.
+    Duration::from_millis(u64::from(duration_ms) + 40_000)
 }

@@ -7,10 +7,7 @@ use ffmpeg_next::{self as ffmpeg, codec, format, frame::Video as VideoFrame, sof
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeSet,
-    fs::File,
-    io::{Read, Write},
-    os::fd::AsRawFd,
+    collections::BTreeSet, fs::File, io::Write, os::fd::AsRawFd, os::unix::fs::FileExt,
     ptr::NonNull,
 };
 use weld_media::{EncodedFrameKind, VideoCodec};
@@ -36,8 +33,28 @@ pub struct Image {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Video {
     pub media_type: String,
+    pub offset: u64,
+    pub total_bytes: u64,
     pub data_base64: String,
 }
+/// Anonymous Matroska export, read through bounded chunks over the control socket.
+pub struct VideoFile(File);
+impl VideoFile {
+    pub fn chunk(&self, offset: u64) -> Result<Video> {
+        let total_bytes = self.0.metadata()?.len();
+        ensure!(offset <= total_bytes, "video offset outside export");
+        let length = (total_bytes - offset).min(1024 * 1024) as usize;
+        let mut bytes = vec![0; length];
+        self.0.read_exact_at(&mut bytes, offset)?;
+        Ok(Video {
+            media_type: "video/x-matroska".into(),
+            offset,
+            total_bytes,
+            data_base64: STANDARD.encode(bytes),
+        })
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SheetOptions {
     pub start_ms: Option<u32>,
@@ -147,15 +164,28 @@ fn decode(
     validate: &impl Fn() -> Result<()>,
     mut consume: impl FnMut(usize, &VideoFrame) -> Result<()>,
 ) -> Result<()> {
-    let first_wanted = *wanted.first().context("no frames selected")?;
-    let start = clip
+    ensure!(!wanted.is_empty(), "no frames selected");
+    let keyframes: Vec<_> = clip
         .frames
         .iter()
-        .take(first_wanted + 1)
-        .rposition(|frame| frame.unit.kind == EncodedFrameKind::Keyframe)
-        .context("recording has no preceding keyframe")?;
-    let first = &clip.frames[start];
-    let mut decoder = decoder(first.unit.codec)?;
+        .enumerate()
+        .filter_map(|(index, frame)| {
+            (frame.unit.kind == EncodedFrameKind::Keyframe).then_some(index)
+        })
+        .collect();
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    for &index in wanted {
+        let preceding = keyframes
+            .partition_point(|key| *key <= index)
+            .checked_sub(1)
+            .context("recording has no preceding keyframe")?;
+        let start = keyframes[preceding];
+        if let Some((_, end)) = ranges.last_mut().filter(|(_, end)| start <= *end + 1) {
+            *end = index;
+        } else {
+            ranges.push((start, index));
+        }
+    }
     let mut seen = BTreeSet::new();
     let mut receive = |decoder: &mut ffmpeg::decoder::Video| -> Result<()> {
         loop {
@@ -181,17 +211,21 @@ fn decode(
         }
         Ok(())
     };
-    let last = *wanted.last().context("no frames selected")?;
-    for (index, frame) in clip.frames.iter().enumerate().take(last + 1).skip(start) {
-        validate()?;
-        let mut packet = ffmpeg::Packet::copy(&frame.unit.payload);
-        packet.set_pts(Some(index as i64));
-        packet.set_dts(Some(index as i64));
-        decoder.send_packet(&packet)?;
+    // Decode only GOPs containing requested tiles, not all ten minutes between
+    // them. Merge overlapping ranges so nearby tiles still share decoder work.
+    for (start, last) in ranges {
+        let mut decoder = decoder(clip.frames[start].unit.codec)?;
+        for (index, frame) in clip.frames.iter().enumerate().take(last + 1).skip(start) {
+            validate()?;
+            let mut packet = ffmpeg::Packet::copy(&frame.unit.bytes()?);
+            packet.set_pts(Some(index as i64));
+            packet.set_dts(Some(index as i64));
+            decoder.send_packet(&packet)?;
+            receive(&mut decoder)?;
+        }
+        decoder.send_eof()?;
         receive(&mut decoder)?;
     }
-    decoder.send_eof()?;
-    receive(&mut decoder)?;
     ensure!(
         seen.len() == wanted.len(),
         "decoder did not produce all selected frames"
@@ -315,13 +349,13 @@ fn render(
 
 /// Remux original packets with their observation timestamps. FFmpeg's elementary
 /// stream parser supplies the codec headers required by the container.
-pub fn video(clip: &Clip, validate: impl Fn() -> Result<()>) -> Result<Video> {
+pub fn video(clip: &Clip, validate: impl Fn() -> Result<()>) -> Result<VideoFile> {
     ensure!(!clip.frames.is_empty(), "recording has no frames");
     ffmpeg::init()?;
     let mut elementary = tempfile::tempfile()?;
     if clip.frames[0].unit.codec == VideoCodec::Av1 {
         let mut decoder = decoder(VideoCodec::Av1)?;
-        decoder.send_packet(&ffmpeg::Packet::copy(&clip.frames[0].unit.payload))?;
+        decoder.send_packet(&ffmpeg::Packet::copy(&clip.frames[0].unit.bytes()?))?;
         decoder.receive_frame(&mut VideoFrame::empty())?;
         // IVF preserves the encoder's packet boundaries while FFmpeg extracts
         // AV1 sequence headers, including streams without temporal delimiters.
@@ -335,7 +369,7 @@ pub fn video(clip: &Clip, validate: impl Fn() -> Result<()>) -> Result<Video> {
     } else {
         for frame in &clip.frames {
             validate()?;
-            elementary.write_all(&frame.unit.payload)?;
+            elementary.write_all(&frame.unit.bytes()?)?;
         }
     }
     let input = format::input(&format!("/proc/self/fd/{}", elementary.as_raw_fd()))
@@ -344,7 +378,7 @@ pub fn video(clip: &Clip, validate: impl Fn() -> Result<()>) -> Result<Video> {
         .streams()
         .best(ffmpeg::media::Type::Video)
         .context("recording video stream absent")?;
-    let mut file = tempfile::tempfile()?;
+    let file = tempfile::tempfile()?;
     mux(
         clip,
         &file,
@@ -352,19 +386,12 @@ pub fn video(clip: &Clip, validate: impl Fn() -> Result<()>) -> Result<Video> {
         visible_parameters(&source.parameters(), clip.info.width, clip.info.height)?,
         &validate,
     )?;
-    let mut bytes = Vec::new();
-    Read::by_ref(&mut file)
-        .take((crate::MAX_BYTES + 1024 * 1024 + 1) as u64)
-        .read_to_end(&mut bytes)?;
     ensure!(
-        bytes.len() <= crate::MAX_BYTES + 1024 * 1024,
+        file.metadata()?.len() <= (crate::MAX_BYTES + 16 * 1024 * 1024) as u64,
         "export exceeds video budget"
     );
     validate()?;
-    Ok(Video {
-        media_type: "video/x-matroska".into(),
-        data_base64: STANDARD.encode(bytes),
-    })
+    Ok(VideoFile(file))
 }
 
 /// Supply the muxer's frame-cropping side data from the retained visible extent.
@@ -432,7 +459,7 @@ fn mux(
         .time_base();
     for (i, frame) in clip.frames.iter().enumerate() {
         validate()?;
-        let mut packet = ffmpeg::Packet::copy(&frame.unit.payload);
+        let mut packet = ffmpeg::Packet::copy(&frame.unit.bytes()?);
         packet.set_stream(0);
         packet.set_pts(Some(frame.info.time_us as i64));
         packet.set_dts(Some(frame.info.time_us as i64));
@@ -464,5 +491,28 @@ impl std::fmt::Display for Image {
             self.height,
             self.tiles.len()
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn export_chunks_cross_the_old_rpc_limit_without_large_responses() -> Result<()> {
+        let file = tempfile::tempfile()?;
+        let length = 100 * 1024 * 1024 + 7;
+        file.set_len(length)?;
+        file.write_all_at(b"the end", length - 7)?;
+        let export = VideoFile(file);
+        let chunk = export.chunk(0)?;
+        assert_eq!(STANDARD.decode(chunk.data_base64)?.len(), 1024 * 1024);
+        assert_eq!(chunk.total_bytes, length);
+        let tail = export.chunk(length - 7)?;
+        assert_eq!(tail.offset, length - 7);
+        assert_eq!(STANDARD.decode(tail.data_base64)?, b"the end");
+        assert!(export.chunk(length)?.data_base64.is_empty());
+        assert!(export.chunk(length + 1).is_err());
+        Ok(())
     }
 }

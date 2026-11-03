@@ -2,16 +2,22 @@
 
 mod engine;
 mod inspect;
+mod storage;
 pub use engine::Recorder;
-pub use inspect::{FrameOptions, Image, SheetOptions, Tile, Video, frame, sheet, video};
+pub use inspect::{FrameOptions, Image, SheetOptions, Tile, Video, VideoFile, frame, sheet, video};
+pub use storage::{EncodedFrame, Packet, Timeline};
 
 use anyhow::{Result, ensure};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use weld_media::{EncodedAccessUnit, VideoCodec};
+use weld_media::VideoCodec;
 
-pub const MAX_BYTES: usize = 32 * 1024 * 1024;
-pub const MAX_FRAMES: usize = 2400;
+pub const MAX_DURATION_MS: u32 = 600_000;
+pub const IDLE_RETENTION_MS: u32 = 1_800_000;
+/// Encoded storage budget, with headroom over ten minutes at 16 Mbit/s.
+pub const MAX_BYTES: usize = 2 * 1024 * 1024 * 1024;
+/// Up to 240 observed updates per second plus the initial frame.
+pub const MAX_FRAMES: usize = MAX_DURATION_MS as usize * 240 / 1000 + 1;
 
 #[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -66,8 +72,8 @@ pub struct Options {
 impl Options {
     pub fn validate(&self) -> Result<()> {
         ensure!(
-            (1..=10_000).contains(&self.duration_ms),
-            "duration_ms must be 1..10000"
+            (1..=MAX_DURATION_MS).contains(&self.duration_ms),
+            "duration_ms must be 1..{MAX_DURATION_MS}"
         );
         Ok(())
     }
@@ -107,10 +113,28 @@ pub struct Info {
     pub expires_after_idle_ms: u32,
 }
 
-pub struct EncodedFrame {
-    pub info: FrameInfo,
-    pub unit: EncodedAccessUnit,
+impl Info {
+    /// Copy counters without allocating a potentially ten-minute frame timeline.
+    pub fn summary(&self) -> Self {
+        Self {
+            id: self.id.clone(),
+            status: self.status.clone(),
+            duration_ms: self.duration_ms,
+            codec: self.codec,
+            region: self.region,
+            width: self.width,
+            height: self.height,
+            submitted_frames: self.submitted_frames,
+            dropped_frames: self.dropped_frames,
+            frame_count: self.frame_count,
+            frames: Vec::new(),
+            bytes: self.bytes,
+            error: self.error.clone(),
+            expires_after_idle_ms: self.expires_after_idle_ms,
+        }
+    }
 }
+
 pub struct Clip {
     pub info: Info,
     pub frames: Vec<EncodedFrame>,

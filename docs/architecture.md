@@ -57,8 +57,12 @@ Weld is a workspace of reusable layers and one standard distribution:
 - `weld-recording` owns bounded encoded clips and frame/contact-sheet/video
   inspection. Its in-process sink consumes the existing `EncodedSourcePort`,
   retaining packet boundaries and original observation timestamps. Cropped
-  composed views enter the ordinary streaming encoder backend. Inspection and
-  remuxing run off the native host thread. `weld-remote-control` owns the recording
+  composed views enter the ordinary streaming encoder backend. A bounded worker
+  spools packets into anonymous temporary files, with transport backpressure and
+  completion notifications. Live timeline snapshots are copied only on request.
+  Inspection and remuxing run off the native host thread; sparse inspection skips
+  unneeded keyframe ranges. Anonymous Matroska exports are cached for the clip's
+  lease and transferred in bounded chunks. `weld-remote-control` owns the recording
   archive, occupant-scoped View authorization, idle leases and explicit release;
   its host deadlines retire expired or revoked recordings. Completion waits use
   notifications. `weld-control` exposes the same operations through CLI/MCP and

@@ -213,6 +213,7 @@ enum Execution {
 }
 
 struct Adapter {
+    wake: Arc<dyn Fn() + Send + Sync>,
     recordings: crate::recording::Archive,
     batch: Option<sequence::Batch>,
     keyboard_queries: Vec<weld_client::ClientKeyboardQuery>,
@@ -250,7 +251,9 @@ pub fn registration(
         sequence: 0,
     }));
     let recordings = crate::recording::Archive::default();
+    let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
     let adapter = Adapter {
+        wake: wake.clone(),
         recordings: recordings.clone(),
         batch: None,
         keyboard_queries: Vec::new(),
@@ -278,7 +281,7 @@ pub fn registration(
             recordings,
             sender,
             grants: Arc::new(Mutex::new(ControlRegistry::default())),
-            wake: Arc::new(wake),
+            wake,
         },
     )
 }
@@ -305,8 +308,10 @@ impl Adapter {
             match result {
                 Ok(true) => {
                     if let Some(active) = state.recordings.remove(&id) {
-                        let clip = active.recorder.finish();
-                        self.recordings.update(clip.info.clone(), Some(clip));
+                        match active.recorder.finish() {
+                            Ok(clip) => self.recordings.update(clip.info.summary(), Some(clip)),
+                            Err(error) => self.recordings.fail(&id, error.to_string()),
+                        }
                     }
                 }
                 Ok(false) => self.recordings.update(active.recorder.info(), None),
@@ -469,10 +474,11 @@ impl Adapter {
                     options,
                     backend,
                     Instant::now(),
+                    self.wake.clone(),
                 )?;
                 let info = recorder.info();
                 self.recordings
-                    .insert(pending.grant.clone(), info.clone())?;
+                    .insert(pending.grant.clone(), info.clone(), recorder.timeline())?;
                 state.recordings.insert(
                     id,
                     ActiveRecording {

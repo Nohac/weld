@@ -48,7 +48,7 @@ pub trait WeldRpc {
     ) -> Result<Info, String>;
     async fn recording_frame(recording: String, options: FrameOptions) -> Result<Image, String>;
     async fn recording_sheet(recording: String, options: SheetOptions) -> Result<Image, String>;
-    async fn recording_video(recording: String) -> Result<Video, String>;
+    async fn recording_video(recording: String, offset: u64) -> Result<Video, String>;
     async fn recording_release(recording: String) -> Result<String, String>;
     async fn control(id: String, enabled: bool) -> Result<String, String>;
     async fn peek(control: String, visible: Option<bool>) -> Result<String, String>;
@@ -117,6 +117,14 @@ pub(crate) fn call<T, F: Future<Output = Result<T, tarpc::client::RpcError>>>(
     path: &Path,
     operation: impl FnOnce(WeldRpcClient, context::Context) -> F,
 ) -> Result<T, String> {
+    call_with_timeout(path, Duration::from_secs(40), operation)
+}
+
+pub(crate) fn call_with_timeout<T, F: Future<Output = Result<T, tarpc::client::RpcError>>>(
+    path: &Path,
+    timeout: Duration,
+    operation: impl FnOnce(WeldRpcClient, context::Context) -> F,
+) -> Result<T, String> {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -130,7 +138,7 @@ pub(crate) fn call<T, F: Future<Output = Result<T, tarpc::client::RpcError>>>(
             .map_err(|error| format!("could not reach Weld at {}: {error}", path.display()))?;
         let client = WeldRpcClient::new(client::Config::default(), transport).spawn();
         let mut context = context::current();
-        context.deadline = Instant::now() + Duration::from_secs(40);
+        context.deadline = Instant::now() + timeout;
         operation(client, context)
             .await
             .map_err(|error| format!("Weld RPC failed: {error}"))
@@ -168,7 +176,7 @@ pub(crate) fn serve(
         let channel = server::BaseChannel::with_defaults(transport);
         let serving = channel.execute(service.serve()).for_each_concurrent(8, |request| request);
         tokio::select! {
-            _ = tokio::time::sleep(Duration::from_secs(45)) => {},
+            _ = tokio::time::sleep(Duration::from_millis(u64::from(weld_remote_control::weld_recording::MAX_DURATION_MS) + 45_000)) => {},
             _ = async { while !stop.load(Ordering::Acquire) { tokio::time::sleep(Duration::from_millis(100)).await; } } => {},
             _ = serving => {},
         }
@@ -269,8 +277,9 @@ impl WeldRpc for Service {
         self,
         _: context::Context,
         recording: String,
+        offset: u64,
     ) -> Result<Video, String> {
-        blocking(move || self.windows.recording_video(recording)).await
+        blocking(move || self.windows.recording_video(recording, offset)).await
     }
     async fn recording_release(
         self,
