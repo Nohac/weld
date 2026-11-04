@@ -6,6 +6,7 @@ use weld_hoist_protocol::device::DevicePermissions;
 use weld_hoist_protocol::device::PairedDevice;
 use weld_hoist_protocol::device::PairingCandidate;
 pub mod access;
+pub mod json;
 pub mod launch;
 pub mod mcp;
 pub mod native;
@@ -761,6 +762,12 @@ mod tests {
         assert!(client.list().is_err(), "uninstalled manager is explicit");
         publisher.publish(Vec::new()).expect("empty inventory");
         let initial = client.list().expect("initial");
+        let invalid =
+            futures_lite::future::block_on(client.jsonrpc_handle_async(serde_json::json!({
+                "jsonrpc":"2.0", "id":null, "method":"nonexistent", "params":{}
+            })));
+        assert!(invalid.get("id").is_some(), "JSON-RPC null ID must remain");
+
         publisher.publish(Vec::new()).expect("unchanged");
         assert_eq!(client.list().expect("unchanged").revision, initial.revision);
         let waiting = client.clone();
@@ -796,21 +803,29 @@ mod tests {
             wait.join().expect("worker").expect("changed").windows,
             vec![window.clone()]
         );
-        assert_eq!(client.get(window.id.clone()).expect("inspect"), window);
+        assert_eq!(client.get(window.id.clone()).expect("inspect").0, window);
+        let json = client
+            .mcp_call("window_get", serde_json::json!({"id":window.id}))
+            .expect("MCP result");
+        assert!(json.get("owner").is_none());
+        assert!(json.get("launch_id").is_none());
+        assert_eq!(json["occupied"], true);
+        assert_eq!(json["app_id"], "test");
+
         let mut controlled = window.clone();
         controlled.control = Some("AbCdEf12".into());
         controlled.control_key = Some("w12".into());
         publisher
             .publish(vec![controlled.clone()])
             .expect("control");
-        assert_eq!(client.resolve("w12".into()).expect("resolve"), controlled);
+        assert_eq!(client.resolve("w12".into()).expect("resolve").0, controlled);
         controlled.occupied = false;
         controlled.control = None;
         publisher
             .publish(vec![controlled.clone()])
             .expect("vacant slot");
         assert_eq!(
-            client.resolve("w12".into()).expect("vacant shorthand"),
+            client.resolve("w12".into()).expect("vacant shorthand").0,
             controlled
         );
         assert!(
@@ -832,7 +847,10 @@ mod tests {
             .publish(vec![controlled.clone()])
             .expect("replacement");
         assert_eq!(
-            client.resolve("w12".into()).expect("replacement shorthand"),
+            client
+                .resolve("w12".into())
+                .expect("replacement shorthand")
+                .0,
             controlled
         );
         assert!(client.resolve("AbCdEf12".into()).is_err());

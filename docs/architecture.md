@@ -45,7 +45,16 @@ Weld is a workspace of reusable layers and one standard distribution:
   Interrupted held-key sequences reuse the relay's native input retirement.
   Every step retains the initial grant and ownership epoch; receipts track
   completed progress across interruption. CLI/RPC/MCP share the action union,
-  with Schemars supplying its mixed string/object MCP schema.
+  with Schemars supplying its positional action schema. Named pointer buttons,
+  repeated clicks, wheel notches and pixel gestures share native pointer validation
+  and delivery; standalone repetitions reuse the sequence scheduler. MCP exposes
+  `input` and `record_input` as its input API; CLI/JSON-RPC keep convenience commands.
+  Both paths carry one `InputSequenceOptions` contract. Explicit `keep_pressed`
+  retains keys/buttons across calls, with per-window held-state validation and
+  the existing relay cleanup on interruption, takeover or retirement. Motion easing
+  applies to elapsed-time progress on that same scheduler. Public control responses
+  use a JSON serialization adapter that omits null object fields while preserving
+  positional arrays and protocol envelopes; native binary serialization is unchanged.
   On-demand native GPU snapshots reuse source composition and asynchronous
   readback, retaining input leases until sampling completes. See
   [Native window control](native-window-control.md).

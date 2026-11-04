@@ -28,7 +28,7 @@ use tokio_util::{
 use weld_access::AccessAuthority;
 use weld_accessibility::Snapshot as AccessibilitySnapshot;
 use weld_remote_control::{
-    InputAction, InputReceipt, InputSequenceOptions, InputSequenceResult, RecordedInput, Snapshot,
+    Easing, InputReceipt, InputSequenceOptions, InputSequenceResult, RecordedInput, Snapshot,
     weld_recording::{FrameOptions, Image, Info, Options, SheetOptions, Video},
 };
 
@@ -60,8 +60,14 @@ pub trait WeldRpc {
         resize: bool,
     ) -> Result<String, String>;
     async fn request_control(control: String, timeout_ms: Option<u32>) -> Result<String, String>;
-    async fn pointer(control: String, x: f64, y: f64) -> Result<InputReceipt, String>;
-    async fn click(control: String, x: f64, y: f64, button: u32) -> Result<InputReceipt, String>;
+    async fn pointer(
+        control: String,
+        x: f64,
+        y: f64,
+        duration_ms: Option<u32>,
+        easing: Option<Easing>,
+    ) -> Result<InputReceipt, String>;
+    async fn click(control: String, action: Click) -> Result<InputReceipt, String>;
     async fn button(control: String, button: u32, pressed: bool) -> Result<InputReceipt, String>;
     async fn key(control: String, keycode: u32, pressed: bool) -> Result<InputReceipt, String>;
     async fn press_key(control: String, keycode: u32) -> Result<InputReceipt, String>;
@@ -69,10 +75,7 @@ pub trait WeldRpc {
     async fn type_text(control: String, text: String) -> Result<InputReceipt, String>;
     async fn input(
         control: String,
-        actions: Vec<InputAction>,
-        typing_interval_ms: Option<u32>,
-        key_interval_ms: Option<u32>,
-        key_hold_ms: Option<u32>,
+        input: InputSequenceOptions,
     ) -> Result<InputSequenceResult, String>;
     async fn scroll(control: String, action: Scroll) -> Result<InputReceipt, String>;
     async fn resize(control: String, width: u32, height: u32) -> Result<InputReceipt, String>;
@@ -103,6 +106,15 @@ pub trait WeldRpc {
     async fn wait(after: u32, timeout_ms: u32) -> Result<WindowCatalogue, String>;
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Click {
+    pub x: f64,
+    pub y: f64,
+    pub button: u32,
+    pub count: Option<u32>,
+    pub interval_ms: Option<u32>,
+}
+
 /// One scroll gesture at a window-local logical position.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Scroll {
@@ -111,6 +123,8 @@ pub struct Scroll {
     pub horizontal: f64,
     pub vertical: f64,
     pub wheel: bool,
+    pub count: Option<u32>,
+    pub interval_ms: Option<u32>,
 }
 
 pub(crate) fn call<T, F: Future<Output = Result<T, tarpc::client::RpcError>>>(
@@ -333,18 +347,18 @@ impl WeldRpc for Service {
         control: String,
         x: f64,
         y: f64,
+        duration_ms: Option<u32>,
+        easing: Option<Easing>,
     ) -> Result<InputReceipt, String> {
-        blocking(move || self.windows.pointer(control, x, y)).await
+        blocking(move || self.windows.pointer(control, x, y, duration_ms, easing)).await
     }
     async fn click(
         self,
         _: context::Context,
         control: String,
-        x: f64,
-        y: f64,
-        button: u32,
+        action: Click,
     ) -> Result<InputReceipt, String> {
-        blocking(move || self.windows.click(control, x, y, button)).await
+        blocking(move || self.windows.click(control, action)).await
     }
     async fn button(
         self,
@@ -392,21 +406,9 @@ impl WeldRpc for Service {
         self,
         _: context::Context,
         control: String,
-        actions: Vec<InputAction>,
-        typing_interval_ms: Option<u32>,
-        key_interval_ms: Option<u32>,
-        key_hold_ms: Option<u32>,
+        input: InputSequenceOptions,
     ) -> Result<InputSequenceResult, String> {
-        blocking(move || {
-            self.windows.input(
-                control,
-                actions,
-                typing_interval_ms,
-                key_interval_ms,
-                key_hold_ms,
-            )
-        })
-        .await
+        blocking(move || self.windows.input(control, input)).await
     }
     async fn scroll(
         self,
@@ -414,17 +416,7 @@ impl WeldRpc for Service {
         control: String,
         action: Scroll,
     ) -> Result<InputReceipt, String> {
-        blocking(move || {
-            self.windows.scroll(
-                control,
-                action.x,
-                action.y,
-                action.horizontal,
-                action.vertical,
-                action.wheel,
-            )
-        })
-        .await
+        blocking(move || self.windows.scroll(control, action)).await
     }
     async fn resize(
         self,

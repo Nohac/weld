@@ -1,6 +1,8 @@
 //! Remote window-control requests serviced by the shared native client relay.
 
 mod permissions;
+mod pointer;
+pub use pointer::{ButtonName, Easing, MouseButton};
 mod recording;
 mod runtime;
 mod sequence;
@@ -110,12 +112,7 @@ impl std::fmt::Display for Snapshot {
 
 #[derive(Clone, Debug)]
 pub enum Operation {
-    Sequence {
-        actions: Vec<InputAction>,
-        typing_interval_ms: u32,
-        key_interval_ms: u32,
-        key_hold_ms: u32,
-    },
+    Sequence(InputSequenceOptions),
     Pointer {
         x: f64,
         y: f64,
@@ -422,7 +419,7 @@ impl RemoteControlClient {
         );
         let (reply, response) = mpsc::sync_channel(1);
         let timeout = match &operation {
-            Operation::Sequence { .. } | Operation::RecordInput { .. } => Duration::from_secs(30),
+            Operation::Sequence(_) | Operation::RecordInput { .. } => Duration::from_secs(30),
             Operation::CaptureAfter { timeout_ms, .. } => {
                 ensure!(
                     (1..=5000).contains(timeout_ms),

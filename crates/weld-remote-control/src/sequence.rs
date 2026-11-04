@@ -2,7 +2,10 @@
 
 mod wire;
 
-use crate::{InputReceipt, Operation};
+use crate::{
+    Easing, InputReceipt, Operation,
+    pointer::{PointerAction, validate_button, validate_scroll},
+};
 use anyhow::{Context, Result, ensure};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -90,6 +93,19 @@ pub enum InputAction {
         x: f64,
         y: f64,
         duration_ms: u32,
+        easing: Easing,
+    },
+    Click {
+        button: u32,
+        count: u32,
+        interval_ms: u32,
+    },
+    Scroll {
+        horizontal: f64,
+        vertical: f64,
+        wheel: bool,
+        count: u32,
+        interval_ms: u32,
     },
     Button {
         button: u32,
@@ -99,6 +115,9 @@ pub enum InputAction {
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
 pub struct InputSequenceOptions {
+    /// Permit newly pressed keys/buttons to remain held until a later input call.
+    #[serde(default)]
+    pub keep_pressed: bool,
     pub actions: Vec<InputAction>,
     #[serde(default)]
     pub typing_interval_ms: u32,
@@ -165,6 +184,9 @@ pub(crate) struct Plan {
     key_interval_ms: u32,
     key_hold_ms: u32,
     pub has_text: bool,
+    initial_keys: HashSet<u32>,
+    initial_buttons: HashSet<u32>,
+    keep_pressed: bool,
     pub duration: Duration,
 }
 
@@ -172,7 +194,17 @@ pub(crate) enum Step {
     Input(InputStep),
     Wait(Duration),
     At(Duration),
-    Move { x: f64, y: f64, duration: Duration },
+    Move {
+        x: f64,
+        y: f64,
+        duration: Duration,
+        easing: Easing,
+    },
+    AtPointer {
+        action: PointerAction,
+        ends_action: bool,
+        delay_after: Duration,
+    },
 }
 
 pub(crate) struct InputStep {
@@ -253,6 +285,7 @@ impl Plan {
                     x,
                     y,
                     duration_ms: movement,
+                    ..
                 } => {
                     ensure!(
                         x.is_finite() && y.is_finite() && *x >= 0. && *y >= 0.,
@@ -261,8 +294,28 @@ impl Plan {
                     duration_ms += u64::from(*movement);
                     continue;
                 }
+                InputAction::Click {
+                    button,
+                    count,
+                    interval_ms,
+                } => {
+                    validate_button(*button)?;
+                    duration_ms += repeat_duration(*count, *interval_ms)?;
+                    continue;
+                }
+                InputAction::Scroll {
+                    horizontal,
+                    vertical,
+                    count,
+                    interval_ms,
+                    ..
+                } => {
+                    validate_scroll(*horizontal, *vertical)?;
+                    duration_ms += repeat_duration(*count, *interval_ms)?;
+                    continue;
+                }
                 InputAction::Button { button, .. } => {
-                    ensure!((272..=279).contains(button), "invalid pointer button");
+                    validate_button(*button)?;
                     continue;
                 }
             };
@@ -285,8 +338,23 @@ impl Plan {
             key_interval_ms,
             key_hold_ms,
             has_text,
+            initial_keys: HashSet::new(),
+            initial_buttons: HashSet::new(),
+            keep_pressed: false,
             duration: Duration::from_millis(duration_ms),
         })
+    }
+
+    pub fn continuing(
+        mut self,
+        keys: HashSet<u32>,
+        buttons: HashSet<u32>,
+        keep_pressed: bool,
+    ) -> Self {
+        self.initial_keys = keys;
+        self.initial_buttons = buttons;
+        self.keep_pressed = keep_pressed;
+        self
     }
 
     pub fn resolve(self, codes: Vec<LinuxKeycode>) -> Result<VecDeque<Step>> {
@@ -300,8 +368,8 @@ impl Plan {
         );
         let mut codes = codes.into_iter();
         let mut steps = VecDeque::new();
-        let mut held = HashSet::new();
-        let mut buttons = HashSet::new();
+        let mut held = self.initial_keys.clone();
+        let mut buttons = self.initial_buttons.clone();
         for action in self.actions {
             if matches!(action, InputAction::Text(_)) {
                 ensure!(held.is_empty(), "release sequence keys before typing text");
@@ -394,11 +462,52 @@ impl Plan {
                 InputAction::At { at_ms } => {
                     steps.push_back(Step::At(Duration::from_millis(u64::from(at_ms))))
                 }
-                InputAction::Move { x, y, duration_ms } => steps.push_back(Step::Move {
+                InputAction::Move {
+                    x,
+                    y,
+                    duration_ms,
+                    easing,
+                } => steps.push_back(Step::Move {
                     x,
                     y,
                     duration: Duration::from_millis(u64::from(duration_ms)),
+                    easing,
                 }),
+                InputAction::Click {
+                    button,
+                    count,
+                    interval_ms,
+                } => {
+                    ensure!(!buttons.contains(&button), "click button is already held");
+                    for index in 0..count {
+                        push_pointer(
+                            &mut steps,
+                            PointerAction::Click(button),
+                            index + 1 == count,
+                            interval_ms,
+                        );
+                    }
+                }
+                InputAction::Scroll {
+                    horizontal,
+                    vertical,
+                    wheel,
+                    count,
+                    interval_ms,
+                } => {
+                    for index in 0..count {
+                        push_pointer(
+                            &mut steps,
+                            PointerAction::Scroll {
+                                horizontal,
+                                vertical,
+                                wheel,
+                            },
+                            index + 1 == count,
+                            interval_ms,
+                        );
+                    }
+                }
                 InputAction::Button { button, pressed } => {
                     ensure!(
                         if pressed {
@@ -418,15 +527,42 @@ impl Plan {
             }
         }
         ensure!(
-            held.is_empty(),
-            "sequence ends with held keys; add matching key up actions"
+            steps.len() <= 4096,
+            "input expands beyond 4096 steps; split the sequence"
         );
         ensure!(
-            buttons.is_empty(),
-            "sequence ends with held pointer buttons"
+            self.keep_pressed || held.is_subset(&self.initial_keys),
+            "sequence ends with newly held keys; release them or set keep_pressed=true"
+        );
+        ensure!(
+            self.keep_pressed || buttons.is_subset(&self.initial_buttons),
+            "sequence ends with newly held pointer buttons; release them or set keep_pressed=true"
         );
         Ok(steps)
     }
+}
+
+fn repeat_duration(count: u32, interval_ms: u32) -> Result<u64> {
+    ensure!((1..=1000).contains(&count), "count must be 1..1000");
+    ensure!(interval_ms <= 25_000, "interval_ms must be 0..25000");
+    Ok(u64::from(count - 1) * u64::from(interval_ms))
+}
+
+fn push_pointer(
+    steps: &mut VecDeque<Step>,
+    action: PointerAction,
+    ends_action: bool,
+    interval_ms: u32,
+) {
+    steps.push_back(Step::AtPointer {
+        action,
+        ends_action,
+        delay_after: if ends_action {
+            Duration::ZERO
+        } else {
+            Duration::from_millis(u64::from(interval_ms))
+        },
+    });
 }
 
 fn push_press(steps: &mut VecDeque<Step>, keys: Vec<u32>, hold_ms: u32, delay_ms: u32) {
@@ -463,6 +599,61 @@ fn push_press(steps: &mut VecDeque<Step>, keys: Vec<u32>, hold_ms: u32, delay_ms
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn named_pointer_actions_easing_and_repeats_share_plan_validation_and_permissions() {
+        let input: InputSequenceOptions = serde_json::from_str(r#"{"actions":[["m",1,2],["m",10,20,100,"ease_in_out"],["click","middle",2,10],["wheel",0,1,5,20],["scroll",0,300]]}"#).expect("actions");
+        let plan = Plan::new(input.actions.clone(), 0, 0, 0).expect("plan");
+        assert_eq!(plan.duration, Duration::from_millis(190));
+        assert_eq!(plan.resolve(vec![]).expect("steps").len(), 10);
+        let operation = Operation::RecordInput {
+            options: weld_recording::Options {
+                duration_ms: 200,
+                codec: Default::default(),
+                region: None,
+                after_sequence: None,
+            },
+            input,
+        };
+        assert!(operation.allowed_by(crate::Capabilities {
+            pointer: true,
+            view: true,
+            ..Default::default()
+        }));
+        assert!(!operation.allowed_by(crate::Capabilities {
+            keyboard: true,
+            view: true,
+            ..Default::default()
+        }));
+        for json in [
+            r#"[["b","middle",true],["click","middle"],["b","middle",false]]"#,
+            r#"[["wheel",0,1,1000,26]]"#,
+            r#"[["click",999]]"#,
+            r#"[["wheel",0,1,1000],["wheel",0,1,1000],["wheel",0,1,1000],["wheel",0,1,1000],["wheel",0,1,1000]]"#,
+        ] {
+            assert!(
+                Plan::new(serde_json::from_str(json).expect("syntax"), 0, 0, 0)
+                    .and_then(|plan| plan.resolve(vec![]))
+                    .is_err(),
+                "{json}"
+            );
+        }
+        assert!(serde_json::from_str::<InputAction>(r#"["m",1,2,100,"unknown_curve"]"#).is_err());
+        assert_eq!(
+            "middle"
+                .parse::<crate::MouseButton>()
+                .expect("named button")
+                .code(),
+            274
+        );
+        assert_eq!(
+            "274"
+                .parse::<crate::MouseButton>()
+                .expect("numeric button")
+                .code(),
+            274
+        );
+    }
 
     #[test]
     fn timeline_budget_balance_and_capabilities_cover_all_actions() {

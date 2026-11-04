@@ -575,7 +575,8 @@ fn paced_sequence_stops_on_takeover_and_key_resolution_precedes_all_input() {
     let failed = pending(
         &client,
         &grant.state,
-        Operation::Sequence {
+        Operation::Sequence(crate::InputSequenceOptions {
+            keep_pressed: false,
             actions: vec![
                 crate::InputAction::Text("prefix".into()),
                 crate::InputAction::Keys {
@@ -588,7 +589,7 @@ fn paced_sequence_stops_on_takeover_and_key_resolution_precedes_all_input() {
             typing_interval_ms: 0,
             key_interval_ms: 0,
             key_hold_ms: 0,
-        },
+        }),
     );
     adapter.drain_events(&mut events);
     adapter.drain_effects(&mut effects);
@@ -608,12 +609,13 @@ fn paced_sequence_stops_on_takeover_and_key_resolution_precedes_all_input() {
     let paced = pending(
         &client,
         &grant.state,
-        Operation::Sequence {
+        Operation::Sequence(crate::InputSequenceOptions {
+            keep_pressed: false,
             actions: vec![crate::InputAction::Text("é🦀".into())],
             typing_interval_ms: 1000,
             key_interval_ms: 0,
             key_hold_ms: 0,
-        },
+        }),
     );
     let before = Instant::now();
     adapter.drain_events(&mut events);
@@ -803,10 +805,10 @@ fn drive_input(
 #[test]
 fn absolute_offsets_and_smooth_drag_reach_native_input_and_report_progress() {
     let mut fixture = SequenceFixture::new();
-    let response = pending(&fixture.client, &fixture.grant.state, Operation::Sequence {
+    let response = pending(&fixture.client, &fixture.grant.state, Operation::Sequence(crate::InputSequenceOptions { keep_pressed: false,
         actions: serde_json::from_str(r#"[["m",2,3],["at",20],["b",272,true],["m",22,13,60],["b",272,false],["at",120],["p",57,5,0]]"#).expect("actions"),
         typing_interval_ms: 0, key_interval_ms: 0, key_hold_ms: 0,
-    });
+    }));
     let (result, inputs) = drive_input(&mut *fixture.adapter, response);
     assert!(result.complete, "{:?}", result.error);
     assert_eq!(result.completed_actions, 7);
@@ -839,7 +841,8 @@ fn timed_out_drag_releases_pointer_button_and_invalid_tail_has_no_effects() {
     let response = pending_until(
         &fixture.client,
         &fixture.grant.state,
-        Operation::Sequence {
+        Operation::Sequence(crate::InputSequenceOptions {
+            keep_pressed: false,
             actions: serde_json::from_str(
                 r#"[["m",2,3],["b",272,true],["w",1000],["b",272,false]]"#,
             )
@@ -847,7 +850,7 @@ fn timed_out_drag_releases_pointer_button_and_invalid_tail_has_no_effects() {
             typing_interval_ms: 0,
             key_interval_ms: 0,
             key_hold_ms: 0,
-        },
+        }),
         Instant::now() + Duration::from_millis(40),
     );
     let (result, inputs) = drive_input(&mut *fixture.adapter, response);
@@ -868,12 +871,13 @@ fn timed_out_drag_releases_pointer_button_and_invalid_tail_has_no_effects() {
     let response = pending(
         &fixture.client,
         &fixture.grant.state,
-        Operation::Sequence {
+        Operation::Sequence(crate::InputSequenceOptions {
+            keep_pressed: false,
             actions: serde_json::from_str(r#"[["p",57],["m",9000,3]]"#).expect("actions"),
             typing_interval_ms: 0,
             key_interval_ms: 0,
             key_hold_ms: 0,
-        },
+        }),
     );
     fixture
         .adapter
@@ -893,7 +897,8 @@ fn sequence_groups_share_a_dispatch_and_hold_gap_wait_timing_reaches_native_effe
     let response = pending(
         &fixture.client,
         &fixture.grant.state,
-        Operation::Sequence {
+        Operation::Sequence(crate::InputSequenceOptions {
+            keep_pressed: false,
             actions: serde_json::from_str(
                 r#"[["d",[29,30],0],["p",57,5,7],["w",8],["u",[30,29],0],["p",57]]"#,
             )
@@ -901,7 +906,7 @@ fn sequence_groups_share_a_dispatch_and_hold_gap_wait_timing_reaches_native_effe
             typing_interval_ms: 0,
             key_interval_ms: 9,
             key_hold_ms: 11,
-        },
+        }),
     );
     let (result, inputs) = drive_sequence(&mut *fixture.adapter, response);
     assert!(result.complete, "{:?}", result.error);
@@ -943,13 +948,14 @@ fn sequence_timeout_retires_held_keys_and_accepts_the_next_sequence() {
     let response = pending_until(
         &fixture.client,
         &fixture.grant.state,
-        Operation::Sequence {
+        Operation::Sequence(crate::InputSequenceOptions {
+            keep_pressed: false,
             actions: serde_json::from_str(r#"[["d",[29,30]],["w",1000],["u",[30,29]]]"#)
                 .expect("actions"),
             typing_interval_ms: 0,
             key_interval_ms: 0,
             key_hold_ms: 0,
-        },
+        }),
         Instant::now() + Duration::from_millis(30),
     );
     let (result, inputs) = drive_sequence(&mut *fixture.adapter, response);
@@ -966,12 +972,13 @@ fn sequence_timeout_retires_held_keys_and_accepts_the_next_sequence() {
     let response = pending(
         &fixture.client,
         &fixture.grant.state,
-        Operation::Sequence {
+        Operation::Sequence(crate::InputSequenceOptions {
+            keep_pressed: false,
             actions: serde_json::from_str(r#"[["p",57]]"#).expect("actions"),
             typing_interval_ms: 0,
             key_interval_ms: 0,
             key_hold_ms: 5,
-        },
+        }),
     );
     let (result, _) = drive_sequence(&mut *fixture.adapter, response);
     assert!(
@@ -1172,4 +1179,261 @@ fn revoke_rejects_queued_input_and_releases_held_keys_before_a_new_grant() {
         "new incarnation has a fresh control ID"
     );
     assert!(client.request(&old, Operation::Capture).is_err());
+}
+
+#[test]
+fn pointer_rows_share_native_middle_click_wheel_and_pixel_scroll_delivery() {
+    let mut fixture = SequenceFixture::new();
+    let response = pending(
+        &fixture.client,
+        &fixture.grant.state,
+        Operation::Sequence(crate::InputSequenceOptions {
+            keep_pressed: false,
+            actions: serde_json::from_str(
+                r#"[["m",2,3],["click","middle",2,5],["wheel",0,1,3,10],["scroll",-40,300]]"#,
+            )
+            .expect("actions"),
+            typing_interval_ms: 0,
+            key_interval_ms: 0,
+            key_hold_ms: 0,
+        }),
+    );
+    let (result, inputs) = drive_input(&mut *fixture.adapter, response);
+    assert!(result.complete, "{:?}", result.error);
+    assert_eq!(result.completed_actions, 4);
+    assert_eq!(result.action_times_ms.len(), 4);
+    assert!(result.action_times_ms[2] >= result.action_times_ms[1] + 20);
+    let buttons: Vec<_> = inputs
+        .iter()
+        .filter_map(|(_, input)| match input.event {
+            InputEventKind::PointerButton { button, state, .. } => Some((button.0, state)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        buttons,
+        vec![
+            (274, ButtonState::Pressed),
+            (274, ButtonState::Released),
+            (274, ButtonState::Pressed),
+            (274, ButtonState::Released)
+        ]
+    );
+    let axes: Vec<_> = inputs
+        .iter()
+        .filter_map(|(_, input)| match input.event {
+            InputEventKind::PointerAxis { axis, .. } => Some(axis),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(axes.len(), 5);
+    for axis in &axes[..3] {
+        assert_eq!(axis.vertical_v120, Some(120));
+        assert_eq!(axis.vertical, 15.);
+        assert!(!axis.vertical_stop);
+    }
+    assert_eq!((axes[3].horizontal, axes[3].vertical), (-40., 300.));
+    assert_eq!(axes[3].vertical_v120, None);
+    assert!(axes[4].horizontal_stop && axes[4].vertical_stop);
+}
+
+#[test]
+fn repeated_wheel_stops_on_timeout_and_invalid_tail_has_no_effects() {
+    let mut fixture = SequenceFixture::new();
+    let response = pending_until(
+        &fixture.client,
+        &fixture.grant.state,
+        Operation::Sequence(crate::InputSequenceOptions {
+            keep_pressed: false,
+            actions: serde_json::from_str(r#"[["m",2,3],["wheel",0,-1,10,100]]"#).expect("actions"),
+            typing_interval_ms: 0,
+            key_interval_ms: 0,
+            key_hold_ms: 0,
+        }),
+        Instant::now() + Duration::from_millis(70),
+    );
+    let (result, inputs) = drive_input(&mut *fixture.adapter, response);
+    assert!(!result.complete);
+    assert_eq!(
+        result.completed_actions, 1,
+        "partial repetition does not finish its row"
+    );
+    let axes: Vec<_> = inputs
+        .iter()
+        .filter_map(|(_, input)| match input.event {
+            InputEventKind::PointerAxis { axis, .. } => Some(axis),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(axes.len(), 1);
+    assert_eq!(axes[0].vertical_v120, Some(-120));
+    for tail in [
+        r#"["wheel",0,1,0]"#,
+        r#"["click","middle",1001]"#,
+        r#"["scroll",0,1000001]"#,
+    ] {
+        let response = pending(
+            &fixture.client,
+            &fixture.grant.state,
+            Operation::Sequence(crate::InputSequenceOptions {
+                keep_pressed: false,
+                actions: serde_json::from_str(&format!(r#"[["m",2,3],{tail}]"#)).expect("actions"),
+                typing_interval_ms: 0,
+                key_interval_ms: 0,
+                key_hold_ms: 0,
+            }),
+        );
+        fixture
+            .adapter
+            .drain_events(&mut ClientEventQueue::default());
+        let mut effects = Vec::new();
+        fixture.adapter.drain_effects(&mut effects);
+        assert!(response.try_recv().expect("rejected").is_err());
+        assert!(
+            effects.is_empty(),
+            "invalid tail must reject the initial move"
+        );
+    }
+}
+
+fn pointer_plan(actions: &str, keep_pressed: bool) -> Operation {
+    Operation::Sequence(crate::InputSequenceOptions {
+        actions: serde_json::from_str(actions).expect("input rows"),
+        keep_pressed,
+        ..Default::default()
+    })
+}
+
+#[test]
+fn explicitly_kept_keys_and_buttons_continue_across_calls_until_released() {
+    let mut fixture = SequenceFixture::new();
+    let response = pending(
+        &fixture.client,
+        &fixture.grant.state,
+        pointer_plan(r#"[["m",2,3],["d",29],["b","middle",true]]"#, true),
+    );
+    let (result, held) = drive_input(&mut *fixture.adapter, response);
+    assert!(result.complete, "{:?}", result.error);
+    assert!(held.iter().any(|(_, event)| matches!(
+        event.event,
+        InputEventKind::PointerButton {
+            button: LinuxButtonCode(274),
+            state: ButtonState::Pressed,
+            ..
+        }
+    )));
+    let response = pending(
+        &fixture.client,
+        &fixture.grant.state,
+        pointer_plan(r#"[["m",20,10,20,"ease_in_out"],["wheel",0,1,2,5]]"#, false),
+    );
+    let (result, moved) = drive_input(&mut *fixture.adapter, response);
+    assert!(result.complete, "{:?}", result.error);
+    assert!(!moved.iter().any(|(_, event)| matches!(
+        event.event,
+        InputEventKind::PointerButton {
+            state: ButtonState::Released,
+            ..
+        } | InputEventKind::Keyboard {
+            state: KeyboardKeyState::Released,
+            ..
+        }
+    )));
+    let response = pending(
+        &fixture.client,
+        &fixture.grant.state,
+        pointer_plan(r#"[["b","middle",false],["u",29]]"#, false),
+    );
+    let (result, released) = drive_input(&mut *fixture.adapter, response);
+    assert!(result.complete, "{:?}", result.error);
+    assert!(released.iter().any(|(_, event)| matches!(
+        event.event,
+        InputEventKind::PointerButton {
+            button: LinuxButtonCode(274),
+            state: ButtonState::Released,
+            ..
+        }
+    )));
+    assert!(released.iter().any(|(_, event)| matches!(
+        event.event,
+        InputEventKind::Keyboard {
+            keycode: LinuxKeycode(29),
+            state: KeyboardKeyState::Released
+        }
+    )));
+    let response = pending(
+        &fixture.client,
+        &fixture.grant.state,
+        pointer_plan(r#"[["click","middle"],["p",29]]"#, false),
+    );
+    assert!(
+        drive_input(&mut *fixture.adapter, response).0.complete,
+        "held state was cleared"
+    );
+}
+
+#[test]
+fn retained_input_is_released_on_later_timeout_takeover_and_revocation() {
+    for reason in ["timeout", "takeover", "revocation"] {
+        let mut fixture = SequenceFixture::new();
+        let response = pending(
+            &fixture.client,
+            &fixture.grant.state,
+            pointer_plan(r#"[["m",2,3],["d",29],["b","middle",true]]"#, true),
+        );
+        assert!(drive_input(&mut *fixture.adapter, response).0.complete);
+        let released = if reason == "timeout" {
+            let response = pending_until(
+                &fixture.client,
+                &fixture.grant.state,
+                pointer_plan(r#"[["w",1000]]"#, false),
+                Instant::now() + Duration::from_millis(30),
+            );
+            let (result, events) = drive_input(&mut *fixture.adapter, response);
+            assert!(!result.complete);
+            events
+                .into_iter()
+                .map(|(_, event)| event)
+                .collect::<Vec<_>>()
+        } else {
+            if reason == "takeover" {
+                fixture.grant.set_local_input(true);
+            } else {
+                fixture.grant.state.permit.end();
+            }
+            fixture
+                .adapter
+                .drain_events(&mut ClientEventQueue::default());
+            let mut effects = Vec::new();
+            fixture.adapter.drain_effects(&mut effects);
+            effects
+                .into_iter()
+                .filter_map(|effect| match effect {
+                    ClientAdapterEffect::Input(event) => Some(event),
+                    _ => None,
+                })
+                .collect()
+        };
+        assert!(
+            released.iter().any(|event| matches!(
+                event.event,
+                InputEventKind::PointerButton {
+                    button: LinuxButtonCode(274),
+                    state: ButtonState::Released,
+                    ..
+                }
+            )),
+            "{reason}"
+        );
+        assert!(
+            released.iter().any(|event| matches!(
+                event.event,
+                InputEventKind::Keyboard {
+                    keycode: LinuxKeycode(29),
+                    state: KeyboardKeyState::Released
+                }
+            )),
+            "{reason}"
+        );
+    }
 }

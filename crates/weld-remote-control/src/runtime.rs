@@ -227,6 +227,7 @@ struct Adapter {
     waiting: Vec<Pending>,
     positions: HashMap<ClientSurfaceId, InputPosition>,
     held_keys: HashMap<ClientSurfaceId, HashSet<u32>>,
+    held_buttons: HashMap<ClientSurfaceId, HashSet<u32>>,
     text_surfaces: HashSet<ClientSurfaceId>,
     started: Instant,
     input_epochs: HashMap<ClientSurfaceId, u64>,
@@ -267,6 +268,7 @@ pub fn registration(
         waiting: Vec::new(),
         positions: HashMap::new(),
         held_keys: HashMap::new(),
+        held_buttons: HashMap::new(),
         text_surfaces: HashSet::new(),
         started: Instant::now(),
         input_epochs: HashMap::new(),
@@ -336,6 +338,7 @@ impl Adapter {
                     .release_input(|member| state.views.root(member) == Some(*surface));
                 self.positions.remove(surface);
                 self.held_keys.remove(surface);
+                self.held_buttons.remove(surface);
             }
         }
         for (surface, epoch) in &self.input_epochs {
@@ -361,6 +364,7 @@ impl Adapter {
             ));
             self.positions.remove(&source);
             self.held_keys.remove(&source);
+            self.held_buttons.remove(&source);
             self.input_epochs.remove(&source);
         }
     }
@@ -489,7 +493,7 @@ impl Adapter {
                 );
                 return Ok(Execution::Recorded(info));
             }
-            Operation::Sequence { .. } | Operation::RecordInput { .. } => {
+            Operation::Sequence(_) | Operation::RecordInput { .. } => {
                 anyhow::bail!("input sequence requires scheduled execution")
             }
             Operation::Pointer { x, y } => {
@@ -504,7 +508,14 @@ impl Adapter {
                 ));
             }
             Operation::Click { x, y, button } => {
-                ensure!((272..=279).contains(&button), "invalid pointer button");
+                crate::pointer::validate_button(button)?;
+                ensure!(
+                    !self
+                        .held_buttons
+                        .get(&surface)
+                        .is_some_and(|held| held.contains(&button)),
+                    "click button is already held; release it first"
+                );
                 let position = valid_position(x, y)?;
                 self.positions.insert(surface, position);
                 messages.push(focus);
@@ -531,7 +542,7 @@ impl Adapter {
                 }
             }
             Operation::Button { button, pressed } => {
-                ensure!((272..=279).contains(&button), "invalid pointer button");
+                crate::pointer::validate_button(button)?;
                 let position = self
                     .positions
                     .get(&surface)
@@ -552,6 +563,12 @@ impl Adapter {
                         },
                     },
                 ));
+                let held = self.held_buttons.entry(surface).or_default();
+                if pressed {
+                    held.insert(button);
+                } else {
+                    held.remove(&button);
+                }
             }
             Operation::Keys { keycodes, pressed } => {
                 ensure!(
@@ -651,13 +668,7 @@ impl Adapter {
                 wheel,
             } => {
                 let position = valid_position(x, y)?;
-                ensure!(
-                    horizontal.is_finite()
-                        && vertical.is_finite()
-                        && horizontal.abs() <= 1_000_000.
-                        && vertical.abs() <= 1_000_000.,
-                    "invalid scroll delta"
-                );
+                crate::pointer::validate_scroll(horizontal, vertical)?;
                 self.positions.insert(surface, position);
                 messages.push(event(
                     pointer,
@@ -888,7 +899,7 @@ impl ClientAdapter for Adapter {
                 Command::Operation(pending)
                     if matches!(
                         pending.operation,
-                        Operation::Sequence { .. }
+                        Operation::Sequence(_)
                             | Operation::TypeText { .. }
                             | Operation::RecordInput { .. }
                     ) =>

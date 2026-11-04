@@ -3,6 +3,7 @@
 #[cfg(test)]
 mod tests;
 
+use crate::json::Json;
 use base64::{Engine, engine::general_purpose::STANDARD};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -24,8 +25,8 @@ use weld_remote_control::weld_recording::{
     SheetOptions, Video as RecordingVideo,
 };
 use weld_remote_control::{
-    Capabilities, InputAction, InputReceipt, InputSequenceOptions, InputSequenceResult, Operation,
-    RecordedInput, RemoteControlClient, Reply, Snapshot, Viewport,
+    Capabilities, Easing, InputAction, InputReceipt, InputSequenceOptions, InputSequenceResult,
+    MouseButton, Operation, RecordedInput, RemoteControlClient, Reply, Snapshot, Viewport,
 };
 
 /// Logical compositor coordinates.
@@ -470,19 +471,98 @@ impl WindowService {
         )
     }
 
-    /// Move the independent controller pointer in window-local logical coordinates.
-    pub fn pointer(&self, control: String, x: f64, y: f64) -> Result<InputReceipt, String> {
-        self.send_input(control, Operation::Pointer { x, y })
-    }
-    /// Click a Linux pointer button (272 left, 273 right, 274 middle).
-    pub fn click(
+    /// Move immediately or use the shared sequence scheduler for eased motion.
+    pub fn pointer(
         &self,
         control: String,
         x: f64,
         y: f64,
-        button: u32,
+        duration_ms: Option<u32>,
+        easing: Option<Easing>,
     ) -> Result<InputReceipt, String> {
-        self.send_input(control, Operation::Click { x, y, button })
+        let duration_ms = duration_ms.unwrap_or(0);
+        if duration_ms == 0 {
+            return self.send_input(control, Operation::Pointer { x, y });
+        }
+        self.input_receipt(
+            control,
+            vec![InputAction::Move {
+                x,
+                y,
+                duration_ms,
+                easing: easing.unwrap_or_default(),
+            }],
+        )
+    }
+    /// Click using the same native dispatcher and repetition scheduler as input rows.
+    pub fn click(
+        &self,
+        control: String,
+        action: crate::rpc::Click,
+    ) -> Result<InputReceipt, String> {
+        let crate::rpc::Click {
+            x,
+            y,
+            button,
+            count,
+            interval_ms,
+        } = action;
+        if count.unwrap_or(1) == 1 && interval_ms.unwrap_or(0) == 0 {
+            return self.send_input(control, Operation::Click { x, y, button });
+        }
+        self.pointer_sequence(
+            control,
+            x,
+            y,
+            InputAction::Click {
+                button,
+                count: count.unwrap_or(1),
+                interval_ms: interval_ms.unwrap_or(0),
+            },
+        )
+    }
+
+    fn pointer_sequence(
+        &self,
+        control: String,
+        x: f64,
+        y: f64,
+        action: InputAction,
+    ) -> Result<InputReceipt, String> {
+        self.input_receipt(
+            control,
+            vec![
+                InputAction::Move {
+                    x,
+                    y,
+                    duration_ms: 0,
+                    easing: Easing::Linear,
+                },
+                action,
+            ],
+        )
+    }
+
+    fn input_receipt(
+        &self,
+        control: String,
+        actions: Vec<InputAction>,
+    ) -> Result<InputReceipt, String> {
+        let result = self.input(
+            control,
+            InputSequenceOptions {
+                actions,
+                ..Default::default()
+            },
+        )?;
+        if !result.complete {
+            return Err(result
+                .error
+                .unwrap_or_else(|| "pointer sequence interrupted".into()));
+        }
+        result
+            .receipt
+            .ok_or_else(|| "pointer sequence produced no receipt".into())
     }
     /// Send a button edge at the controller pointer's last position.
     pub fn button(
@@ -529,42 +609,50 @@ impl WindowService {
     pub fn input(
         &self,
         control: String,
-        actions: Vec<InputAction>,
-        typing_interval_ms: Option<u32>,
-        key_interval_ms: Option<u32>,
-        key_hold_ms: Option<u32>,
+        input: InputSequenceOptions,
     ) -> Result<InputSequenceResult, String> {
-        match self.operate(
-            control,
-            Operation::Sequence {
-                actions,
-                typing_interval_ms: typing_interval_ms.unwrap_or(0),
-                key_interval_ms: key_interval_ms.unwrap_or(0),
-                key_hold_ms: key_hold_ms.unwrap_or(0),
-            },
-        )? {
+        match self.operate(control, Operation::Sequence(input))? {
             Reply::Sequence(result) => Ok(result),
             _ => Err("input sequence returned an unexpected result".into()),
         }
     }
-    /// Scroll at window-local logical x/y. Wheel deltas are notches; otherwise logical pixels in one completed finger gesture. Positive deltas scroll right/down.
+    /// Scroll using the same native dispatcher and repetition scheduler as input rows.
     pub fn scroll(
         &self,
         control: String,
-        x: f64,
-        y: f64,
-        horizontal: f64,
-        vertical: f64,
-        wheel: bool,
+        action: crate::rpc::Scroll,
     ) -> Result<InputReceipt, String> {
-        self.send_input(
+        let crate::rpc::Scroll {
+            x,
+            y,
+            horizontal,
+            vertical,
+            wheel,
+            count,
+            interval_ms,
+        } = action;
+        if count.unwrap_or(1) == 1 && interval_ms.unwrap_or(0) == 0 {
+            return self.send_input(
+                control,
+                Operation::Scroll {
+                    x,
+                    y,
+                    horizontal,
+                    vertical,
+                    wheel,
+                },
+            );
+        }
+        self.pointer_sequence(
             control,
-            Operation::Scroll {
-                x,
-                y,
+            x,
+            y,
+            InputAction::Scroll {
                 horizontal,
                 vertical,
                 wheel,
+                count: count.unwrap_or(1),
+                interval_ms: interval_ms.unwrap_or(0),
             },
         )
     }
@@ -784,25 +872,34 @@ impl WindowClient {
     ) -> Result<T, String> {
         crate::rpc::call(&self.socket, operation)?
     }
+    fn call_json<
+        T,
+        F: std::future::Future<Output = Result<Result<T, String>, tarpc::client::RpcError>>,
+    >(
+        &self,
+        operation: impl FnOnce(crate::rpc::WeldRpcClient, tarpc::context::Context) -> F,
+    ) -> Result<Json<T>, String> {
+        self.call(operation).map(Json)
+    }
 }
 
 #[server_less::cli(name = "window")]
 #[server_less::mcp(namespace = "window")]
 #[server_less::jsonrpc]
 impl WindowClient {
-    /// Record and run input in one call. Input actions share recording time zero: ["at",ms] waits for an offset, ["m",x,y,duration_ms?] moves (smoothly when duration > 0), ["b",button,pressed] changes a pointer button; existing p/d/u/t/w rows and timing defaults also work. The entire plan is validated first. Returns recording metadata and acknowledged input progress; inspect pixels separately with recording_sheet/frame.
+    /// Record and run input in one call. Input actions share recording time zero: ["at",ms] waits for an offset, ["m",x,y,duration_ms?,easing?] moves (linear/ease_in/ease_out/ease_in_out), ["b",button,pressed] changes a pointer button; click/wheel/scroll and p/d/u/t/w rows use the same actions and timing as input. The entire plan is validated first. Returns recording metadata and acknowledged input progress; inspect pixels separately with recording_sheet/frame.
     pub fn record_input(
         &self,
         control: String,
         options: RecordingOptions,
         input: InputSequenceOptions,
-    ) -> Result<RecordedInput, String> {
+    ) -> Result<Json<RecordedInput>, String> {
         options.validate().map_err(|error| error.to_string())?;
         crate::rpc::call_with_timeout(
             &self.socket,
             recording_timeout(options.duration_ms),
             |client, context| async move { client.record_input(context, control, options, input).await },
-        )?
+        )?.map(Json)
     }
 
     /// Record all observed composed frames using the streaming encoder. options: duration_ms (1..600000), optional region {x,y,width,height}, codec av1 (default) or h264, and after_sequence. wait defaults true; false returns immediately so input can run during recording. Idle retention is 30 minutes after completion or last inspection.
@@ -811,7 +908,7 @@ impl WindowClient {
         control: String,
         options: RecordingOptions,
         wait: Option<bool>,
-    ) -> Result<RecordingInfo, String> {
+    ) -> Result<Json<RecordingInfo>, String> {
         options.validate().map_err(|error| error.to_string())?;
         let timeout = if wait.unwrap_or(true) {
             recording_timeout(options.duration_ms)
@@ -821,14 +918,15 @@ impl WindowClient {
         crate::rpc::call_with_timeout(&self.socket, timeout, |client, context| async move {
             client.record(context, control, options, wait).await
         })?
+        .map(Json)
     }
     /// Read recording status, frame count and final dropped-frame count; renews the idle lease. Set include_frames to include the full timestamp/revision timeline.
     pub fn recording_info(
         &self,
         recording: String,
         include_frames: Option<bool>,
-    ) -> Result<RecordingInfo, String> {
-        self.call(|client, context| async move {
+    ) -> Result<Json<RecordingInfo>, String> {
+        self.call_json(|client, context| async move {
             client
                 .recording_info(context, recording, include_frames)
                 .await
@@ -840,8 +938,8 @@ impl WindowClient {
         recording: String,
         options: FrameOptions,
         output: Option<String>,
-    ) -> Result<RecordingImage, String> {
-        let image: RecordingImage = self.call(|client, context| async move {
+    ) -> Result<Json<RecordingImage>, String> {
+        let image: Json<RecordingImage> = self.call_json(|client, context| async move {
             client.recording_frame(context, recording, options).await
         })?;
         if let Some(output) = output {
@@ -855,8 +953,8 @@ impl WindowClient {
         recording: String,
         options: SheetOptions,
         output: Option<String>,
-    ) -> Result<RecordingImage, String> {
-        let image: RecordingImage = self.call(|client, context| async move {
+    ) -> Result<Json<RecordingImage>, String> {
+        let image: Json<RecordingImage> = self.call_json(|client, context| async move {
             client.recording_sheet(context, recording, options).await
         })?;
         if let Some(output) = output {
@@ -864,7 +962,7 @@ impl WindowClient {
         }
         Ok(image)
     }
-    /// Export a recording to a retained Matroska (.mkv) file. Refuses to overwrite; exported files remain user-owned after the temporary recording expires.
+    /// Export a recording to a retained Matroska (.mkv) file. Choose a persistent, disk-backed output directory, such as a project recordings directory. Do not export to /tmp or any tmpfs location: tmpfs is RAM-backed and large recordings consume RAM. Refuses to overwrite; exported files remain user-owned after the temporary recording expires.
     pub fn recording_export(&self, recording: String, output: String) -> Result<String, String> {
         let path = std::path::Path::new(&output);
         let parent = path
@@ -931,31 +1029,58 @@ impl WindowClient {
                 .await
         })
     }
-    /// Move the controller pointer in window-local logical coordinates.
-    pub fn pointer(&self, control: String, x: f64, y: f64) -> Result<InputReceipt, String> {
-        self.call(|client, context| async move { client.pointer(context, control, x, y).await })
+    /// Move to window-local logical x/y. duration_ms defaults to 0 (immediate); positive duration uses the shared movement scheduler and requires an existing pointer position. easing is linear (default), ease_in, ease_out or ease_in_out. Establish the starting position with an immediate move first; maximum duration is 25000ms.
+    pub fn pointer(
+        &self,
+        control: String,
+        x: f64,
+        y: f64,
+        duration_ms: Option<u32>,
+        easing: Option<Easing>,
+    ) -> Result<Json<InputReceipt>, String> {
+        self.call_json(|client, context| async move {
+            client
+                .pointer(context, control, x, y, duration_ms, easing)
+                .await
+        })
     }
-    /// Click a Linux pointer button (272 left, 273 right, 274 middle).
+    /// Click left/right/middle (or Linux button 272–279) at logical x/y. count defaults to 1; interval_ms is the gap between repeated clicks. Repeats share the input scheduler and its 25s budget.
     pub fn click(
         &self,
         control: String,
         x: f64,
         y: f64,
-        button: u32,
-    ) -> Result<InputReceipt, String> {
-        self.call(
-            |client, context| async move { client.click(context, control, x, y, button).await },
-        )
+        button: MouseButton,
+        count: Option<u32>,
+        interval_ms: Option<u32>,
+    ) -> Result<Json<InputReceipt>, String> {
+        self.call_json(|client, context| async move {
+            client
+                .click(
+                    context,
+                    control,
+                    crate::rpc::Click {
+                        x,
+                        y,
+                        button: button.code(),
+                        count,
+                        interval_ms,
+                    },
+                )
+                .await
+        })
     }
-    /// Send a button edge at the last pointer position; release every pressed button.
+    /// Send a button edge at the last pointer position; release every pressed button. Accepts left/right/middle or Linux button codes 272–279.
     pub fn button(
         &self,
         control: String,
-        button: u32,
+        button: MouseButton,
         pressed: bool,
-    ) -> Result<InputReceipt, String> {
-        self.call(|client, context| async move {
-            client.button(context, control, button, pressed).await
+    ) -> Result<Json<InputReceipt>, String> {
+        self.call_json(|client, context| async move {
+            client
+                .button(context, control, button.code(), pressed)
+                .await
         })
     }
     /// Send an evdev key edge; release every pressed key. Host keymap remappings apply.
@@ -964,24 +1089,28 @@ impl WindowClient {
         control: String,
         keycode: u32,
         pressed: bool,
-    ) -> Result<InputReceipt, String> {
-        self.call(
-            |client, context| async move { client.key(context, control, keycode, pressed).await },
-        )
+    ) -> Result<Json<InputReceipt>, String> {
+        self.call_json(|client, context| async move {
+            client.key(context, control, keycode, pressed).await
+        })
     }
     /// Press and release one evdev key atomically. Host keymap remappings apply.
-    pub fn press_key(&self, control: String, keycode: u32) -> Result<InputReceipt, String> {
-        self.call(
-            |client, context| async move { client.press_key(context, control, keycode).await },
-        )
+    pub fn press_key(&self, control: String, keycode: u32) -> Result<Json<InputReceipt>, String> {
+        self.call_json(|client, context| async move {
+            client.press_key(context, control, keycode).await
+        })
     }
     /// Press ordered evdev keys, then release in reverse order. Validates the whole chord first.
-    pub fn chord(&self, control: String, keycodes: Vec<u32>) -> Result<InputReceipt, String> {
-        self.call(|client, context| async move { client.chord(context, control, keycodes).await })
+    pub fn chord(&self, control: String, keycodes: Vec<u32>) -> Result<Json<InputReceipt>, String> {
+        self.call_json(
+            |client, context| async move { client.chord(context, control, keycodes).await },
+        )
     }
     /// Type a full Unicode string (1–4096 UTF-8 bytes) into a native Wayland window without changing the clipboard. Newlines press Enter; tabs press Tab. No implicit Enter is added. Release held remote keys first. XWayland is unsupported.
-    pub fn type_text(&self, control: String, text: String) -> Result<InputReceipt, String> {
-        self.call(|client, context| async move { client.type_text(context, control, text).await })
+    pub fn type_text(&self, control: String, text: String) -> Result<Json<InputReceipt>, String> {
+        self.call_json(
+            |client, context| async move { client.type_text(context, control, text).await },
+        )
     }
     /// Ask the local user to release input for an existing control ID or slot shorthand. Highlights Interact and waits up to timeout_ms (default/max 30000), returning immediately when remote input becomes available. Timeout, revocation or occupant replacement ends the wait. Local ownership and permissions change only through the user's existing controls.
     pub fn request_control(
@@ -993,7 +1122,7 @@ impl WindowClient {
             client.request_control(context, control, timeout_ms).await
         })
     }
-    /// Run 1–64 compact rows: ["p",keys,hold_ms?,gap_ms?] presses/releases; ["d",keys,gap_ms?] holds; ["u",keys,gap_ms?] releases; ["w",ms] waits; ["t",text] types; ["at",ms] waits until an offset from start; ["m",x,y,duration_ms?] moves the pointer; ["b",button,pressed] changes a pointer button. Establish a position with an immediate move before smooth movement or buttons. keys is one evdev number/XKB name or a list of up to 16; groups dispatch together. Omitted/null key timings use key_hold_ms/key_interval_ms; typing_interval_ms paces text characters. Global timings are 0–1000ms, default 0. Use a nonzero hold for frame-polled games. Total planned duration ≤25s, text ≤4096 bytes. Balance key/button downs and ups within the call; release keys before text. Interruption retires held input. Text requires native Wayland; keys also support XWayland. Returns progress and actual row completion offsets; inspect application reactions separately.
+    /// Run 1–64 compact rows: ["p",keys,hold_ms?,gap_ms?] presses/releases; ["d",keys,gap_ms?] holds; ["u",keys,gap_ms?] releases; ["w",ms] waits; ["t",text] types; ["at",ms] waits until an offset from start; ["m",x,y,duration_ms?,easing?] moves the pointer (linear default; ease_in/ease_out/ease_in_out are quadratic); ["b",button,pressed] changes a pointer button; ["click",button,count?,interval_ms?] clicks; ["wheel",horizontal,vertical,count?,interval_ms?] scrolls in notches; ["scroll",horizontal,vertical,count?,interval_ms?] scrolls in logical pixels. Buttons accept left/right/middle or Linux codes. Repeated events default to count=1, interval_ms=0; count is 1–1000. Scroll/click use the current pointer position; positive deltas are right/down. Establish a position with an immediate move before smooth movement or buttons. keys is one evdev number/XKB name or a list of up to 16; groups dispatch together. Omitted/null key timings use key_hold_ms/key_interval_ms; typing_interval_ms paces text characters. Global timings are 0–1000ms, default 0. Use a nonzero hold for frame-polled games. Total planned duration ≤25s, text ≤4096 bytes. Balance new key/button downs and ups unless keep_pressed=true. Retained presses survive later calls until an explicit up; release keys before text. Interruption retires held input. Text requires native Wayland; keys also support XWayland. Returns progress and actual row completion offsets; inspect application reactions separately.
     pub fn input(
         &self,
         control: String,
@@ -1001,21 +1130,22 @@ impl WindowClient {
         typing_interval_ms: Option<u32>,
         key_interval_ms: Option<u32>,
         key_hold_ms: Option<u32>,
-    ) -> Result<InputSequenceResult, String> {
-        self.call(|client, context| async move {
-            client
-                .input(
-                    context,
-                    control,
-                    actions,
-                    typing_interval_ms,
-                    key_interval_ms,
-                    key_hold_ms,
-                )
-                .await
-        })
+        keep_pressed: Option<bool>,
+    ) -> Result<Json<InputSequenceResult>, String> {
+        let input = InputSequenceOptions {
+            actions,
+            typing_interval_ms: typing_interval_ms.unwrap_or(0),
+            key_interval_ms: key_interval_ms.unwrap_or(0),
+            key_hold_ms: key_hold_ms.unwrap_or(0),
+            keep_pressed: keep_pressed.unwrap_or(false),
+        };
+        self.call_json(|client, context| async move { client.input(context, control, input).await })
     }
-    /// Scroll at logical x/y. With --wheel, deltas are notches; otherwise logical pixels in one completed finger gesture. Positive is right/down.
+    /// Scroll at logical x/y. With wheel=true, horizontal/vertical are notches per event; otherwise logical pixels per completed finger gesture. Positive is right/down. count (default 1, max 1000) repeats the event; interval_ms (default 0) sets the gap. For five wheel ticks use wheel=true, vertical=1, count=5; for one 300-pixel gesture use wheel=false, vertical=300. Total repetition time is at most 25s.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Flat CLI/MCP parameters preserve existing scroll arguments; native handling uses a typed request"
+    )]
     pub fn scroll(
         &self,
         control: String,
@@ -1024,8 +1154,10 @@ impl WindowClient {
         horizontal: f64,
         vertical: f64,
         wheel: bool,
-    ) -> Result<InputReceipt, String> {
-        self.call(|client, context| async move {
+        count: Option<u32>,
+        interval_ms: Option<u32>,
+    ) -> Result<Json<InputReceipt>, String> {
+        self.call_json(|client, context| async move {
             client
                 .scroll(
                     context,
@@ -1036,24 +1168,37 @@ impl WindowClient {
                         horizontal,
                         vertical,
                         wheel,
+                        count,
+                        interval_ms,
                     },
                 )
                 .await
         })
     }
     /// Resize the application's logical viewport while preserving the desktop peek's geometry.
-    pub fn resize(&self, control: String, width: u32, height: u32) -> Result<InputReceipt, String> {
-        self.call(
-            |client, context| async move { client.resize(context, control, width, height).await },
-        )
+    pub fn resize(
+        &self,
+        control: String,
+        width: u32,
+        height: u32,
+    ) -> Result<Json<InputReceipt>, String> {
+        self.call_json(|client, context| async move {
+            client.resize(context, control, width, height).await
+        })
     }
     /// Request app rendering density (for example 1.5). Omit factor to restore the output's scale. Requires resize permission; capture reports the actual scale.
-    pub fn scale(&self, control: String, factor: Option<f64>) -> Result<InputReceipt, String> {
-        self.call(|client, context| async move { client.scale(context, control, factor).await })
+    pub fn scale(
+        &self,
+        control: String,
+        factor: Option<f64>,
+    ) -> Result<Json<InputReceipt>, String> {
+        self.call_json(
+            |client, context| async move { client.scale(context, control, factor).await },
+        )
     }
     /// Read a synchronized PNG of the controlled window and its contained popups.
-    pub fn capture(&self, control: String) -> Result<Snapshot, String> {
-        self.call(|client, context| async move { client.capture(context, control).await })
+    pub fn capture(&self, control: String) -> Result<Json<Snapshot>, String> {
+        self.call_json(|client, context| async move { client.capture(context, control).await })
     }
     /// Capture a commit newer than an input receipt's sequence, with a 1..5000 ms timeout. Check pixels for the intended UI result.
     pub fn capture_after(
@@ -1061,8 +1206,8 @@ impl WindowClient {
         control: String,
         sequence: String,
         timeout_ms: u32,
-    ) -> Result<Snapshot, String> {
-        self.call(|client, context| async move {
+    ) -> Result<Json<Snapshot>, String> {
+        self.call_json(|client, context| async move {
             client
                 .capture_after(context, control, sequence, timeout_ms)
                 .await
@@ -1076,8 +1221,8 @@ impl WindowClient {
         max_depth: Option<u32>,
         query: Option<String>,
         role: Option<String>,
-    ) -> Result<AccessibilitySnapshot, String> {
-        self.call(|client, context| async move {
+    ) -> Result<Json<AccessibilitySnapshot>, String> {
+        self.call_json(|client, context| async move {
             client
                 .accessibility(context, control, max_nodes, max_depth, query, role)
                 .await
@@ -1091,31 +1236,33 @@ impl WindowClient {
         controlled: Option<bool>,
         owner: Option<String>,
         launch_id: Option<String>,
-    ) -> Result<WindowCatalogue, String> {
-        self.call(|client, context| async move {
+    ) -> Result<Json<WindowCatalogue>, String> {
+        self.call_json(|client, context| async move {
             client
                 .find(context, app_id, occupied, controlled, owner, launch_id)
                 .await
         })
     }
     /// List managed windows, including vacant persistent slots.
-    pub fn list(&self) -> Result<WindowCatalogue, String> {
-        self.call(|client, context| async move { client.list(context).await })
+    pub fn list(&self) -> Result<Json<WindowCatalogue>, String> {
+        self.call_json(|client, context| async move { client.list(context).await })
     }
 
     /// Inspect a managed window by its session-local identity.
-    pub fn get(&self, id: String) -> Result<WindowInfo, String> {
-        self.call(|client, context| async move { client.get(context, id).await })
+    pub fn get(&self, id: String) -> Result<Json<WindowInfo>, String> {
+        self.call_json(|client, context| async move { client.get(context, id).await })
     }
 
     /// Resolve a copied slot shorthand (w12) or short incarnation control ID to its window and current permissions.
-    pub fn resolve(&self, key: String) -> Result<WindowInfo, String> {
-        self.call(|client, context| async move { client.resolve(context, key).await })
+    pub fn resolve(&self, key: String) -> Result<Json<WindowInfo>, String> {
+        self.call_json(|client, context| async move { client.resolve(context, key).await })
     }
 
     /// Wait up to 20 seconds for a newer inventory revision.
-    pub fn wait(&self, after: u32, timeout_ms: u32) -> Result<WindowCatalogue, String> {
-        self.call(|client, context| async move { client.wait(context, after, timeout_ms).await })
+    pub fn wait(&self, after: u32, timeout_ms: u32) -> Result<Json<WindowCatalogue>, String> {
+        self.call_json(
+            |client, context| async move { client.wait(context, after, timeout_ms).await },
+        )
     }
 }
 

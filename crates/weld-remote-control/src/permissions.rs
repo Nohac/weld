@@ -54,12 +54,15 @@ impl Operation {
         let actions_allowed = |actions: &[InputAction]| {
             actions.iter().all(|action| match action {
                 InputAction::Text(_) | InputAction::Keys { .. } => capabilities.keyboard,
-                InputAction::Move { .. } | InputAction::Button { .. } => capabilities.pointer,
+                InputAction::Move { .. }
+                | InputAction::Button { .. }
+                | InputAction::Click { .. }
+                | InputAction::Scroll { .. } => capabilities.pointer,
                 InputAction::Wait { .. } | InputAction::At { .. } => true,
             })
         };
         let capability = match self {
-            Self::Sequence { actions, .. } => return actions_allowed(actions),
+            Self::Sequence(input) => return actions_allowed(&input.actions),
             Self::RecordInput { input, .. } => {
                 return capabilities.view && actions_allowed(&input.actions);
             }

@@ -2,12 +2,13 @@
 
 use super::{Adapter, Execution};
 use crate::{
-    InputAction, InputSequenceResult, Operation, Pending, RecordedInput, Reply,
+    Easing, InputAction, InputSequenceOptions, InputSequenceResult, Operation, Pending,
+    RecordedInput, Reply,
     sequence::{InputStep, Plan, Step},
 };
 use anyhow::{Context, Result, ensure};
 use std::{
-    collections::{HashSet, VecDeque},
+    collections::VecDeque,
     sync::mpsc,
     time::{Duration, Instant},
 };
@@ -33,6 +34,7 @@ struct Motion {
     to: (f64, f64),
     started: Instant,
     duration: Duration,
+    easing: Easing,
     next: Instant,
 }
 impl Motion {
@@ -40,11 +42,12 @@ impl Motion {
         let fraction = (now.saturating_duration_since(self.started).as_secs_f64()
             / self.duration.as_secs_f64())
         .min(1.);
+        let eased = self.easing.sample(fraction);
         self.next = (now + Duration::from_millis(8)).min(self.started + self.duration);
         InputStep {
             operation: Operation::Pointer {
-                x: self.from.0 + (self.to.0 - self.from.0) * fraction,
-                y: self.from.1 + (self.to.1 - self.from.1) * fraction,
+                x: self.from.0 + (self.to.0 - self.from.0) * eased,
+                y: self.from.1 + (self.to.1 - self.from.1) * eased,
             },
             ends_action: fraction >= 1.,
             characters: 0,
@@ -93,6 +96,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn eased_motion_samples_elapsed_time_and_finishes_at_the_exact_endpoint() {
+        for (easing, quarter) in [
+            (Easing::Linear, 25.),
+            (Easing::EaseIn, 6.25),
+            (Easing::EaseOut, 43.75),
+            (Easing::EaseInOut, 12.5),
+        ] {
+            let start = Instant::now();
+            let mut motion = Motion {
+                from: (0., 0.),
+                to: (100., 200.),
+                started: start,
+                duration: Duration::from_millis(100),
+                easing,
+                next: start,
+            };
+            let step = motion.sample(start + Duration::from_millis(25));
+            assert!(
+                matches!(step.operation, Operation::Pointer { x, y } if x == quarter && y == quarter * 2.)
+            );
+            assert!(!step.ends_action);
+            let step = motion.sample(start + Duration::from_secs(1));
+            assert!(matches!(
+                step.operation,
+                Operation::Pointer { x: 100., y: 200. }
+            ));
+            assert!(step.ends_action);
+        }
+    }
+
+    #[test]
     fn motion_samples_elapsed_progress_after_a_stall_and_lands_on_the_endpoint() {
         let start = Instant::now();
         let mut motion = Motion {
@@ -100,6 +134,7 @@ mod tests {
             to: (110., 70.),
             started: start,
             duration: Duration::from_millis(100),
+            easing: Easing::Linear,
             next: start,
         };
         let step = motion.sample(start + Duration::from_millis(60));
@@ -121,35 +156,37 @@ impl Adapter {
     pub(super) fn start_sequence(&mut self, mut pending: Pending, now: Instant) {
         let prepare: Result<Plan> = (|| {
             self.validate_pending(&pending)?;
-            ensure!(
-                self.held_keys.values().all(HashSet::is_empty),
-                "release held remote keys before starting an input sequence"
-            );
-            let (actions, interval, key_interval, key_hold) = match &pending.operation {
-                Operation::Sequence {
-                    actions,
-                    typing_interval_ms,
-                    key_interval_ms,
-                    key_hold_ms,
-                } => (
-                    actions.clone(),
-                    *typing_interval_ms,
-                    *key_interval_ms,
-                    *key_hold_ms,
-                ),
-                Operation::TypeText { text } => (vec![InputAction::Text(text.clone())], 0, 0, 0),
+            let input = match &pending.operation {
+                Operation::Sequence(input) => input.clone(),
+                Operation::TypeText { text } => InputSequenceOptions {
+                    actions: vec![InputAction::Text(text.clone())],
+                    ..Default::default()
+                },
                 Operation::RecordInput { input, options } => {
                     options.validate()?;
-                    (
-                        input.actions.clone(),
-                        input.typing_interval_ms,
-                        input.key_interval_ms,
-                        input.key_hold_ms,
-                    )
+                    input.clone()
                 }
                 _ => anyhow::bail!("expected an input sequence"),
             };
-            let plan = Plan::new(actions, interval, key_interval, key_hold)?;
+            let plan = Plan::new(
+                input.actions,
+                input.typing_interval_ms,
+                input.key_interval_ms,
+                input.key_hold_ms,
+            )?
+            .continuing(
+                self.held_keys
+                    .get(&pending.grant.surface)
+                    .cloned()
+                    .unwrap_or_default(),
+                self.held_buttons
+                    .get(&pending.grant.surface)
+                    .cloned()
+                    .unwrap_or_default(),
+                input.keep_pressed,
+            );
+            ensure!(!plan.has_text || self.held_keys.iter().all(|(surface, keys)| *surface == pending.grant.surface || keys.is_empty()),
+                "release remote keys held on other windows before typing text");
             if let Operation::RecordInput { options, .. } = &pending.operation {
                 ensure!(
                     plan.duration < Duration::from_millis(u64::from(options.duration_ms)),
@@ -368,6 +405,25 @@ impl Adapter {
         };
         let step = match step {
             Step::Input(step) => step,
+            Step::AtPointer {
+                action,
+                ends_action,
+                delay_after,
+            } => {
+                let Some(position) = self.positions.get(&batch.pending.grant.surface) else {
+                    self.abort_sequence(
+                        batch,
+                        "move the pointer before clicking or scrolling".into(),
+                    );
+                    return;
+                };
+                InputStep {
+                    operation: action.at(position.x, position.y),
+                    ends_action,
+                    delay_after,
+                    characters: 0,
+                }
+            }
             Step::Wait(duration) => {
                 batch.next = now + duration;
                 batch.waiting = true;
@@ -380,7 +436,12 @@ impl Adapter {
                 self.batch = Some(batch);
                 return;
             }
-            Step::Move { x, y, duration } => {
+            Step::Move {
+                x,
+                y,
+                duration,
+                easing,
+            } => {
                 if duration.is_zero() {
                     InputStep {
                         operation: Operation::Pointer { x, y },
@@ -401,6 +462,7 @@ impl Adapter {
                         to: (x, y),
                         started: now,
                         duration,
+                        easing,
                         next: now,
                     };
                     let step = motion.sample(now);
@@ -441,7 +503,7 @@ impl Adapter {
         let mut positioned = self.positions.contains_key(&surface);
         for step in &batch.steps {
             match step {
-                Step::Move { x, y, duration } => {
+                Step::Move { x, y, duration, .. } => {
                     ensure!(
                         *x < f64::from(root.view.logical_width)
                             && *y < f64::from(root.view.logical_height),
@@ -453,12 +515,13 @@ impl Adapter {
                     );
                     positioned = true;
                 }
-                Step::Input(InputStep {
+                Step::AtPointer { .. }
+                | Step::Input(InputStep {
                     operation: Operation::Button { .. },
                     ..
                 }) => ensure!(
                     positioned,
-                    "pointer button requires an initial pointer position"
+                    "pointer action requires an initial pointer position"
                 ),
                 _ => {}
             }
@@ -469,6 +532,7 @@ impl Adapter {
     fn abort_sequence(&mut self, batch: Batch, error: String) {
         let surface = batch.pending.grant.surface;
         self.held_keys.remove(&surface);
+        self.held_buttons.remove(&surface);
         let state = self.state.borrow();
         self.relay
             .release_input(|member| state.views.root(member) == Some(surface));

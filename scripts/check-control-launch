@@ -169,11 +169,11 @@ def check_file_drag(ctl, control, host, run, parent, owner):
     def nested_window():
         candidates = invoke(parent, "find", owner=owner)["windows"]
         return next((window for window in candidates if window["wayland_process_id"] == host.pid
-                     and window["title"] == "Weld nested compositor" and window["control"]), None)
+                     and window.get("title") == "Weld nested compositor" and window.get("control")), None)
     wait_for(host, nested_window, "owned headless nested window")
     window = nested_window()
     assert not window["visible"], "drag validation must stay off the user's desktop"
-    handle = window["control"]
+    handle = window.get("control")
     invoke(parent, "pointer", control=handle, x=200, y=150)
     for pressed in (True, False):
         invoke(parent, "key", control=handle, keycode=42, pressed=pressed)
@@ -238,11 +238,11 @@ def check_attributed(ctl, control, host, run):
     probe.mkdir()
     receipt = launch("--control", "--headless", "--owner", "validation", "--cwd", str(probe), "--", "foot", "--app-id=weld-headless-probe", sys.executable, str(Path(__file__).resolve()), "--input-probe")
     def controlled():
-        return next((window for window in windows() if window["launch_id"] == receipt["launch_id"] and window["control"]), None)
+        return next((window for window in windows() if window["launch_id"] == receipt["launch_id"] and window.get("control")), None)
     wait_for(host, controlled, "headless automatic control")
     window = controlled()
     assert not window["visible"] and not window["desktop_focused"] and window["workspace"] is None, window
-    handle = window["control"]
+    handle = window.get("control")
     wait_for(host, lambda: (probe / "input.bin").exists(), "terminal program ready")
     invoke("input", control=handle, actions=[["t", "headless-input"], ["p", "Return"]])
     wait_for(host, lambda: b"headless-input\r" in (probe / "input.bin").read_bytes(), "headless keyboard delivery")
@@ -257,7 +257,7 @@ def check_attributed(ctl, control, host, run):
     assert controlled()["application_viewport"]["logical_width"] == 960, controlled()
     invoke("peek", control=handle, visible=False)
     wait_for(host, lambda: controlled() and not controlled()["visible"], "peek dismissal")
-    assert controlled()["control"] == handle
+    assert controlled().get("control") == handle
     invoke("input", control=handle, actions=[["t", "after-dismiss"]])
     wait_for(host, lambda: b"after-dismiss" in (probe / "input.bin").read_bytes(), "input after dismiss")
     invoke("peek", control=handle)
@@ -310,16 +310,14 @@ def check_windows(ctl, control, host, run, display, accessibility_app, text_app,
             list_tool = next(tool for tool in tools if tool["name"] == "window_list")
             input_tool = next(tool for tool in tools if tool["name"] == "window_input")
             action_schema = input_tool["inputSchema"]["properties"]["actions"]["items"]
-            assert {row["prefixItems"][0]["enum"][0] for row in action_schema["anyOf"]} == {"t", "p", "d", "u", "w", "at", "m", "b"}, action_schema
+            assert {row["prefixItems"][0]["enum"][0] for row in action_schema["anyOf"]} == {"t", "p", "d", "u", "w", "at", "m", "b", "click", "wheel", "scroll"}, action_schema
             assert all(row["type"] == "array" for row in action_schema["anyOf"]), action_schema
             assert "all_windows" in list_tool["inputSchema"]["properties"], list_tool
             assert {tool["name"] for tool in tools} == {
-                "window_list", "window_get", "window_wait", "window_pointer", "window_click",
-                "window_button", "window_key", "window_resize", "window_capture",
-                "window_press_key", "window_chord", "window_scroll", "window_capture_after", "window_find",
+                "window_list", "window_get", "window_wait", "window_resize", "window_capture",
+                "window_capture_after", "window_find",
                 "window_resolve",
                 "window_scale",
-                "window_type_text",
                 "window_input",
                 "window_request_control",
                 "window_accessibility",
@@ -373,13 +371,13 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
     focused = [window["id"] for window in before if window["desktop_focused"]]
     geometry = next(window["desktop_slot"] for window in before if window["id"] == identifier)
     invoke("control", id=identifier, enabled=True)
-    wait_for(host, lambda: invoke("get", id=identifier)["control"] is not None, "control grant")
-    handle = invoke("get", id=identifier)["control"]
+    wait_for(host, lambda: invoke("get", id=identifier).get("control") is not None, "control grant")
+    handle = invoke("get", id=identifier).get("control")
     assert not invoke("get", id=identifier)["remote_keyboard_target"], "grant alone must not focus input"
     key = invoke("get", id=identifier)["control_key"]
     controlled = mcp(403, "tools/call", {"name": "window_list", "arguments": {}})
     assert [item["id"] for item in controlled["structuredContent"]["windows"]] == [identifier], controlled
-    assert invoke("resolve", key=key)["control"] == handle
+    assert invoke("resolve", key=key).get("control") == handle
     assert len(handle) == 8 and key == "w" + identifier
     subprocess.run([str(Path(__file__).resolve().parent.parent / "target/debug/weldctl"),
                     "--session", str(display), "launch", "--", "wl-copy",
@@ -411,19 +409,19 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
     for keycode in [30, 28]:
         for pressed in [True, False]:
             result = mcp(20 + keycode * 2 + int(pressed), "tools/call", {
-                "name": "window_key", "arguments": {"control": handle, "keycode": keycode, "pressed": pressed}})
+                "name": "window_input", "arguments": {"control": handle, "actions": [["d" if pressed else "u", keycode]], "keep_pressed": pressed}})
             assert not result.get("isError"), result
     received = run / "input.bin"
     wait_for(host, lambda: received.exists() and b"a\r" in received.read_bytes(), "independent terminal keyboard input")
     invoke("press_key", control=handle, keycode=48)
     wait_for(host, lambda: b"b" in received.read_bytes(), "atomic key press")
-    result = mcp(180, "tools/call", {"name": "window_chord", "arguments": {"control": key, "keycodes": [42, 46]}})
+    result = mcp(180, "tools/call", {"name": "window_input", "arguments": {"control": key, "actions": [["p", [42, 46]]]}})
     assert not result.get("isError"), result
     wait_for(host, lambda: b"C" in received.read_bytes(), "atomic key chord")
     text = "Hei æøå — 世界 🦀 'quotes' \\" + "0123456789" * 60 + "\tend\n"
-    result = mcp(181, "tools/call", {"name": "window_type_text", "arguments": {"control": key, "text": text}})
+    result = mcp(181, "tools/call", {"name": "window_input", "arguments": {"control": key, "actions": [["t", text]]}})
     assert not result.get("isError"), result
-    assert result["structuredContent"]["stage"] == "effects_queued", result
+    assert result["structuredContent"]["receipt"]["stage"] == "effects_queued", result
     wait_for(host, lambda: text.replace("\n", "\r").encode() in received.read_bytes(), "whole Unicode text across keymap batches")
     invoke("press_key", control=handle, keycode=44)
     wait_for(host, lambda: received.read_bytes().endswith(b"z"), "normal keymap restored after text")
@@ -472,11 +470,11 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
     subprocess.run(["grim", str(run / "desktop-clipped-peek.png")], env=dict(os.environ, WAYLAND_DISPLAY=str(display)), check=True, timeout=10)
     old_handle = handle
     invoke("permissions", id=identifier, view=False, keyboard=True, pointer=False, resize=False)
-    wait_for(host, lambda: invoke("get", id=identifier)["control"] not in [None, old_handle], "permission change")
+    wait_for(host, lambda: invoke("get", id=identifier).get("control") not in [None, old_handle], "permission change")
     window = invoke("get", id=identifier)
-    handle = window["control"]
+    handle = window.get("control")
     assert window["capabilities"] == dict(view=False, keyboard=True, pointer=False, resize=False)
-    assert invoke("resolve", key=key)["control"] == handle, "slot shorthand follows the new grant"
+    assert invoke("resolve", key=key).get("control") == handle, "slot shorthand follows the new grant"
     assert "error" in rpc("capture", {"control": old_handle})
     assert "error" in rpc("type_text", {"control": old_handle, "text": "retired"})
     assert "error" in rpc("capture", {"control": handle})
@@ -487,14 +485,14 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
     subprocess.run(["grim", str(run / "desktop-restricted-control.png")], env=dict(os.environ, WAYLAND_DISPLAY=str(display)), check=True, timeout=10)
     invoke("key", control=handle, keycode=58, pressed=True)
     invoke("control", id=identifier, enabled=False)
-    wait_for(host, lambda: invoke("get", id=identifier)["control"] is None, "control retirement")
+    wait_for(host, lambda: invoke("get", id=identifier).get("control") is None, "control retirement")
     assert not invoke("get", id=identifier)["remote_keyboard_target"]
     assert "error" in rpc("key", {"control": handle, "keycode": 30, "pressed": True})
     assert "error" in rpc("capture", {"control": handle})
     invoke("control", id=identifier, enabled=True)
-    wait_for(host, lambda: invoke("get", id=identifier)["control"] is not None, "replacement grant")
-    assert invoke("get", id=identifier)["control"] != handle, "old control ID reused"
-    assert invoke("resolve", key=key)["control"] == invoke("get", id=identifier)["control"]
+    wait_for(host, lambda: invoke("get", id=identifier).get("control") is not None, "replacement grant")
+    assert invoke("get", id=identifier).get("control") != handle, "old control ID reused"
+    assert invoke("resolve", key=key).get("control") == invoke("get", id=identifier).get("control")
     offset = len(received.read_bytes())
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
         typing = executor.submit(rpc, "input", {"control": key, "actions": [["t", "Z" * 20]], "typing_interval_ms": 100})
@@ -504,7 +502,7 @@ def check_remote_control(rpc, mcp, identifier, host, run, display):
                 assert "error" not in result, result
             return len(received.read_bytes()) > offset
         wait_for(host, started_typing, "paced input started")
-        assert invoke("get", id=identifier)["control"], "queries blocked during typing"
+        assert invoke("get", id=identifier).get("control"), "queries blocked during typing"
         invoke("control", id=identifier, enabled=False)
         progress = typing.result(timeout=5)["result"]
         assert not progress["complete"] and progress["completed_actions"] == 0 and progress["error"], progress
@@ -522,12 +520,12 @@ def check_text_entry(ctl, rpc, host, run, program, backend):
                     sys.executable, "-c", launcher, str(output), program,
                     "--entry", "--title=" + title, "--text=Unicode input probe"], check=True, capture_output=True, timeout=10)
     def window():
-        return next((item for item in rpc("list", {})["result"]["windows"] if item["title"] == title), None)
+        return next((item for item in rpc("list", {})["result"]["windows"] if item.get("title") == title), None)
     wait_for(host, lambda: window() is not None, "text entry " + backend)
     identifier = window()["id"]
     assert "result" in rpc("control", {"id": identifier, "enabled": True})
-    wait_for(host, lambda: window()["control"] is not None, "text entry grant")
-    control = window()["control"]
+    wait_for(host, lambda: window().get("control") is not None, "text entry grant")
+    control = window().get("control")
     wait_for(host, lambda: "result" in rpc("capture", {"control": control}), "text entry ready")
     text = "Hello Æøå 世界 🦀 " + "abc123" * 100
     result = subprocess.run([*ctl, "window", "type-text", "--control=" + control, "--text=" + text, "--json"], capture_output=True, text=True, timeout=10)
@@ -551,11 +549,11 @@ def check_accessibility(ctl, rpc, mcp, host, run, program):
                     program, "--entry", "--title=" + title, "--text=Accessible test entry",
                     "--entry-text=Probe value"], check=True, capture_output=True, timeout=10)
     def window():
-        return next((item for item in rpc("list", {})["result"]["windows"] if item["title"] == title), None)
+        return next((item for item in rpc("list", {})["result"]["windows"] if item.get("title") == title), None)
     wait_for(host, lambda: window() is not None, "GTK probe window")
     identifier = window()["id"]
     assert "result" in rpc("control", {"id": identifier, "enabled": True})
-    wait_for(host, lambda: window()["control"] is not None, "GTK control grant")
+    wait_for(host, lambda: window().get("control") is not None, "GTK control grant")
     key = window()["control_key"]
     def inspect():
         reply = rpc("accessibility", {"control": key, "max_nodes": 256})
@@ -586,10 +584,10 @@ def check_accessibility(ctl, rpc, mcp, host, run, program):
                                              "--json"], text=True, timeout=10))
     assert cli["status"] == "ready", cli
     assert len(cli["nodes"]) == 1 and cli["nodes"][0]["name"] == "OK", cli
-    handle = window()["control"]
+    handle = window().get("control")
     assert "result" in rpc("permissions", {"id": identifier, "view": False, "keyboard": True,
                                            "pointer": False, "resize": False})
-    wait_for(host, lambda: window()["control"] != handle, "GTK view revocation")
+    wait_for(host, lambda: window().get("control") != handle, "GTK view revocation")
     assert "error" in rpc("accessibility", {"control": key})
     assert "error" in rpc("accessibility", {"control": handle})
     print("PASS GTK accessibility tree through CLI/RPC/MCP, node limits and view revocation", flush=True)

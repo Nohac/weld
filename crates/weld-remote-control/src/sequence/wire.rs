@@ -1,6 +1,7 @@
 //! Positional action encoding shared by CLI, RPC and the MCP schema.
 
 use super::{InputAction, InputKey, KeyState};
+use crate::{Easing, MouseButton};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -42,6 +43,22 @@ pub enum Move {
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub enum Button {
     #[serde(rename = "b")]
+    Tag,
+}
+
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub enum Click {
+    #[serde(rename = "click")]
+    Tag,
+}
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub enum Scroll {
+    #[serde(rename = "scroll")]
+    Tag,
+}
+#[derive(Serialize, Deserialize, JsonSchema)]
+pub enum Wheel {
+    #[serde(rename = "wheel")]
     Tag,
 }
 
@@ -96,11 +113,43 @@ pub enum Action {
     Wait(Wait, u32),
     /// ["at", milliseconds_from_start]
     At(At, u32),
-    /// ["m", x, y, duration_ms?]
+    /// ["m", x, y, duration_ms?, easing?]
     #[schemars(extend("minItems" = 3))]
-    Move(Move, f64, f64, #[serde(default)] Option<u32>),
-    /// ["b", linux_button, pressed]
-    Button(Button, u32, bool),
+    Move(
+        Move,
+        f64,
+        f64,
+        #[serde(default)] Option<u32>,
+        #[serde(default)] Option<Easing>,
+    ),
+    /// ["b", button_name_or_code, pressed]
+    Button(Button, MouseButton, bool),
+    /// ["click", button_name_or_code, count?, interval_ms?] at the current pointer.
+    #[schemars(extend("minItems" = 2))]
+    Click(
+        Click,
+        MouseButton,
+        #[serde(default)] Option<u32>,
+        #[serde(default)] Option<u32>,
+    ),
+    /// ["wheel", horizontal_notches, vertical_notches, count?, interval_ms?]. Positive is right/down.
+    #[schemars(extend("minItems" = 3))]
+    Wheel(
+        Wheel,
+        f64,
+        f64,
+        #[serde(default)] Option<u32>,
+        #[serde(default)] Option<u32>,
+    ),
+    /// ["scroll", horizontal_pixels, vertical_pixels, count?, interval_ms?]. Each repeat is a completed gesture.
+    #[schemars(extend("minItems" = 3))]
+    Scroll(
+        Scroll,
+        f64,
+        f64,
+        #[serde(default)] Option<u32>,
+        #[serde(default)] Option<u32>,
+    ),
 }
 
 impl From<Action> for InputAction {
@@ -127,12 +176,35 @@ impl From<Action> for InputAction {
             },
             Action::Wait(_, wait_ms) => Self::Wait { wait_ms },
             Action::At(_, at_ms) => Self::At { at_ms },
-            Action::Move(_, x, y, duration_ms) => Self::Move {
+            Action::Move(_, x, y, duration_ms, easing) => Self::Move {
                 x,
                 y,
                 duration_ms: duration_ms.unwrap_or(0),
+                easing: easing.unwrap_or_default(),
             },
-            Action::Button(_, button, pressed) => Self::Button { button, pressed },
+            Action::Button(_, button, pressed) => Self::Button {
+                button: button.code(),
+                pressed,
+            },
+            Action::Click(_, button, count, interval) => Self::Click {
+                button: button.code(),
+                count: count.unwrap_or(1),
+                interval_ms: interval.unwrap_or(0),
+            },
+            Action::Wheel(_, horizontal, vertical, count, interval) => Self::Scroll {
+                horizontal,
+                vertical,
+                wheel: true,
+                count: count.unwrap_or(1),
+                interval_ms: interval.unwrap_or(0),
+            },
+            Action::Scroll(_, horizontal, vertical, count, interval) => Self::Scroll {
+                horizontal,
+                vertical,
+                wheel: false,
+                count: count.unwrap_or(1),
+                interval_ms: interval.unwrap_or(0),
+            },
         }
     }
 }
@@ -161,10 +233,50 @@ impl From<InputAction> for Action {
             } => Self::Up(Up::Tag, keys.into(), delay_ms),
             InputAction::Wait { wait_ms } => Self::Wait(Wait::Tag, wait_ms),
             InputAction::At { at_ms } => Self::At(At::Tag, at_ms),
-            InputAction::Move { x, y, duration_ms } => {
-                Self::Move(Move::Tag, x, y, Some(duration_ms))
+            InputAction::Move {
+                x,
+                y,
+                duration_ms,
+                easing,
+            } => Self::Move(Move::Tag, x, y, Some(duration_ms), Some(easing)),
+            InputAction::Click {
+                button,
+                count,
+                interval_ms,
+            } => Self::Click(
+                Click::Tag,
+                MouseButton::Code(button),
+                Some(count),
+                Some(interval_ms),
+            ),
+            InputAction::Scroll {
+                horizontal,
+                vertical,
+                wheel,
+                count,
+                interval_ms,
+            } => {
+                if wheel {
+                    Self::Wheel(
+                        Wheel::Tag,
+                        horizontal,
+                        vertical,
+                        Some(count),
+                        Some(interval_ms),
+                    )
+                } else {
+                    Self::Scroll(
+                        Scroll::Tag,
+                        horizontal,
+                        vertical,
+                        Some(count),
+                        Some(interval_ms),
+                    )
+                }
             }
-            InputAction::Button { button, pressed } => Self::Button(Button::Tag, button, pressed),
+            InputAction::Button { button, pressed } => {
+                Self::Button(Button::Tag, MouseButton::Code(button), pressed)
+            }
         }
     }
 }

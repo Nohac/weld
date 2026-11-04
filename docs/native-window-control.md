@@ -98,7 +98,8 @@ The final command revokes control. `weldctl access revoke all` and the existing
 One independent remote-control seat serves the granted windows. Operations preserve
 the desktop's selected window. Keyboard codes are Linux evdev codes interpreted
 through the configured host keymap. Pointer positions use window-local logical
-coordinates; button codes are 272/273/274 for left/right/middle. Individual
+coordinates; buttons accept names such as `left`, `right`, `middle`, or Linux
+codes 272/273/274. Individual
 `button` and `key` operations require matching release edges. Revocation releases
 held input through the shared hoist relay.
 
@@ -119,7 +120,7 @@ keyboard seat:
 weldctl --session weld-0 window type-text --control w6 --text 'Hello æøå 世界 🦀' --json
 ```
 
-The equivalent MCP tool is `window_type_text` with `control` and `text` arguments.
+The equivalent MCP call is `window_input` with `control` and `actions:[["t",text]]`.
 It requires Keyboard permission and remote input ownership. Each request accepts
 1–4096 UTF-8 bytes; longer input can be split at character boundaries. Explicit
 newlines press Enter and tabs press Tab. Other control characters are rejected,
@@ -164,11 +165,41 @@ weldctl --session weld-0 window input --params-json '{"control":"w6","actions":[
 | `["w", milliseconds]` | Pause without sending input. |
 | `["t", "text"]` | Type literal Unicode text. |
 | `["at", milliseconds]` | Wait until an offset from sequence start, or recording start in `record-input`. |
-| `["m", x, y, duration_ms?]` | Move the pointer; zero/omitted duration jumps directly, positive duration interpolates from the previous remote position. |
-| `["b", button, pressed]` | Press/release a Linux pointer button (272 left, 273 right, 274 middle). |
+| `["m", x, y, duration_ms?, easing?]` | Move from the current remote position. Zero/omitted duration jumps directly. Easing: `linear` (default), `ease_in`, `ease_out`, `ease_in_out`. |
+| `["b", button, pressed]` | Press/release a named or Linux pointer button (`middle` or 274, for example). |
+| `["click", button, count?, interval_ms?]` | Complete clicks at the current pointer position. |
+| `["wheel", horizontal, vertical, count?, interval_ms?]` | Wheel events at the current pointer position, in notches per event. |
+| `["scroll", horizontal, vertical, count?, interval_ms?]` | Completed finger gestures at the current pointer position, in logical pixels per gesture. |
 
 `keys` is an evdev number, an XKB name, or a list of up to 16 of either.
 Grouped transitions are queued in one native batch with one timestamp.
+Click/scroll repetition defaults to `count=1`, `interval_ms=0`. Count is 1–1000;
+the interval is the gap between events, with no trailing gap. Positive scroll
+amounts move right/down. Five separate downward wheel ticks are
+`["wheel",0,1,5,50]`; a single 300-pixel gesture is `["scroll",0,300]`.
+Establish a pointer position with `["m",x,y]` first. Middle-button dragging uses
+`["b","middle",true]`, movement, and `["b","middle",false]`.
+The complete plan is validated before dispatch, including repetition limits,
+button balance and the existing 25-second timing budget. Expanded plans are
+limited to 4096 steps. Interruption cancels remaining repeats. A partially
+executed repeated row does not count as a completed action.
+
+The easing curves are quadratic ease-in/out/in-out; the default remains linear.
+Movement samples elapsed time rather than replaying missed samples, and lands
+exactly on its endpoint after a stall. For example:
+
+```json
+[["m",20,20],["m",200,100,600,"ease_in_out"],["click","middle"],["wheel",0,-1,5,50]]
+```
+
+The same rows work in `input` and `record_input`. Standalone `pointer` accepts
+`--duration-ms 600 --easing ease_in_out` after an initial immediate positioning call.
+It uses the same movement scheduler. Standalone `click` and `scroll`
+also accept `--count` and `--interval-ms`; repetitions use the same native sequence
+scheduler. Single events still use the immediate dispatcher, including when a
+modifier is already held. Repeated actions can use a retained modifier or place
+modifier down/up rows inside the same input sequence.
+
 Omitted or `null` timing fields use the global defaults; explicit zero overrides
 them. For example `["p",57,100,250]` holds Space for 100 ms, then pauses 250 ms.
 For games that poll keyboard state once per frame, use a nonzero hold duration.
@@ -190,10 +221,23 @@ The host schedules steps through native deadlines with a 30-second request
 deadline. A delayed host resumes from the current acknowledgement time,
 preserving spacing. `type-text` uses this executor at zero interval.
 
-Explicit downs and ups must balance within a sequence. Duplicate downs,
-unmatched ups, presses of already-held keys and text while keys are held are
+New downs and ups must balance within a sequence unless `keep_pressed:true` is
+explicitly supplied. Retained keys/buttons are scoped to the controlled window
+and remain held across subsequent calls until an explicit up action. Later moves,
+scrolls and captures do not require repeating the flag. Duplicate downs, unmatched
+ups, clicks/presses of already-held buttons/keys and text while keys are held are
 rejected before input is sent, including aliases that resolve to the same key.
-Pointer buttons also require balanced down/up pairs. Start with an immediate
+Timeout or interruption of a running sequence, local takeover, revocation and
+window retirement release retained input. A malformed new request emits no input
+and leaves a previously authorized hold intact.
+
+For example, start a middle-button drag with
+`{"actions":[["m",20,20],["b","middle",true]],"keep_pressed":true}`,
+continue with `{"actions":[["m",200,100,600,"ease_in_out"]]}`, then release with
+`{"actions":[["b","middle",false]]}`. Keyboard modifiers use the same mechanism,
+with `d` and `u` rows. The flag is also available in `record_input`'s input options
+and as `weldctl window input --keep-pressed true`.
+ Start with an immediate
 `m` row to establish a position before a smooth move or button event. All pointer
 targets are validated against the full application's logical viewport before
 any action runs. Smooth motion samples at most every eight milliseconds and
@@ -342,6 +386,14 @@ publication preserves the revision. Timeouts are errors and range from 1 to
 snapshot. Host shutdown wakes pending waits. Plain headless hosting reports that
 window management is unavailable.
 
+## Public JSON responses
+
+MCP tool results, JSON-RPC result payloads and CLI JSON output omit null-valued
+optional object fields recursively. Missing values do not remove positional array
+entries; `false`, zero, empty strings, arrays and objects remain. JSON-RPC envelopes
+retain required fields such as a null request ID. The native binary contract and
+stored JSON files retain their existing representations.
+
 ## Schemas and generated interfaces
 
 The implementation pins `server-less` at
@@ -390,7 +442,7 @@ including the initial retained frame. AV1 is the default; H.264 is selectable.
 Source composition, native buffer ownership, encoder workers, pacing and
 backpressure use the existing encoded-hoist implementation. Encoder saturation
 or pacing can coalesce updates; completed recordings report that count alongside
-the number of submitted updates and encoded frames. `dropped_frames` is `null`
+the number of submitted updates and encoded frames. `dropped_frames` is omitted
 until the encoder drains. The timeline describes updates observed by the
 recording consumer, which may already reflect upstream commit coalescing.
 
@@ -476,7 +528,10 @@ entire video into one RPC response. Waiting recording calls allow the requested
 duration plus admission/drain time. Sparse contact sheets decode only the
 keyframe ranges containing their selected tiles. Explicit
 PNG/video exports are user-owned files and survive lease expiry; exports refuse
-to overwrite an existing path.
+to overwrite an existing path. Choose a persistent, disk-backed directory for
+`recording_export`, such as a project's `recordings/` directory. Do not export to
+`/tmp` or any tmpfs location: tmpfs is RAM-backed, so a large exported video consumes
+RAM. This guidance is included in the tool's generated MCP/CLI documentation.
 
 ### Recording usability follow-ups
 
@@ -506,9 +561,12 @@ weldctl --session weld-0 mcp
 ```
 
 The generated tools include inventory `list`, `find`, `get`, `resolve`, `wait`;
-input `input`, `pointer`, `click`, `button`, `key`, `press_key`, `chord`, `type_text`, `scroll`;
+input `input` (all keyboard and pointer actions, including cross-call holds);
 viewport `resize`, `scale`; and `capture`, `capture_after`, `accessibility`, all prefixed `window_`.
-Recording tools are listed in [Window recordings](#window-recordings).
+Recording tools are listed in [Window recordings](#window-recordings), including
+`record_input` with the identical action model. Redundant per-event MCP tools are
+not published or callable. Existing CLI/JSON-RPC convenience commands remain thin
+adapters to the shared native dispatcher and scheduler.
 MCP `window_list` defaults to control-enabled windows, including waiting persistent
 slots. Pass `{"all_windows":true}` for the whole inventory. CLI/RPC `list` retains
 the full inventory; `find` provides explicit application and control filters.

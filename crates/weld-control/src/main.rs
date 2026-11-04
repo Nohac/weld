@@ -210,7 +210,10 @@ fn main() -> Result<()> {
             match call(&path, &Request::Access(request))? {
                 Response::AccessStatus(status) => {
                     if matches!(command, Access::Status { json: true }) {
-                        println!("{}", serde_json::to_string_pretty(&status)?);
+                        println!(
+                            "{}",
+                            serde_json::to_string_pretty(&weld_control::json::value(&status)?)?
+                        );
                     } else {
                         println!(
                             "New access sessions: {}",
@@ -271,7 +274,10 @@ fn main() -> Result<()> {
             let Response::Launched(receipt) = call(&path, &Request::Run(request))? else {
                 anyhow::bail!("unexpected launch response");
             };
-            println!("{}", serde_json::to_string(&receipt)?);
+            println!(
+                "{}",
+                serde_json::to_string(&weld_control::json::value(&receipt)?)?
+            );
         }
         Command::Diagnostics { command } => match command {
             Diagnostics::List => {

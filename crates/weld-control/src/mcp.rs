@@ -29,7 +29,7 @@ impl InventoryTools {
         all_windows: Option<bool>,
         owner: Option<String>,
         launch_id: Option<String>,
-    ) -> Result<WindowCatalogue, String> {
+    ) -> Result<crate::json::Json<WindowCatalogue>, String> {
         self.0.find(
             None,
             None,
@@ -43,7 +43,7 @@ impl InventoryTools {
 impl ServerHandler for WindowMcp {
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
-            .with_instructions("Inspect windows in the selected Weld session. Window IDs and inventory revisions belong to that running session.")
+            .with_instructions("Inspect windows in the selected Weld session. Window IDs and inventory revisions belong to that running session. Use window_input for keyboard, pointer, click and scroll actions, or window_record_input to capture them. Set keep_pressed=true to retain presses across calls; release them with later up actions.")
     }
 
     async fn list_tools(
@@ -120,7 +120,19 @@ pub fn run(socket: PathBuf) -> Result<()> {
         .filter(|tool| {
             !matches!(
                 tool["name"].as_str(),
-                Some("window_control" | "window_permissions" | "window_list")
+                Some(
+                    "window_control"
+                        | "window_permissions"
+                        | "window_list"
+                        | "window_pointer"
+                        | "window_click"
+                        | "window_scroll"
+                        | "window_button"
+                        | "window_key"
+                        | "window_press_key"
+                        | "window_chord"
+                        | "window_type_text"
+                )
             )
         })
         .chain(InventoryTools::mcp_tools())
