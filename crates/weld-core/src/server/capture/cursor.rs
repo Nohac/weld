@@ -4,16 +4,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result, ensure};
 
-use crate::{
-    OutputId,
-    cursor::{
-        CursorImage,
-        raster::{CropSource, destination_raster, resample_pixels, scaled_extent},
-        theme::{fallback_image, load_theme_images},
-    },
-    server::ServerState,
-    surface::Extent,
-};
+use crate::{OutputId, server::ServerState, surface::Extent};
 
 #[derive(Clone)]
 pub(super) struct CaptureCursor {
@@ -38,38 +29,12 @@ impl ServerState {
             ((position.y - f64::from(output.logical_position.1)) * scale).round() as i64,
         );
         let image = self.presented_cursor.clone().unwrap_or_default();
-        let (pixels, width, height, hotspot) = match image {
-            CursorImage::Hidden => return Ok(None),
-            CursorImage::Image(image) => {
-                let raster = destination_raster(&image, configuration.size(), scale)?;
-                (raster.rgba, raster.width, raster.height, raster.hotspot)
-            }
-            CursorImage::Named(icon) => {
-                let images = load_theme_images(configuration.theme(), icon)
-                    .unwrap_or_else(|_| Arc::from([fallback_image()]));
-                let size = scaled_extent(f64::from(configuration.size()), scale)?;
-                ensure!(size <= 512, "capture cursor exceeds raster bound");
-                let image = images
-                    .iter()
-                    .min_by_key(|image| image.size.abs_diff(size))
-                    .context("cursor theme contains no image")?;
-                let pixels = resample_pixels(
-                    &image.pixels_rgba,
-                    image.width,
-                    image.height,
-                    size,
-                    size,
-                    CropSource::full(image.width, image.height),
-                )?;
-                let hotspot = (
-                    (f64::from(image.xhot) / f64::from(image.width) * f64::from(size)).round()
-                        as u32,
-                    (f64::from(image.yhot) / f64::from(image.height) * f64::from(size)).round()
-                        as u32,
-                );
-                (pixels, size, size, hotspot)
-            }
+        let Some(raster) = crate::cursor::raster::capture_raster(&image, configuration, scale)?
+        else {
+            return Ok(None);
         };
+        let (pixels, width, height, hotspot) =
+            (raster.rgba, raster.width, raster.height, raster.hotspot);
         Ok(Some(CaptureCursor {
             pixels: pixels.into(),
             width,

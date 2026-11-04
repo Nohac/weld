@@ -69,6 +69,11 @@ Weld is a workspace of reusable layers and one standard distribution:
   composed views enter the ordinary streaming encoder backend. A bounded worker
   spools packets into anonymous temporary files, with transport backpressure and
   completion notifications. Live timeline snapshots are copied only on request.
+  Controller cursor overlays are opt-in and retained as owned composition data;
+  snapshot and encoder GPU composition share the cursor raster/hotspot policy.
+  Cursor-only changes can generate recording frames without changing client revisions.
+  The recorder retains bounded input-row acknowledgements on its clock for event
+  selection. Optional sheet labels/captions reserve gutters outside image rectangles.
   Inspection and remuxing run off the native host thread; sparse inspection skips
   unneeded keyframe ranges. Anonymous Matroska exports are cached for the clip's
   lease and transferred in bounded chunks. `weld-remote-control` owns the recording

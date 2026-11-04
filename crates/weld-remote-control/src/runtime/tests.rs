@@ -185,6 +185,7 @@ fn capture_checkpoint_waits_for_a_later_commit_and_rejects_retired_incarnations(
         &client,
         &grant.state,
         Operation::CaptureAfter {
+            include_cursor: false,
             sequence: receipt.sequence.clone(),
             timeout_ms: 5000,
         },
@@ -198,6 +199,7 @@ fn capture_checkpoint_waits_for_a_later_commit_and_rejects_retired_incarnations(
         &client,
         &grant.state,
         Operation::CaptureAfter {
+            include_cursor: false,
             sequence: receipt.sequence.clone(),
             timeout_ms: 1,
         },
@@ -237,6 +239,7 @@ fn capture_checkpoint_waits_for_a_later_commit_and_rejects_retired_incarnations(
         &client,
         &grant.state,
         Operation::CaptureAfter {
+            include_cursor: false,
             sequence: receipt.sequence.clone(),
             timeout_ms: 5000,
         },
@@ -257,6 +260,7 @@ fn capture_checkpoint_waits_for_a_later_commit_and_rejects_retired_incarnations(
         &client,
         &replacement.state,
         Operation::CaptureAfter {
+            include_cursor: false,
             sequence: receipt.sequence,
             timeout_ms: 5000,
         },
@@ -684,7 +688,9 @@ fn restricted_grants_reject_operations_at_both_request_boundaries() {
     let mut events = ClientEventQueue::default();
     adapter.drain_events(&mut events);
     for operation in [
-        Operation::Capture,
+        Operation::Capture {
+            include_cursor: false,
+        },
         Operation::Keys {
             keycodes: vec![30],
             pressed: true,
@@ -715,6 +721,7 @@ fn restricted_grants_reject_operations_at_both_request_boundaries() {
             wheel: true,
         },
         Operation::CaptureAfter {
+            include_cursor: false,
             sequence: "1".into(),
             timeout_ms: 1,
         },
@@ -735,11 +742,13 @@ struct SequenceFixture {
 
 impl SequenceFixture {
     fn new() -> Self {
+        Self::with_capture(NoCapture)
+    }
+    fn with_capture(capture: impl Capture + 'static) -> Self {
         let upstream = ClientSourceId::new(0);
         let surface = ClientSurfaceId::new(ClientId::new(upstream, 1), 1);
         let authority = AccessAuthority::new(|| {});
-        let (registration, client) =
-            registration(upstream, ClientSourceId::new(3), || {}, NoCapture);
+        let (registration, client) = registration(upstream, ClientSourceId::new(3), || {}, capture);
         let mut adapter = registration.into_parts().runtime.driver;
         map(&mut *adapter, surface);
         let grant = client
@@ -1178,7 +1187,16 @@ fn revoke_rejects_queued_input_and_releases_held_keys_before_a_new_grant() {
         replacement.id(),
         "new incarnation has a fresh control ID"
     );
-    assert!(client.request(&old, Operation::Capture).is_err());
+    assert!(
+        client
+            .request(
+                &old,
+                Operation::Capture {
+                    include_cursor: false
+                }
+            )
+            .is_err()
+    );
 }
 
 #[test]
@@ -1435,5 +1453,60 @@ fn retained_input_is_released_on_later_timeout_takeover_and_revocation() {
             )),
             "{reason}"
         );
+    }
+}
+
+#[test]
+fn snapshots_opt_into_the_controller_cursor_and_preserve_client_hiding() {
+    struct Observer(Rc<RefCell<Vec<ComposedBuffer>>>);
+    struct ImageJob;
+    impl CaptureJob for ImageJob {
+        fn poll(&mut self) -> Option<Result<String>> {
+            Some(Ok("image".into()))
+        }
+    }
+    impl Capture for Observer {
+        fn begin(&mut self, frame: &ComposedBuffer) -> Result<Box<dyn CaptureJob>> {
+            self.0.borrow_mut().push(frame.clone());
+            Ok(Box::new(ImageJob))
+        }
+    }
+    let scenes = Rc::new(RefCell::new(Vec::new()));
+    let mut fixture = SequenceFixture::with_capture(Observer(scenes.clone()));
+    let response = pending(
+        &fixture.client,
+        &fixture.grant.state,
+        pointer_plan(r#"[["m",2,3]]"#, false),
+    );
+    assert!(drive_input(&mut *fixture.adapter, response).0.complete);
+    let surface = fixture.grant.state.surface;
+    for (include_cursor, image) in [
+        (false, weld_client::ClientCursor::default()),
+        (true, weld_client::ClientCursor::default()),
+        (true, weld_client::ClientCursor::Hidden),
+    ] {
+        fixture.adapter.observe_cursor_update(&ClientCursorUpdate {
+            surface,
+            cursor: image.clone(),
+        });
+        let response = pending(
+            &fixture.client,
+            &fixture.grant.state,
+            Operation::Capture { include_cursor },
+        );
+        fixture
+            .adapter
+            .drain_events(&mut ClientEventQueue::default());
+        assert!(matches!(
+            response.try_recv().expect("capture reply"),
+            Ok(Reply::Snapshot(_))
+        ));
+        let scenes = scenes.borrow();
+        let cursor = &scenes.last().expect("captured frame").cursor;
+        assert_eq!(cursor.is_some(), include_cursor);
+        if let Some(cursor) = cursor {
+            assert_eq!(cursor.image, image);
+            assert_eq!(cursor.position, LogicalPoint::new(2., 3.));
+        }
     }
 }

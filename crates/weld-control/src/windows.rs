@@ -361,9 +361,14 @@ impl WindowService {
         &self,
         recording: String,
         include_frames: Option<bool>,
+        include_events: Option<bool>,
     ) -> Result<RecordingInfo, String> {
         self.controller()?
-            .recording_info(&recording, include_frames.unwrap_or(false))
+            .recording_info(
+                &recording,
+                include_frames.unwrap_or(false),
+                include_events.unwrap_or(false),
+            )
             .map_err(|error| error.to_string())
     }
     /// Decode one frame of a completed recording by index or timestamp.
@@ -406,6 +411,15 @@ impl WindowService {
             .map_err(|_| "recording inspection busy")?;
         self.controller()?
             .recording_video(&recording, offset)
+            .map_err(|error| error.to_string())
+    }
+    pub fn recording_cursor(
+        &self,
+        recording: String,
+        include_cursor: bool,
+    ) -> Result<RecordingInfo, String> {
+        self.controller()?
+            .recording_cursor(&recording, include_cursor)
             .map_err(|error| error.to_string())
     }
     /// Cancel or delete a recording immediately.
@@ -664,9 +678,18 @@ impl WindowService {
     pub fn scale(&self, control: String, factor: Option<f64>) -> Result<InputReceipt, String> {
         self.send_input(control, Operation::Scale { factor })
     }
-    /// Capture the controlled application and its contained popups as a PNG.
-    pub fn capture(&self, control: String) -> Result<Snapshot, String> {
-        self.snapshot(control, Operation::Capture)
+    /// Capture the controlled application and its contained popups as a PNG. include_cursor defaults false; true overlays the controller cursor while respecting client hiding.
+    pub fn capture(
+        &self,
+        control: String,
+        include_cursor: Option<bool>,
+    ) -> Result<Snapshot, String> {
+        self.snapshot(
+            control,
+            Operation::Capture {
+                include_cursor: include_cursor.unwrap_or(false),
+            },
+        )
     }
     /// Wait up to 5000 ms for a commit newer than an input checkpoint, then capture it. Animations may commit before an input's intended UI result.
     pub fn capture_after(
@@ -674,10 +697,12 @@ impl WindowService {
         control: String,
         sequence: String,
         timeout_ms: u32,
+        include_cursor: Option<bool>,
     ) -> Result<Snapshot, String> {
         self.snapshot(
             control,
             Operation::CaptureAfter {
+                include_cursor: include_cursor.unwrap_or(false),
                 sequence,
                 timeout_ms,
             },
@@ -902,7 +927,7 @@ impl WindowClient {
         )?.map(Json)
     }
 
-    /// Record all observed composed frames using the streaming encoder. options: duration_ms (1..600000), optional region {x,y,width,height}, codec av1 (default) or h264, and after_sequence. wait defaults true; false returns immediately so input can run during recording. Idle retention is 30 minutes after completion or last inspection.
+    /// Record all observed composed frames using the streaming encoder. options: duration_ms (1..600000), optional region {x,y,width,height}, codec av1 (default) or h264, after_sequence, and include_cursor (default false; respects client hiding). wait defaults true; false returns immediately so input can run during recording. Idle retention is 30 minutes after completion or last inspection.
     pub fn record(
         &self,
         control: String,
@@ -920,15 +945,16 @@ impl WindowClient {
         })?
         .map(Json)
     }
-    /// Read recording status, frame count and final dropped-frame count; renews the idle lease. Set include_frames to include the full timestamp/revision timeline.
+    /// Read recording status, frame count and final dropped-frame count; renews the idle lease. Set include_frames for the frame timeline, or include_events for delivered record_input rows and their first/last acknowledgement times. Partial rows have complete=false.
     pub fn recording_info(
         &self,
         recording: String,
         include_frames: Option<bool>,
+        include_events: Option<bool>,
     ) -> Result<Json<RecordingInfo>, String> {
         self.call_json(|client, context| async move {
             client
-                .recording_info(context, recording, include_frames)
+                .recording_info(context, recording, include_frames, include_events)
                 .await
         })
     }
@@ -947,7 +973,7 @@ impl WindowClient {
         }
         Ok(image)
     }
-    /// View a contact sheet from an existing recording. options: frames (1..100), width/height (combined image, at most 4096 each), optional start_ms/end_ms and logical region. Tiles run left-to-right, top-to-bottom; metadata gives actual timestamps and revisions. Optional output saves a PNG.
+    /// View a contact sheet. options: width/height (total image, at most 4096 each), frames (1..100, default 12), optional start_ms/end_ms and region. Or use events:{indices:[action_row,...],offset_ms:50} to select frames around delivered record_input events; omitted indices selects all delivered rows. Negative offsets select earlier frames; offsets clamp to the clip. events.anchor is end (default, last acknowledgement) or start (first acknowledgement). events cannot combine with start_ms/end_ms. labels:true adds frame/time/event labels; captions is an optional array of one note per tile (200 characters each, 16 KiB combined). Text stays in gutters outside captured pixels, within the requested dimensions. Tile metadata includes crop rectangles, requested/actual times, event details and gutter bounds. Optional output saves a PNG.
     pub fn recording_sheet(
         &self,
         recording: String,
@@ -997,6 +1023,18 @@ impl WindowClient {
         file.persist_noclobber(path)
             .map_err(|error| error.to_string())?;
         Ok(output)
+    }
+    /// Enable or disable the controller-cursor overlay for subsequent frames of an active recording. Off by default. This changes only captured pixels, respects application cursor hiding, and does not change mouse lock or application input.
+    pub fn recording_cursor(
+        &self,
+        recording: String,
+        include_cursor: bool,
+    ) -> Result<Json<RecordingInfo>, String> {
+        self.call_json(|client, context| async move {
+            client
+                .recording_cursor(context, recording, include_cursor)
+                .await
+        })
     }
     /// Cancel or delete the temporary recording, including its retained encoded frames.
     pub fn recording_release(&self, recording: String) -> Result<String, String> {
@@ -1197,19 +1235,28 @@ impl WindowClient {
         )
     }
     /// Read a synchronized PNG of the controlled window and its contained popups.
-    pub fn capture(&self, control: String) -> Result<Json<Snapshot>, String> {
-        self.call_json(|client, context| async move { client.capture(context, control).await })
+    /// include_cursor defaults false; opt in to the controller cursor, respecting application hiding.
+    pub fn capture(
+        &self,
+        control: String,
+        include_cursor: Option<bool>,
+    ) -> Result<Json<Snapshot>, String> {
+        self.call_json(|client, context| async move {
+            client.capture(context, control, include_cursor).await
+        })
     }
     /// Capture a commit newer than an input receipt's sequence, with a 1..5000 ms timeout. Check pixels for the intended UI result.
+    /// include_cursor defaults false and affects only the captured image.
     pub fn capture_after(
         &self,
         control: String,
         sequence: String,
         timeout_ms: u32,
+        include_cursor: Option<bool>,
     ) -> Result<Json<Snapshot>, String> {
         self.call_json(|client, context| async move {
             client
-                .capture_after(context, control, sequence, timeout_ms)
+                .capture_after(context, control, sequence, timeout_ms, include_cursor)
                 .await
         })
     }

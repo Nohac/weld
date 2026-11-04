@@ -1,10 +1,15 @@
 //! Bounded encoded recordings and off-thread inspection of retained clips.
 
+mod annotations;
+pub use annotations::Gutter;
 mod engine;
 mod inspect;
 mod storage;
 pub use engine::Recorder;
-pub use inspect::{FrameOptions, Image, SheetOptions, Tile, Video, VideoFile, frame, sheet, video};
+pub use inspect::{
+    EventAnchor, EventSelection, FrameOptions, Image, SheetOptions, Tile, Video, VideoFile, frame,
+    sheet, video,
+};
 pub use storage::{EncodedFrame, Packet, Timeline};
 
 use anyhow::{Result, ensure};
@@ -63,6 +68,9 @@ impl Region {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Options {
+    /// Draw the controller cursor; off by default. Client-requested hiding is always respected.
+    #[serde(default)]
+    pub include_cursor: bool,
     pub duration_ms: u32,
     pub region: Option<Region>,
     #[serde(default)]
@@ -86,6 +94,38 @@ pub struct FrameInfo {
     pub revision: String,
 }
 
+/// A delivered input row, sampled on the recording clock. Partial rows remain explicit.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+pub struct RecordedEvent {
+    pub index: u32,
+    pub action: serde_json::Value,
+    pub first_time_us: u64,
+    /// Last acknowledgement (completion time when complete is true).
+    pub time_us: u64,
+    pub complete: bool,
+    pub revision: Option<String>,
+}
+
+impl RecordedEvent {
+    pub fn kind(&self) -> &'static str {
+        match self.action.get(0).and_then(serde_json::Value::as_str) {
+            Some("m") => "move",
+            Some("p") => "key press",
+            Some("d") => "key down",
+            Some("u") => "key up",
+            Some("t") => "text",
+            Some("b") if self.action.get(2).and_then(serde_json::Value::as_bool) == Some(true) => {
+                "button down"
+            }
+            Some("b") => "button up",
+            Some("click") => "click",
+            Some("wheel") => "wheel",
+            Some("scroll") => "scroll",
+            _ => "input",
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum Status {
@@ -96,6 +136,8 @@ pub enum Status {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Info {
+    /// Current cursor policy; already encoded frames are unaffected by later changes.
+    pub include_cursor: bool,
     pub id: String,
     pub status: Status,
     pub duration_ms: u32,
@@ -108,6 +150,8 @@ pub struct Info {
     pub dropped_frames: Option<u32>,
     pub frame_count: u32,
     pub frames: Vec<FrameInfo>,
+    pub event_count: u32,
+    pub events: Vec<RecordedEvent>,
     pub bytes: usize,
     pub error: Option<String>,
     pub expires_after_idle_ms: u32,
@@ -117,6 +161,7 @@ impl Info {
     /// Copy counters without allocating a potentially ten-minute frame timeline.
     pub fn summary(&self) -> Self {
         Self {
+            include_cursor: self.include_cursor,
             id: self.id.clone(),
             status: self.status.clone(),
             duration_ms: self.duration_ms,
@@ -128,6 +173,8 @@ impl Info {
             dropped_frames: self.dropped_frames,
             frame_count: self.frame_count,
             frames: Vec::new(),
+            event_count: self.event_count,
+            events: Vec::new(),
             bytes: self.bytes,
             error: self.error.clone(),
             expires_after_idle_ms: self.expires_after_idle_ms,

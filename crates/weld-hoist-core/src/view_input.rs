@@ -169,6 +169,14 @@ impl ViewInput {
         vec![envelope]
     }
 
+    /// Accepted pointer target, including a popup retained by an implicit grab.
+    pub fn pointer_surface(&self, root: ClientSurfaceId) -> Option<ClientSurfaceId> {
+        self.pointers
+            .get(&root)?
+            .target
+            .map(|target| target.surface)
+    }
+
     pub fn remove(&mut self, surface: ClientSurfaceId) {
         self.pointers.retain(|root, pointer| {
             *root != surface

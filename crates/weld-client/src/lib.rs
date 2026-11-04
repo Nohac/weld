@@ -23,7 +23,7 @@ mod presenter;
 mod startup;
 mod surface;
 mod text;
-pub use composition::{ComposedBuffer, CompositionLayer};
+pub use composition::{ComposedBuffer, CompositionCursor, CompositionLayer};
 pub use startup::{InitialPresentation, WindowPreference};
 mod touch;
 #[cfg(feature = "serde")]

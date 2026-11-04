@@ -484,8 +484,52 @@ The plan must end before the recording duration; leave a tail for application
 rendering. Input stops at that deadline if host/app delivery ran late. Local
 takeover, revocation, replacement, recording failure or release stops remaining
 input and retires held keys/buttons. Partial input progress remains explicit;
-inspect it before retrying. The recording contains application surfaces and
-contained popups; cursor imagery is separate from those pixels.
+inspect it before retrying. The recording contains application surfaces and contained popups. Cursor capture
+is off by default. Set `include_cursor:true` in recording options to bake the
+controller cursor into the video, extracted frames and sheets. Snapshot `capture`
+and `capture_after` calls accept the same opt-in flag. The cursor follows the
+controller's window-local position, client shape/image and hotspot, including
+popup routing and application-requested hiding. This is the controller cursor,
+not the physical desktop pointer.
+
+During an active recording, `recording_cursor(recording, include_cursor)` changes
+the overlay for subsequent frames. It does not affect application input, cursor
+appearance policy or mouse locking. Cursor-only changes generate recording frames
+even without a new application commit; those frames retain the client revision.
+Disabling capture or application hiding removes the overlay, and unchanged/hidden
+cursor motion does not repeatedly encode identical frames.
+
+`record_input` retains each delivered input row with its original action index,
+compact action data, first acknowledgement time, last acknowledgement time,
+completion flag and last acknowledged client revision. Times use the recording
+clock. Repeated/interpolated steps update the same row; waits are timing controls,
+not delivered input events. Partially delivered rows remain marked incomplete.
+These acknowledgements establish delivery, not proof that the application reacted.
+Use `recording_info(..., include_events:true)` to retrieve this bounded timeline;
+ordinary status replies carry only `event_count`.
+
+Contact sheets can use `events:{indices:[2,4],offset_ms:40}` instead of uniform
+sampling. Omit `indices` to select all delivered rows. Each selected tile samples
+the latest frame at or before the event's last acknowledgement plus the offset;
+negative offsets request earlier frames, and timestamps clamp to the clip bounds.
+Set `anchor:"start"` to offset from the first acknowledgement; the default `"end"`
+uses the last one. This distinguishes before/after a long movement or held key.
+Tile metadata includes both requested and actual frame times and the event.
+`frames` applies only to uniform sampling, and event selection cannot also specify
+`start_ms`/`end_ms`.
+
+Optional `labels:true` prints frame index, timestamp and selected event in a gutter.
+`captions:["Before drag","After drag"]` adds one agent-written note per selected
+tile. Captions are single lines, up to 200 characters each and 16 KiB combined;
+long text is clipped to its cell while the full caption remains in metadata.
+Gutters are part of the requested total dimensions and never cover captured pixels.
+The returned tile rectangles identify image pixels only; `gutter` identifies text.
+
+```sh
+weldctl window recording-info --recording ID --include-events true --json
+weldctl window recording-sheet --recording ID --options '{"events":{"indices":[2,4],"offset_ms":40},"labels":true,"captions":["Pointer positioned","Drag completed"],"width":640,"height":240}' --output recordings/events.png
+weldctl window recording-cursor --recording ID --include-cursor
+```
 
 Recording options accept `region:{x,y,width,height}` in original window-local
 logical coordinates, `codec:"av1"|"h264"`, and `after_sequence` to start with
@@ -542,13 +586,11 @@ frame inspection and exported files matched the recordings. AV1's coded-width
 difference was handled as padding. One recording expired during analysis while
 its exported file remained available.
 
-- [ ] Add optional contact-sheet labels such as `#94 · 1.600 s`, using the
-  recorded frame index and actual observation timestamp from each tile's
-  metadata. Place labels in a gutter outside the captured pixels. Include the
-  gutter in the requested total image dimensions and keep tile rectangles
-  accurate for downstream cropping. Labels make frame/metadata lookup easier.
-- [ ] Make the idle retention period configurable and raise the default to
-  ten minutes for analysis workflows. Continue renewing it on inspection/status
+- [x] Optional frame/time/event labels and agent captions render in gutters;
+  requested total dimensions and image crop rectangles remain accurate.
+- [x] Delivered input timelines support event-selected sheets with timing offsets.
+- [ ] Make the idle retention period configurable (the current default is
+  thirty minutes for analysis workflows). Continue renewing it on inspection/status
   requests, retaining the existing recording-count and memory budgets, explicit
   release, and occupant-scoped authorization. Explicit exports remain user-owned.
 

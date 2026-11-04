@@ -25,6 +25,7 @@ pub(super) struct Batch {
     next: Instant,
     origin: Instant,
     recording: Option<weld_recording::Info>,
+    event_actions: Vec<serde_json::Value>,
     motion: Option<Motion>,
 }
 
@@ -220,7 +221,24 @@ impl Adapter {
         if matches!(pending.operation, Operation::RecordInput { .. }) {
             pending.deadline = pending.deadline.min(now + Duration::from_secs(5));
         }
+        let event_actions = if let Operation::RecordInput { input, .. } = &pending.operation {
+            match input
+                .actions
+                .iter()
+                .map(serde_json::to_value)
+                .collect::<Result<Vec<_>, _>>()
+            {
+                Ok(actions) => actions,
+                Err(error) => {
+                    let _ = pending.reply.send(Err(error.to_string()));
+                    return;
+                }
+            }
+        } else {
+            Vec::new()
+        };
         self.batch = Some(Batch {
+            event_actions,
             pending,
             plan: Some(plan),
             resolving,
@@ -250,6 +268,21 @@ impl Adapter {
         if let Some((response, step)) = batch.flight.take() {
             match response.try_recv() {
                 Ok(Ok(Reply::Input(receipt))) => {
+                    if let Some(recording) = &batch.recording
+                        && let Some(action) =
+                            batch.event_actions.get(batch.result.completed_actions)
+                        && let Some(active) =
+                            self.state.borrow_mut().recordings.get_mut(&recording.id)
+                        && let Err(error) = active.recorder.observe_input(
+                            batch.result.completed_actions as u32,
+                            action,
+                            now,
+                            step.ends_action,
+                            receipt.frame_revision.clone(),
+                        )
+                    {
+                        active.error = Some(error.to_string());
+                    }
                     batch.result.receipt = Some(receipt);
                     batch.result.completed_actions += usize::from(step.ends_action);
                     if step.ends_action {
@@ -410,7 +443,13 @@ impl Adapter {
                 ends_action,
                 delay_after,
             } => {
-                let Some(position) = self.positions.get(&batch.pending.grant.surface) else {
+                let Some(position) = self
+                    .state
+                    .borrow()
+                    .positions
+                    .get(&batch.pending.grant.surface)
+                    .copied()
+                else {
                     self.abort_sequence(
                         batch,
                         "move the pointer before clicking or scrolling".into(),
@@ -450,7 +489,13 @@ impl Adapter {
                         delay_after: Duration::ZERO,
                     }
                 } else {
-                    let Some(position) = self.positions.get(&batch.pending.grant.surface) else {
+                    let Some(position) = self
+                        .state
+                        .borrow()
+                        .positions
+                        .get(&batch.pending.grant.surface)
+                        .copied()
+                    else {
                         self.abort_sequence(
                             batch,
                             "smooth motion requires an initial pointer position".into(),
@@ -500,7 +545,7 @@ impl Adapter {
             .get(&surface)
             .and_then(|frame| frame.root)
             .context("window has no ready frame")?;
-        let mut positioned = self.positions.contains_key(&surface);
+        let mut positioned = state.positions.contains_key(&surface);
         for step in &batch.steps {
             match step {
                 Step::Move { x, y, duration, .. } => {

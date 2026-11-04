@@ -134,6 +134,22 @@ impl Archive {
 }
 
 impl RemoteControlClient {
+    pub fn recording_cursor(&self, id: &str, include_cursor: bool) -> Result<Info> {
+        let control = self
+            .recordings
+            .read(id, |entry| Ok(entry.permission.0.id.clone()))?;
+        match self.request(
+            &control,
+            crate::Operation::RecordingCursor {
+                recording: id.into(),
+                include_cursor,
+            },
+        )? {
+            crate::Reply::Recording(info) => Ok(info),
+            _ => anyhow::bail!("cursor update returned unexpected work"),
+        }
+    }
+
     pub fn wait_recording(&self, id: &str, timeout: Duration) -> Result<Info> {
         let deadline = Instant::now() + timeout;
         let mut entries = self
@@ -163,13 +179,24 @@ impl RemoteControlClient {
                 .map_err(|_| anyhow::anyhow!("recording archive unavailable"))?;
         }
     }
-    pub fn recording_info(&self, id: &str, include_frames: bool) -> Result<Info> {
+    pub fn recording_info(
+        &self,
+        id: &str,
+        include_frames: bool,
+        include_events: bool,
+    ) -> Result<Info> {
         self.recordings.read(id, |entry| {
             let mut info = entry.info.summary();
             if include_frames {
                 info.frames = match &entry.clip {
                     Some(clip) => clip.info.frames.clone(),
                     None => entry.timeline.frames()?,
+                };
+            }
+            if include_events {
+                info.events = match &entry.clip {
+                    Some(clip) => clip.info.events.clone(),
+                    None => entry.timeline.events()?,
                 };
             }
             Ok(info)
@@ -261,6 +288,7 @@ mod tests {
             viewport: Mutex::new(None),
         });
         let info = Info {
+            include_cursor: false,
             id: "clip".into(),
             status: Status::Complete,
             duration_ms: 500,
@@ -279,6 +307,8 @@ mod tests {
             frames: vec![],
             bytes: 0,
             error: None,
+            event_count: 0,
+            events: Vec::new(),
             expires_after_idle_ms: IDLE_RETENTION_MS,
         };
         archive
@@ -331,7 +361,7 @@ mod tests {
             .insert(grant.clone(), info, Timeline::default())
             .expect("insert again");
         grant.permit.end();
-        assert!(client.recording_info("clip", false).is_err());
+        assert!(client.recording_info("clip", false, false).is_err());
         archive.cleanup(Instant::now());
         assert!(archive.0.lock().expect("archive").is_empty());
     }

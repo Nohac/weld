@@ -45,10 +45,12 @@ pub trait WeldRpc {
     async fn recording_info(
         recording: String,
         include_frames: Option<bool>,
+        include_events: Option<bool>,
     ) -> Result<Info, String>;
     async fn recording_frame(recording: String, options: FrameOptions) -> Result<Image, String>;
     async fn recording_sheet(recording: String, options: SheetOptions) -> Result<Image, String>;
     async fn recording_video(recording: String, offset: u64) -> Result<Video, String>;
+    async fn recording_cursor(recording: String, include_cursor: bool) -> Result<Info, String>;
     async fn recording_release(recording: String) -> Result<String, String>;
     async fn control(id: String, enabled: bool) -> Result<String, String>;
     async fn peek(control: String, visible: Option<bool>) -> Result<String, String>;
@@ -80,11 +82,12 @@ pub trait WeldRpc {
     async fn scroll(control: String, action: Scroll) -> Result<InputReceipt, String>;
     async fn resize(control: String, width: u32, height: u32) -> Result<InputReceipt, String>;
     async fn scale(control: String, factor: Option<f64>) -> Result<InputReceipt, String>;
-    async fn capture(control: String) -> Result<Snapshot, String>;
+    async fn capture(control: String, include_cursor: Option<bool>) -> Result<Snapshot, String>;
     async fn capture_after(
         control: String,
         sequence: String,
         timeout_ms: u32,
+        include_cursor: Option<bool>,
     ) -> Result<Snapshot, String>;
     async fn accessibility(
         control: String,
@@ -268,8 +271,10 @@ impl WeldRpc for Service {
         _: context::Context,
         recording: String,
         include_frames: Option<bool>,
+        include_events: Option<bool>,
     ) -> Result<Info, String> {
-        self.windows.recording_info(recording, include_frames)
+        self.windows
+            .recording_info(recording, include_frames, include_events)
     }
     async fn recording_frame(
         self,
@@ -294,6 +299,14 @@ impl WeldRpc for Service {
         offset: u64,
     ) -> Result<Video, String> {
         blocking(move || self.windows.recording_video(recording, offset)).await
+    }
+    async fn recording_cursor(
+        self,
+        _: context::Context,
+        recording: String,
+        include_cursor: bool,
+    ) -> Result<Info, String> {
+        blocking(move || self.windows.recording_cursor(recording, include_cursor)).await
     }
     async fn recording_release(
         self,
@@ -435,8 +448,13 @@ impl WeldRpc for Service {
     ) -> Result<InputReceipt, String> {
         blocking(move || self.windows.scale(control, factor)).await
     }
-    async fn capture(self, _: context::Context, control: String) -> Result<Snapshot, String> {
-        blocking(move || self.windows.capture(control)).await
+    async fn capture(
+        self,
+        _: context::Context,
+        control: String,
+        include_cursor: Option<bool>,
+    ) -> Result<Snapshot, String> {
+        blocking(move || self.windows.capture(control, include_cursor)).await
     }
     async fn capture_after(
         self,
@@ -444,8 +462,13 @@ impl WeldRpc for Service {
         control: String,
         sequence: String,
         timeout_ms: u32,
+        include_cursor: Option<bool>,
     ) -> Result<Snapshot, String> {
-        blocking(move || self.windows.capture_after(control, sequence, timeout_ms)).await
+        blocking(move || {
+            self.windows
+                .capture_after(control, sequence, timeout_ms, include_cursor)
+        })
+        .await
     }
     async fn accessibility(
         self,

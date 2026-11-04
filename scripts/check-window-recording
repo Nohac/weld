@@ -58,10 +58,10 @@ def main():
                             "i=0; while true; do printf '\\033[H\\033[2JFrame %s\\n' \"$i\"; i=$((i+1)); sleep 0.016; done"],
                            check=True, capture_output=True, timeout=10)
             def window():
-                return next((item for item in rpc("find", owner="recording-probe")["windows"] if item["control"]), None)
+                return next((item for item in rpc("find", owner="recording-probe")["windows"] if item.get("control")), None)
             target = wait(window, "controlled Foot")
             control = target["control"]
-            wait(lambda: window()["application_viewport"], "initial frame")
+            wait(lambda: window().get("application_viewport"), "initial frame")
             options = {"duration_ms": 700, "region": {"x": 0, "y": 0, "width": 160, "height": 96}}
             result = subprocess.check_output([*ctl, "window", "record", "--control", control,
                                               "--options", json.dumps(options), "--json"], text=True, timeout=30)
@@ -97,7 +97,7 @@ def main():
                                     ["b", 272, True], ["m", 100, 60, 100], ["b", 272, False],
                                     ["at", 500], ["p", 57, 20, 0]]}
             combined = json.loads(subprocess.check_output([*ctl, "window", "record-input", "--control", control,
-                                   "--options", json.dumps({**options, "duration_ms": 900}),
+                                   "--options", json.dumps({**options, "duration_ms": 900, "include_cursor": True}),
                                    "--input", json.dumps(timeline), "--json"], text=True, timeout=30))
             assert combined["recording"]["status"] == "complete", combined
             assert combined["input"]["complete"], combined
@@ -106,13 +106,42 @@ def main():
             assert times[0] >= 100 and times[6] >= 500 and times[-1] < 900, combined
             assert times[4] - times[3] >= 100, combined
             (run / "record-input.json").write_text(json.dumps(combined, indent=2))
+            recorded = rpc("recording_info", recording=combined["recording"]["id"], include_events=True)
+            assert recorded["include_cursor"] is True and recorded["event_count"] == 6, recorded
+            assert [event["index"] for event in recorded["events"]] == [1,2,3,4,5,7], recorded
+            assert all(event["complete"] and event["time_us"] // 1000 == times[event["index"]] for event in recorded["events"]), recorded
+            event_sheet = rpc("recording_sheet", recording=recorded["id"], options={"events":{"indices":[2,4],"offset_ms":40},
+                "labels":True,"captions":["Pointer positioned","Drag completed"],"width":640,"height":240}, output=str(run / "event-sheet.png"))
+            assert len(event_sheet["tiles"]) == 2 and event_sheet["tiles"][1]["event"]["index"] == 4, event_sheet
+            assert all(tile["gutter"]["y"] >= tile["y"] + tile["height"] for tile in event_sheet["tiles"]), event_sheet
             rpc("recording_release", recording=combined["recording"]["id"])
             print("PASS single-call recording, absolute offsets, grouped keyboard input and smooth pointer drag", flush=True)
+
+            rpc("input", control=control, actions=[["m",120,80]])
+            def cursor_patch(snapshot):
+                sx, sy = snapshot["pixel_scale"]["x"], snapshot["pixel_scale"]["y"]
+                crop = f"crop={int(45*sx)}:{int(45*sy)}:{int(105*sx)}:{int(65*sy)}"
+                return subprocess.check_output(["ffmpeg","-v","error","-i","pipe:0","-vf",crop,"-f","rawvideo","-pix_fmt","rgba","pipe:1"],
+                    input=base64.b64decode(snapshot["png_base64"]), timeout=10)
+            plain = rpc("capture", control=control)
+            plain_patch = cursor_patch(plain)
+            visible = wait(lambda: (image if cursor_patch(image := rpc("capture", control=control, include_cursor=True)) != plain_patch else None), "visible controller cursor")
+            assert cursor_patch(rpc("capture", control=control, include_cursor=False)) == plain_patch
+            (run / "cursor-off.png").write_bytes(base64.b64decode(plain["png_base64"]))
+            (run / "cursor-on.png").write_bytes(base64.b64decode(visible["png_base64"]))
+            toggled = rpc("record", control=control, options={"duration_ms":1000}, wait=False)
+            assert toggled["include_cursor"] is False
+            assert rpc("recording_cursor", recording=toggled["id"], include_cursor=True)["include_cursor"] is True
+            rpc("input", control=control, actions=[["m",30,30]])
+            assert rpc("recording_cursor", recording=toggled["id"], include_cursor=False)["include_cursor"] is False
+            wait(lambda: rpc("recording_info", recording=toggled["id"])["status"] == "complete", "cursor-toggle recording completion")
+            rpc("recording_release", recording=toggled["id"])
+            print("PASS cursor opt-in/toggling, acknowledged input timeline and annotated event sheets", flush=True)
 
             pending = rpc("record", control=control, options={"duration_ms": 5000}, wait=False)
             rpc("input", control=control, actions=[["p", "a"]])
             rpc("permissions", id=target["id"], view=False, keyboard=True, pointer=True, resize=True)
-            wait(lambda: window()["control"] != control, "revoked recording grant")
+            wait(lambda: window().get("control") != control, "revoked recording grant")
             try:
                 rpc("recording_info", recording=pending["id"])
             except RuntimeError:
@@ -122,7 +151,7 @@ def main():
             rpc("permissions", id=target["id"], view=True, keyboard=True, pointer=True, resize=True)
             target = wait(lambda: (candidate if (candidate := window())["capabilities"]["view"] else None), "new View grant")
             control = target["control"]
-            wait(lambda: window()["application_viewport"], "replacement controlled frame")
+            wait(lambda: window().get("application_viewport"), "replacement controlled frame")
             with subprocess.Popen([*ctl, "mcp"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=log) as mcp:
                 def request(identifier, method, params):
                     mcp.stdin.write(json.dumps({"jsonrpc": "2.0", "id": identifier, "method": method, "params": params}).encode() + b"\n")

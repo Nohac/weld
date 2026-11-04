@@ -1,6 +1,9 @@
 //! Decode on demand on the caller's worker, preserving original recording timing.
 
-use crate::{Clip, FrameInfo, Region};
+use crate::{
+    Clip, FrameInfo, RecordedEvent, Region,
+    annotations::{Annotations, Gutter, TextRenderer},
+};
 use anyhow::{Context, Result, ensure};
 use base64::{Engine, engine::general_purpose::STANDARD};
 use ffmpeg_next::{self as ffmpeg, codec, format, frame::Video as VideoFrame, software::scaling};
@@ -15,6 +18,11 @@ use weld_media::{EncodedFrameKind, VideoCodec};
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Tile {
     pub frame: FrameInfo,
+    pub requested_time_us: u64,
+    pub event: Option<RecordedEvent>,
+    pub label: Option<String>,
+    pub caption: Option<String>,
+    pub gutter: Option<Gutter>,
     pub x: u32,
     pub y: u32,
     pub width: u32,
@@ -55,10 +63,46 @@ impl VideoFile {
     }
 }
 
+/// Which acknowledged point of an input row anchors an event-selected tile.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EventAnchor {
+    Start,
+    #[default]
+    End,
+}
+
+/// Select recorded input rows instead of sampling at uniform time intervals.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, JsonSchema)]
+pub struct EventSelection {
+    #[serde(default)]
+    pub anchor: EventAnchor,
+    /// Original action-row indices; omitted selects all delivered rows, including partial rows.
+    pub indices: Option<Vec<u32>>,
+    /// Offset from the row's last acknowledgement, clamped to the recording interval.
+    #[serde(default)]
+    pub offset_ms: i32,
+}
+
+struct Selection {
+    index: usize,
+    requested_time_us: u64,
+    event: Option<RecordedEvent>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct SheetOptions {
+    /// Optional input-event selection; frames/start_ms/end_ms apply only to uniform sampling.
+    pub events: Option<EventSelection>,
+    /// Frame index/time (and selected event) labels outside the captured pixels.
+    #[serde(default)]
+    pub labels: bool,
+    /// Optional one-line note per selected tile, in the same order (at most 200 characters each).
+    #[serde(default)]
+    pub captions: Vec<String>,
     pub start_ms: Option<u32>,
     pub end_ms: Option<u32>,
+    #[serde(default = "default_sheet_frames")]
     pub frames: u32,
     pub width: u32,
     pub height: u32,
@@ -72,6 +116,10 @@ pub struct FrameOptions {
     pub width: Option<u32>,
     pub height: Option<u32>,
     pub region: Option<Region>,
+}
+
+fn default_sheet_frames() -> u32 {
+    12
 }
 
 pub fn frame(
@@ -91,10 +139,19 @@ pub fn frame(
     ensure!(index < clip.frames.len(), "frame index outside recording");
     render(
         clip,
-        &[index],
+        &[Selection {
+            index,
+            requested_time_us: options
+                .at_ms
+                .map_or(clip.frames[index].info.time_us, |time| {
+                    u64::from(time) * 1000
+                }),
+            event: None,
+        }],
         options.width.unwrap_or(clip.info.width.min(4096)),
         options.height.unwrap_or(clip.info.height.min(4096)),
         options.region,
+        &Annotations::default(),
         validate,
     )
 }
@@ -104,30 +161,89 @@ pub fn sheet(
     options: SheetOptions,
     validate: impl Fn() -> Result<()>,
 ) -> Result<Image> {
-    ensure!(
-        (1..=100).contains(&options.frames),
-        "contact sheet frames must be 1..100"
-    );
-    let start = options.start_ms.unwrap_or(0);
-    let end = options.end_ms.unwrap_or(clip.info.duration_ms);
-    ensure!(
-        start <= end && end <= clip.info.duration_ms,
-        "invalid recording time range"
-    );
-    let indices = (0..options.frames)
-        .map(|i| {
-            let at = u64::from(start) * 1000
-                + u64::from(end - start) * 1000 * u64::from(i)
-                    / u64::from((options.frames - 1).max(1));
-            at_time(clip, at)
-        })
-        .collect::<Result<Vec<_>>>()?;
+    let selections = if let Some(events) = options.events {
+        ensure!(
+            options.start_ms.is_none() && options.end_ms.is_none(),
+            "event selection cannot also specify a uniform time range"
+        );
+        let selected = match events.indices {
+            Some(indices) => {
+                ensure!(
+                    !indices.is_empty() && indices.len() <= 100,
+                    "select 1..100 events"
+                );
+                indices
+                    .into_iter()
+                    .map(|index| {
+                        clip.info
+                            .events
+                            .iter()
+                            .find(|event| event.index == index)
+                            .with_context(|| {
+                                format!("recording has no delivered event for action {index}")
+                            })
+                    })
+                    .collect::<Result<Vec<_>>>()?
+            }
+            None => clip.info.events.iter().collect(),
+        };
+        ensure!(
+            !selected.is_empty() && selected.len() <= 100,
+            "recording has no input events; use record_input to retain them"
+        );
+        selected
+            .into_iter()
+            .map(|event| {
+                let anchor = match events.anchor {
+                    EventAnchor::Start => event.first_time_us,
+                    EventAnchor::End => event.time_us,
+                };
+                let at = (i128::from(anchor) + i128::from(events.offset_ms) * 1000)
+                    .clamp(0, i128::from(clip.info.duration_ms) * 1000)
+                    as u64;
+                Ok(Selection {
+                    index: at_time(clip, at)?,
+                    requested_time_us: at,
+                    event: Some(event.clone()),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?
+    } else {
+        ensure!(
+            (1..=100).contains(&options.frames),
+            "contact sheet frames must be 1..100"
+        );
+        let start = options.start_ms.unwrap_or(0);
+        let end = options.end_ms.unwrap_or(clip.info.duration_ms);
+        ensure!(
+            start <= end && end <= clip.info.duration_ms,
+            "invalid recording time range"
+        );
+        (0..options.frames)
+            .map(|i| {
+                let at = u64::from(start) * 1000
+                    + u64::from(end - start) * 1000 * u64::from(i)
+                        / u64::from((options.frames - 1).max(1));
+                Ok(Selection {
+                    index: at_time(clip, at)?,
+                    requested_time_us: at,
+                    event: None,
+                })
+            })
+            .collect::<Result<Vec<_>>>()?
+    };
+    let annotations = Annotations {
+        labels: options.labels,
+        captions: options.captions,
+    };
+    annotations.validate(selections.len())?;
     render(
         clip,
-        &indices,
+        &selections,
         options.width,
         options.height,
         options.region,
+        &annotations,
         validate,
     )
 }
@@ -235,10 +351,11 @@ fn decode(
 
 fn render(
     clip: &Clip,
-    indices: &[usize],
+    selections: &[Selection],
     width: u32,
     height: u32,
     region: Option<Region>,
+    annotations: &Annotations,
     validate: impl Fn() -> Result<()>,
 ) -> Result<Image> {
     ensure!(
@@ -253,33 +370,66 @@ fn render(
     };
     crop.validate(clip.info.region.width, clip.info.region.height)?;
     let aspect = region.width / region.height;
-    let columns = (1..=indices.len())
+    let gutter_height = annotations.height();
+    let columns = (1..=selections.len())
         .max_by(|a, b| {
             let score = |cols: usize| {
-                let rows = indices.len().div_ceil(cols);
+                let rows = selections.len().div_ceil(cols);
                 let w = width as f32 / cols as f32;
-                let h = height as f32 / rows as f32;
+                let h = (height as f32 / rows as f32 - gutter_height as f32).max(0.);
                 w.min(h * aspect) * h.min(w / aspect)
             };
             score(*a).total_cmp(&score(*b))
         })
         .context("no tiles")?;
-    let rows = indices.len().div_ceil(columns);
+    let rows = selections.len().div_ceil(columns);
     let cell_w = width / columns as u32;
     let cell_h = height / rows as u32;
+    ensure!(
+        cell_h > gutter_height,
+        "image too small for annotation gutters"
+    );
+    let picture_h = cell_h - gutter_height;
     ensure!(
         cell_w > 0 && cell_h > 0,
         "image too small for selected tiles"
     );
-    let tile_w = cell_w.min((cell_h as f32 * aspect).round().max(1.) as u32);
-    let tile_h = cell_h.min((tile_w as f32 / aspect).round().max(1.) as u32);
-    let tiles: Vec<_> = indices
+    let tile_w = cell_w.min((picture_h as f32 * aspect).round().max(1.) as u32);
+    let tile_h = picture_h.min((tile_w as f32 / aspect).round().max(1.) as u32);
+    let tiles: Vec<_> = selections
         .iter()
         .enumerate()
-        .map(|(i, &index)| Tile {
-            frame: clip.frames[index].info.clone(),
+        .map(|(i, selection)| Tile {
+            frame: clip.frames[selection.index].info.clone(),
+            requested_time_us: selection.requested_time_us,
+            event: selection.event.clone(),
+            label: annotations.labels.then(|| {
+                let frame = &clip.frames[selection.index].info;
+                let mut label = format!(
+                    "#{}  {:.3} s",
+                    frame.index,
+                    frame.time_us as f64 / 1_000_000.
+                );
+                if let Some(event) = &selection.event {
+                    let kind = event.kind();
+                    label.push_str(&format!(
+                        " | event #{} {}{}",
+                        event.index,
+                        kind,
+                        if event.complete { "" } else { " (partial)" }
+                    ));
+                }
+                label
+            }),
+            caption: annotations.captions.get(i).cloned(),
+            gutter: (gutter_height > 0).then_some(Gutter {
+                x: (i % columns) as u32 * cell_w,
+                y: (i / columns) as u32 * cell_h + picture_h,
+                width: cell_w,
+                height: gutter_height,
+            }),
             x: (i % columns) as u32 * cell_w + (cell_w - tile_w) / 2,
-            y: (i / columns) as u32 * cell_h + (cell_h - tile_h) / 2,
+            y: (i / columns) as u32 * cell_h + (picture_h - tile_h) / 2,
             width: tile_w,
             height: tile_h,
         })
@@ -290,7 +440,7 @@ fn render(
     }
     decode(
         clip,
-        &indices.iter().copied().collect(),
+        &selections.iter().map(|selection| selection.index).collect(),
         &validate,
         |index, decoded| {
             let mut scaler = scaling::Context::get(
@@ -332,6 +482,41 @@ fn render(
         },
     )?;
     validate()?;
+    if gutter_height > 0 {
+        let mut text = TextRenderer::new()?;
+        for tile in &tiles {
+            if let Some(gutter) = tile.gutter {
+                let mut y = gutter.y;
+                if let Some(label) = &tile.label {
+                    text.line(
+                        &mut pixels,
+                        width,
+                        height,
+                        Gutter {
+                            y,
+                            height: 18,
+                            ..gutter
+                        },
+                        label,
+                    )?;
+                    y += 18;
+                }
+                if let Some(caption) = &tile.caption {
+                    text.line(
+                        &mut pixels,
+                        width,
+                        height,
+                        Gutter {
+                            y,
+                            height: 18,
+                            ..gutter
+                        },
+                        caption,
+                    )?;
+                }
+            }
+        }
+    }
     let mut png = Vec::new();
     let mut encoder = png::Encoder::new(&mut png, width, height);
     encoder.set_color(png::ColorType::Rgba);

@@ -1,9 +1,14 @@
 //! Shared bounded cursor raster normalization for nested and DRM presentation.
 
-use anyhow::{Result, bail, ensure};
+use anyhow::{Context, Result, bail, ensure};
+use std::sync::Arc;
 use weld_client::{ClientCursorImage, SurfaceContentView};
 
-use super::unpremultiply_alpha;
+use super::{
+    CursorConfiguration, CursorImage,
+    theme::{fallback_image, load_theme_images},
+    unpremultiply_alpha,
+};
 
 /// Convert a committed cursor viewport to one bounded, lossless wire raster.
 pub(crate) fn canonical_cursor(
@@ -298,4 +303,48 @@ mod tests {
             (128, 128, (64, 64))
         );
     }
+}
+
+/// Resolve capture artwork with the same nominal sizing and hotspot policy as presentation.
+pub(crate) fn capture_raster(
+    image: &CursorImage,
+    configuration: &CursorConfiguration,
+    scale: f64,
+) -> Result<Option<CursorRaster>> {
+    let (pixels, width, height, hotspot) = match image {
+        CursorImage::Hidden => return Ok(None),
+        CursorImage::Image(image) => {
+            let raster = destination_raster(image, configuration.size(), scale)?;
+            (raster.rgba, raster.width, raster.height, raster.hotspot)
+        }
+        CursorImage::Named(icon) => {
+            let images = load_theme_images(configuration.theme(), *icon)
+                .unwrap_or_else(|_| Arc::from([fallback_image()]));
+            let size = scaled_extent(f64::from(configuration.size()), scale)?;
+            ensure!(size <= 512, "capture cursor exceeds raster bound");
+            let image = images
+                .iter()
+                .min_by_key(|image| image.size.abs_diff(size))
+                .context("cursor theme contains no image")?;
+            let pixels = resample_pixels(
+                &image.pixels_rgba,
+                image.width,
+                image.height,
+                size,
+                size,
+                CropSource::full(image.width, image.height),
+            )?;
+            let hotspot = (
+                (f64::from(image.xhot) / f64::from(image.width) * f64::from(size)).round() as u32,
+                (f64::from(image.yhot) / f64::from(image.height) * f64::from(size)).round() as u32,
+            );
+            (pixels, size, size, hotspot)
+        }
+    };
+    Ok(Some(CursorRaster {
+        rgba: pixels,
+        width,
+        height,
+        hotspot,
+    }))
 }

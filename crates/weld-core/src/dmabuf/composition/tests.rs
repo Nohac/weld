@@ -2,8 +2,9 @@ use super::*;
 use crate::{dmabuf::WaylandShmBuffer, renderer::CompositionBlitter};
 use std::sync::mpsc;
 use weld_client::{
-    ClientBufferLease, ClientBufferMetadata, ClientBufferUseId, ClientSourceId, CompositionLayer,
-    LogicalPoint, LogicalSize, SurfaceContentView, SurfaceLayerId, SurfaceLayerPlacement,
+    ClientBufferLease, ClientBufferMetadata, ClientBufferUseId, ClientCursor, ClientCursorImage,
+    ClientSourceId, CompositionCursor, CompositionLayer, LogicalPoint, LogicalSize,
+    SurfaceContentView, SurfaceLayerId, SurfaceLayerPlacement,
 };
 
 #[test]
@@ -59,6 +60,7 @@ fn gpu_composes_alpha_and_clipping_and_keeps_leased_targets_immutable() -> Resul
     let path = std::env::var_os("WELD_TEST_RENDER_NODE").context("set WELD_TEST_RENDER_NODE")?;
     let mut compositor = SourceCompositor::new(Path::new(&path))?;
     let mut frame = ComposedBuffer {
+        cursor: None,
         extent: Extent::new(64, 64),
         logical_size: LogicalSize::new(32.0, 32.0),
         layers: vec![
@@ -216,4 +218,54 @@ fn readback(compositor: &SourceCompositor, image: &ComposedImage) -> Result<Vec<
     buffer.unmap();
     compositor.sources.remove(&image.target.dmabuf);
     Ok(pixels)
+}
+
+#[test]
+#[ignore = "requires WELD_TEST_RENDER_NODE and a Vulkan DMA-BUF device"]
+fn gpu_capture_cursor_respects_hotspot_scale_alpha_and_hiding() -> Result<()> {
+    let path = std::env::var_os("WELD_TEST_RENDER_NODE").context("set WELD_TEST_RENDER_NODE")?;
+    let mut compositor = SourceCompositor::new(Path::new(&path))?;
+    compositor.cursor_configuration = crate::cursor::CursorConfiguration::new("default", 2)?;
+    let image = ClientCursorImage::new(2, 2, (1, 1), [255, 0, 0, 128].repeat(4))?;
+    let mut frame = ComposedBuffer {
+        extent: Extent::new(64, 64),
+        logical_size: LogicalSize::new(32., 32.),
+        layers: vec![layer(
+            1,
+            [200, 0, 0, 255],
+            LogicalPoint::ZERO,
+            LogicalSize::new(32., 32.),
+            true,
+        )],
+        cursor: Some(CompositionCursor {
+            image: ClientCursor::Image(image),
+            position: LogicalPoint::ZERO,
+        }),
+    };
+    let visible = compositor.compose(&frame)?;
+    let pixels = readback(&compositor, &visible)?;
+    assert!(
+        (i16::from(pixels[0]) - 100).abs() <= 1,
+        "background alpha blend"
+    );
+    assert!(
+        (i16::from(pixels[2]) - 128).abs() <= 1,
+        "cursor RGB to BGRA"
+    );
+    assert_eq!(
+        &pixels[(2 * 64 + 2) * 4..(2 * 64 + 2) * 4 + 4],
+        &[200, 0, 0, 255],
+        "hotspot clips raster at output edge"
+    );
+    frame.cursor.as_mut().context("cursor")?.image = ClientCursor::Hidden;
+    let hidden = compositor.compose(&frame)?;
+    let pixels = readback(&compositor, &hidden)?;
+    assert!(
+        pixels
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .all(|pixel| *pixel == [200, 0, 0, 255])
+    );
+    Ok(())
 }

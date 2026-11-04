@@ -1,6 +1,6 @@
 //! Anonymous packet storage written by a bounded worker, never by the host loop.
 
-use crate::FrameInfo;
+use crate::{FrameInfo, RecordedEvent};
 use anyhow::{Context, Result, ensure};
 use std::{
     fs::File,
@@ -78,6 +78,7 @@ impl Packet {
 #[derive(Default)]
 struct Progress {
     frames: Vec<EncodedFrame>,
+    events: Vec<RecordedEvent>,
     error: Option<String>,
 }
 
@@ -85,6 +86,15 @@ struct Progress {
 #[derive(Clone, Default)]
 pub struct Timeline(Arc<Mutex<Progress>>);
 impl Timeline {
+    pub fn events(&self) -> Result<Vec<RecordedEvent>> {
+        Ok(self
+            .0
+            .lock()
+            .map_err(|_| anyhow::anyhow!("recording storage unavailable"))?
+            .events
+            .clone())
+    }
+
     pub fn frames(&self) -> Result<Vec<FrameInfo>> {
         let progress = self
             .0
@@ -103,6 +113,7 @@ pub(crate) struct Storage {
     progress: Arc<Mutex<Progress>>,
     cancelled: Arc<AtomicBool>,
     submitted: usize,
+    event_count: u32,
 }
 
 impl Storage {
@@ -161,6 +172,7 @@ impl Storage {
             progress,
             cancelled,
             submitted: 0,
+            event_count: 0,
         })
     }
 
@@ -190,6 +202,45 @@ impl Storage {
         self.progress.lock().ok().is_some_and(|progress| {
             self.submitted.saturating_sub(progress.frames.len()) + reserved < PENDING_PACKETS
         })
+    }
+
+    pub fn note_event(
+        &mut self,
+        index: u32,
+        action: &serde_json::Value,
+        time_us: u64,
+        complete: bool,
+        revision: Option<String>,
+    ) -> Result<()> {
+        ensure!(index < 64, "input event index exceeds the action budget");
+        let mut progress = self
+            .progress
+            .lock()
+            .map_err(|_| anyhow::anyhow!("recording storage unavailable"))?;
+        if let Some(event) = progress
+            .events
+            .iter_mut()
+            .find(|event| event.index == index)
+        {
+            event.time_us = time_us;
+            event.complete = complete;
+            event.revision = revision;
+        } else {
+            progress.events.push(RecordedEvent {
+                index,
+                action: action.clone(),
+                first_time_us: time_us,
+                time_us,
+                complete,
+                revision,
+            });
+            self.event_count += 1;
+        }
+        Ok(())
+    }
+
+    pub fn event_count(&self) -> u32 {
+        self.event_count
     }
 
     pub fn timeline(&self) -> Timeline {

@@ -66,7 +66,10 @@ impl Operation {
             Self::RecordInput { input, .. } => {
                 return capabilities.view && actions_allowed(&input.actions);
             }
-            Self::Capture | Self::CaptureAfter { .. } | Self::Record(_) => Capability::View,
+            Self::Capture { .. }
+            | Self::CaptureAfter { .. }
+            | Self::Record(_)
+            | Self::RecordingCursor { .. } => Capability::View,
             Self::Keys { .. } | Self::Chord { .. } | Self::TypeText { .. } => Capability::Keyboard,
             Self::Pointer { .. }
             | Self::Click { .. }

@@ -608,6 +608,7 @@ mod tests {
         assert_eq!(plan.resolve(vec![]).expect("steps").len(), 10);
         let operation = Operation::RecordInput {
             options: weld_recording::Options {
+                include_cursor: false,
                 duration_ms: 200,
                 codec: Default::default(),
                 region: None,
@@ -676,6 +677,7 @@ mod tests {
         assert_eq!(plan.duration, Duration::from_millis(150));
         let operation = Operation::RecordInput {
             options: weld_recording::Options {
+                include_cursor: false,
                 duration_ms: 200,
                 region: None,
                 codec: Default::default(),

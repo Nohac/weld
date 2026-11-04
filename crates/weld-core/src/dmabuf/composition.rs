@@ -30,6 +30,7 @@ use super::{
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
 
 mod capture;
+mod cursor;
 pub use capture::{SourceCapture, SourceCaptureTask};
 
 struct Target {
@@ -78,6 +79,9 @@ pub struct SourceCompositor {
     textures: HashMap<ClientBufferId, InputTexture>,
     geometry: Vec<GeometrySlot>,
     targets: Vec<Rc<Target>>,
+    cursor: Option<cursor::CursorTexture>,
+    cursor_visible: bool,
+    cursor_configuration: crate::cursor::CursorConfiguration,
 }
 
 impl SourceCompositor {
@@ -213,6 +217,9 @@ impl SourceCompositor {
             textures: HashMap::new(),
             geometry: Vec::new(),
             targets: Vec::new(),
+            cursor: None,
+            cursor_visible: false,
+            cursor_configuration: crate::cursor::CursorConfiguration::from_environment(),
         })
     }
 
@@ -362,6 +369,7 @@ impl SourceCompositor {
             self.queue
                 .write_buffer(&self.geometry[index].buffer, 0, &bytes);
         }
+        self.prepare_cursor(frame)?;
         Ok(live)
     }
 
@@ -406,6 +414,7 @@ impl SourceCompositor {
                 pass.set_bind_group(1, &geometry.binding, &[]);
                 pass.draw(0..6, 0..1);
             }
+            self.draw_cursor(&mut pass);
         }
         Ok(())
     }

@@ -333,6 +333,7 @@ impl SourceViews {
             ClientBufferUseId::new(root.source(), revision.raw()),
             metadata,
             Rc::new(ComposedBuffer {
+                cursor: None,
                 extent,
                 logical_size: size,
                 layers,

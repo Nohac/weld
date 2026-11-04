@@ -31,7 +31,12 @@ use weld_hoist_core::{
 };
 use weld_hoist_protocol::{DestinationEnvelope, DestinationMessage};
 
+mod cursor;
+
 struct State {
+    positions: HashMap<ClientSurfaceId, InputPosition>,
+    cursors: HashMap<ClientSurfaceId, weld_client::ClientCursor>,
+    cursor_dirty: HashSet<ClientSurfaceId>,
     recordings: HashMap<String, ActiveRecording>,
     grants: HashMap<ClientSurfaceId, Arc<GrantState>>,
     views: SourceViews,
@@ -89,18 +94,7 @@ impl HoistSourcePort for Port {
                                     *viewport = next;
                                 }
                             }
-                            for active in state
-                                .recordings
-                                .values_mut()
-                                .filter(|active| active.grant.surface == event.surface)
-                            {
-                                if active.error.is_none()
-                                    && let Err(error) =
-                                        active.recorder.observe(&commit, Instant::now())
-                                {
-                                    active.error = Some(error.to_string());
-                                }
-                            }
+                            state.record_frame(event.surface, &commit, Instant::now(), false);
                             state.frames.insert(event.surface, commit);
                         }
                         ClientSurfaceEventKind::Destroyed => {
@@ -225,7 +219,6 @@ struct Adapter {
     capture: Box<dyn Capture>,
     capturing: Vec<Capturing>,
     waiting: Vec<Pending>,
-    positions: HashMap<ClientSurfaceId, InputPosition>,
     held_keys: HashMap<ClientSurfaceId, HashSet<u32>>,
     held_buttons: HashMap<ClientSurfaceId, HashSet<u32>>,
     text_surfaces: HashSet<ClientSurfaceId>,
@@ -241,6 +234,9 @@ pub fn registration(
 ) -> (ClientAdapterRegistration, RemoteControlClient) {
     let (sender, requests) = mpsc::sync_channel(64);
     let state = Rc::new(RefCell::new(State {
+        positions: HashMap::new(),
+        cursors: HashMap::new(),
+        cursor_dirty: HashSet::new(),
         recordings: HashMap::new(),
         grants: HashMap::new(),
         views: SourceViews::new(SurfaceStreamMode::Composited),
@@ -266,7 +262,6 @@ pub fn registration(
         capture: Box::new(capture),
         capturing: Vec::new(),
         waiting: Vec::new(),
-        positions: HashMap::new(),
         held_keys: HashMap::new(),
         held_buttons: HashMap::new(),
         text_surfaces: HashSet::new(),
@@ -293,6 +288,11 @@ impl Adapter {
         let now = Instant::now();
         self.recordings.cleanup(now);
         let mut state = self.state.borrow_mut();
+        for surface in std::mem::take(&mut state.cursor_dirty) {
+            if let Some(frame) = state.frames.get(&surface).cloned() {
+                state.record_frame(surface, &frame, now, true);
+            }
+        }
         let ids: Vec<_> = state.recordings.keys().cloned().collect();
         for id in ids {
             if !self.recordings.active(&id) {
@@ -327,6 +327,7 @@ impl Adapter {
 
     fn synchronize_input_ownership(&mut self) {
         let mut state = self.state.borrow_mut();
+        let state = &mut *state;
         for (surface, grant) in &state.grants {
             let epoch = grant.input_epoch.load(Ordering::Acquire);
             if self
@@ -336,7 +337,8 @@ impl Adapter {
             {
                 self.relay
                     .release_input(|member| state.views.root(member) == Some(*surface));
-                self.positions.remove(surface);
+                state.positions.remove(surface);
+                state.cursor_dirty.insert(*surface);
                 self.held_keys.remove(surface);
                 self.held_buttons.remove(surface);
             }
@@ -362,7 +364,7 @@ impl Adapter {
                 self.source,
                 HoistEndpointCommand::Unmap { source },
             ));
-            self.positions.remove(&source);
+            self.state.borrow_mut().positions.remove(&source);
             self.held_keys.remove(&source);
             self.held_buttons.remove(&source);
             self.input_epochs.remove(&source);
@@ -474,7 +476,7 @@ impl Adapter {
                 let recorder = weld_recording::Recorder::new(
                     id.clone(),
                     surface,
-                    frame.clone(),
+                    state.captured_frame(surface, frame)?,
                     options,
                     backend,
                     Instant::now(),
@@ -498,7 +500,7 @@ impl Adapter {
             }
             Operation::Pointer { x, y } => {
                 let position = valid_position(x, y)?;
-                self.positions.insert(surface, position);
+                state.position_cursor(surface, position);
                 messages.push(event(
                     pointer,
                     InputEventKind::PointerMotion {
@@ -517,7 +519,7 @@ impl Adapter {
                     "click button is already held; release it first"
                 );
                 let position = valid_position(x, y)?;
-                self.positions.insert(surface, position);
+                state.position_cursor(surface, position);
                 messages.push(focus);
                 messages.push(event(
                     pointer,
@@ -543,7 +545,7 @@ impl Adapter {
             }
             Operation::Button { button, pressed } => {
                 crate::pointer::validate_button(button)?;
-                let position = self
+                let position = state
                     .positions
                     .get(&surface)
                     .copied()
@@ -669,7 +671,7 @@ impl Adapter {
             } => {
                 let position = valid_position(x, y)?;
                 crate::pointer::validate_scroll(horizontal, vertical)?;
-                self.positions.insert(surface, position);
+                state.position_cursor(surface, position);
                 messages.push(event(
                     pointer,
                     InputEventKind::PointerMotion {
@@ -761,7 +763,27 @@ impl Adapter {
                     )),
                 });
             }
-            Operation::Capture | Operation::CaptureAfter { .. } => {
+            Operation::RecordingCursor {
+                recording,
+                include_cursor,
+            } => {
+                let active = state
+                    .recordings
+                    .get_mut(&recording)
+                    .context("cursor visibility can only change while recording")?;
+                ensure!(
+                    active.grant.surface == surface,
+                    "recording belongs to another window"
+                );
+                active
+                    .recorder
+                    .set_include_cursor(include_cursor, Instant::now())?;
+                let info = active.recorder.info();
+                state.cursor_dirty.insert(surface);
+                return Ok(Execution::Recorded(info));
+            }
+            Operation::Capture { include_cursor }
+            | Operation::CaptureAfter { include_cursor, .. } => {
                 let after_sequence =
                     if let Operation::CaptureAfter { sequence, .. } = &pending.operation {
                         let sequence_number =
@@ -783,7 +805,12 @@ impl Adapter {
                         None
                     };
                 ensure!(self.capturing.len() < 4, "window capture busy");
-                let scene = frame
+                let captured = if include_cursor {
+                    state.captured_frame(surface, frame)?
+                } else {
+                    frame.clone()
+                };
+                let scene = captured
                     .buffers
                     .iter()
                     .find_map(|update| match &update.change {
@@ -1025,12 +1052,22 @@ impl ClientAdapter for Adapter {
             }
             ClientSurfaceEventKind::Destroyed => {
                 self.text_surfaces.remove(&event.surface);
+                self.state.borrow_mut().cursors.remove(&event.surface);
             }
             _ => {}
         }
         self.relay.observe_event(event);
     }
     fn observe_cursor_update(&mut self, update: &ClientCursorUpdate) {
+        {
+            let mut state = self.state.borrow_mut();
+            if state.cursors.get(&update.surface) != Some(&update.cursor) {
+                state.cursors.insert(update.surface, update.cursor.clone());
+                if let Some(root) = state.views.root(update.surface) {
+                    state.cursor_dirty.insert(root);
+                }
+            }
+        }
         self.relay.observe_cursor_update(update);
     }
     fn observe_retired_buffer(&mut self, buffer: ClientBufferId) {

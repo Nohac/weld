@@ -77,6 +77,7 @@ fn av1_and_h264_recordings_can_be_scrubbed_cropped_and_remuxed() -> Result<()> {
             .collect();
         ensure!(frames.len() == 5, "fixture packet count");
         let info = Info {
+            include_cursor: false,
             id: "fixture".into(),
             status: Status::Complete,
             duration_ms: 500,
@@ -95,6 +96,8 @@ fn av1_and_h264_recordings_can_be_scrubbed_cropped_and_remuxed() -> Result<()> {
             frames: frames.iter().map(|frame| frame.info.clone()).collect(),
             bytes: frames.iter().map(|frame| frame.unit.len()).sum(),
             error: None,
+            event_count: 0,
+            events: Vec::new(),
             expires_after_idle_ms: weld_recording::IDLE_RETENTION_MS,
         };
         let mut clip = Clip { info, frames };
@@ -117,6 +120,9 @@ fn av1_and_h264_recordings_can_be_scrubbed_cropped_and_remuxed() -> Result<()> {
         let sheet = weld_recording::sheet(
             &clip,
             SheetOptions {
+                events: None,
+                labels: false,
+                captions: Vec::new(),
                 start_ms: Some(0),
                 end_ms: Some(500),
                 frames: 6,
@@ -192,6 +198,112 @@ fn av1_and_h264_recordings_can_be_scrubbed_cropped_and_remuxed() -> Result<()> {
             (120, 80),
             "container cropping excludes coded padding"
         );
+        clip.info.events.push(weld_recording::RecordedEvent {
+            index: 2,
+            action: serde_json::json!(["click", "middle"]),
+            first_time_us: 200_000,
+            time_us: 220_000,
+            complete: true,
+            revision: Some("12".into()),
+        });
+        clip.info.event_count = 1;
+        let annotated = weld_recording::sheet(
+            &clip,
+            SheetOptions {
+                events: Some(weld_recording::EventSelection {
+                    anchor: Default::default(),
+                    indices: Some(vec![2]),
+                    offset_ms: 100,
+                }),
+                labels: true,
+                captions: vec!["After middle click".into()],
+                start_ms: None,
+                end_ms: None,
+                frames: 12,
+                width: 240,
+                height: 180,
+                region: None,
+            },
+            || Ok(()),
+        )?;
+        assert_eq!((annotated.width, annotated.height), (240, 180));
+        let tile = &annotated.tiles[0];
+        assert_eq!(tile.frame.index, 3);
+        assert_eq!(tile.requested_time_us, 320_000);
+        assert_eq!(tile.event.as_ref().context("event")?.index, 2);
+        assert_eq!(tile.caption.as_deref(), Some("After middle click"));
+        assert!(tile.label.as_ref().context("label")?.contains("#3"));
+        let gutter = tile.gutter.context("gutter")?;
+        assert!(gutter.y >= tile.y + tile.height);
+        assert!(gutter.y + gutter.height <= annotated.height);
+        let reference = weld_recording::frame(
+            &clip,
+            FrameOptions {
+                index: Some(3),
+                width: Some(tile.width),
+                height: Some(tile.height),
+                ..Default::default()
+            },
+            || Ok(()),
+        )?;
+        let reference = png_pixels(&reference.png_base64)?;
+        let sheet_pixels = png_pixels(&annotated.png_base64)?;
+        for y in 0..tile.height as usize {
+            let start = ((tile.y as usize + y) * annotated.width as usize + tile.x as usize) * 4;
+            assert_eq!(
+                &sheet_pixels[start..start + tile.width as usize * 4],
+                &reference[y * tile.width as usize * 4..(y + 1) * tile.width as usize * 4],
+                "labels never cover captured pixels"
+            );
+        }
+        assert!(
+            (gutter.y..gutter.y + gutter.height).any(|y| (gutter.x..gutter.x + gutter.width).any(
+                |x| { sheet_pixels[(y as usize * annotated.width as usize + x as usize) * 4] > 24 }
+            )),
+            "gutter contains visible label text"
+        );
+        let before = weld_recording::sheet(
+            &clip,
+            SheetOptions {
+                events: Some(weld_recording::EventSelection {
+                    anchor: Default::default(),
+                    indices: None,
+                    offset_ms: -300,
+                }),
+                labels: false,
+                captions: vec![],
+                start_ms: None,
+                end_ms: None,
+                frames: 12,
+                width: 120,
+                height: 80,
+                region: None,
+            },
+            || Ok(()),
+        )?;
+        assert_eq!(before.tiles[0].frame.index, 0);
+        assert_eq!(before.tiles[0].requested_time_us, 0);
+        let start_anchored = weld_recording::sheet(
+            &clip,
+            SheetOptions {
+                events: Some(weld_recording::EventSelection {
+                    anchor: weld_recording::EventAnchor::Start,
+                    indices: None,
+                    offset_ms: 0,
+                }),
+                labels: false,
+                captions: vec![],
+                start_ms: None,
+                end_ms: None,
+                frames: 12,
+                width: 120,
+                height: 80,
+                region: None,
+            },
+            || Ok(()),
+        )?;
+        assert_eq!(start_anchored.tiles[0].requested_time_us, 200_000);
+
         // An unrequested middle GOP must not be decoded for a sparse sheet.
         // Emptying it makes a sequential decoder fail; the last keyframe remains
         // independently decodable, including when spread across ten minutes.
@@ -212,6 +324,9 @@ fn av1_and_h264_recordings_can_be_scrubbed_cropped_and_remuxed() -> Result<()> {
         let sparse = weld_recording::sheet(
             &clip,
             SheetOptions {
+                events: None,
+                labels: false,
+                captions: Vec::new(),
                 start_ms: None,
                 end_ms: None,
                 frames: 2,

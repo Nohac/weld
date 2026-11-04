@@ -830,7 +830,7 @@ mod tests {
         );
         assert!(
             client
-                .capture("w12".into())
+                .capture("w12".into(), None)
                 .expect_err("vacant capture")
                 .contains("waiting for application")
         );

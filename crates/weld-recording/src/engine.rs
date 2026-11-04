@@ -102,6 +102,7 @@ pub struct Recorder {
     options: Options,
     info: Info,
     started: Instant,
+    last_cursor: Option<weld_client::CompositionCursor>,
 }
 
 impl Recorder {
@@ -146,6 +147,7 @@ impl Recorder {
         }));
         let port = EncodedSourcePort::composed_input(Sink(collected.clone()), backend)?;
         let info = Info {
+            include_cursor: options.include_cursor,
             id,
             status: Status::Recording,
             duration_ms: options.duration_ms,
@@ -157,6 +159,8 @@ impl Recorder {
             dropped_frames: None,
             frame_count: 0,
             frames: Vec::new(),
+            event_count: 0,
+            events: Vec::new(),
             bytes: 0,
             error: None,
             expires_after_idle_ms: IDLE_RETENTION_MS,
@@ -168,10 +172,36 @@ impl Recorder {
             options,
             info,
             started: now,
+            last_cursor: None,
         };
         recorder.submit(&initial, now)?;
         recorder.tick(now)?;
         Ok(recorder)
+    }
+
+    pub fn set_include_cursor(&mut self, include: bool, now: Instant) -> Result<()> {
+        ensure!(
+            now < self.end(),
+            "cursor visibility can only change while recording"
+        );
+        self.options.include_cursor = include;
+        self.info.include_cursor = include;
+        Ok(())
+    }
+
+    pub fn observe_cursor(&mut self, frame: &ClientSurfaceCommit, now: Instant) -> Result<()> {
+        let cursor = self.visible_cursor(scene(frame)?);
+        if cursor == self.last_cursor {
+            return Ok(());
+        }
+        self.observe(frame, now)
+    }
+
+    fn visible_cursor(&self, scene: &ComposedBuffer) -> Option<weld_client::CompositionCursor> {
+        scene.cursor.clone().filter(|cursor| {
+            self.options.include_cursor
+                && !matches!(cursor.image, weld_client::ClientCursor::Hidden)
+        })
     }
 
     pub fn observe(&mut self, frame: &ClientSurfaceCommit, now: Instant) -> Result<()> {
@@ -224,11 +254,17 @@ impl Recorder {
             .region
             .validate(source.logical_size.width, source.logical_size.height)?;
         let mut cropped = source.clone();
+        cropped.cursor = self.visible_cursor(source);
+        self.last_cursor = cropped.cursor.clone();
         cropped.extent = Extent::new(self.info.width, self.info.height);
         cropped.logical_size = LogicalSize {
             width: self.info.region.width,
             height: self.info.region.height,
         };
+        if let Some(cursor) = &mut cropped.cursor {
+            cursor.position.x -= self.info.region.x;
+            cursor.position.y -= self.info.region.y;
+        }
         for layer in &mut cropped.layers {
             layer.placement.position.x -= self.info.region.x;
             layer.placement.position.y -= self.info.region.y;
@@ -268,6 +304,23 @@ impl Recorder {
         Ok(())
     }
 
+    pub fn observe_input(
+        &mut self,
+        index: u32,
+        action: &serde_json::Value,
+        now: Instant,
+        complete: bool,
+        revision: Option<String>,
+    ) -> Result<()> {
+        self.collected.borrow_mut().storage.note_event(
+            index,
+            action,
+            now.saturating_duration_since(self.started).as_micros() as u64,
+            complete,
+            revision,
+        )
+    }
+
     pub fn timeline(&self) -> crate::Timeline {
         self.collected.borrow().storage.timeline()
     }
@@ -276,6 +329,7 @@ impl Recorder {
         let mut info = self.info.clone();
         let data = self.collected.borrow();
         info.bytes = data.bytes;
+        info.event_count = data.storage.event_count();
         info.frame_count = data.storage.frame_count() as u32;
         info
     }
@@ -284,6 +338,7 @@ impl Recorder {
         let mut info = self.info();
         info.status = Status::Complete;
         info.dropped_frames = Some(info.submitted_frames.saturating_sub(info.frame_count));
+        info.events = self.timeline().events()?;
         let frames = self.collected.borrow_mut().storage.finish()?;
         info.frames = frames.iter().map(|frame| frame.info.clone()).collect();
         Ok(Clip { info, frames })

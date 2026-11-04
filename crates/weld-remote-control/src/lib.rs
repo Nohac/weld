@@ -150,13 +150,20 @@ pub enum Operation {
     Scale {
         factor: Option<f64>,
     },
-    Capture,
+    Capture {
+        include_cursor: bool,
+    },
     Record(weld_recording::Options),
     RecordInput {
         options: weld_recording::Options,
         input: InputSequenceOptions,
     },
+    RecordingCursor {
+        recording: String,
+        include_cursor: bool,
+    },
     CaptureAfter {
+        include_cursor: bool,
         sequence: String,
         timeout_ms: u32,
     },
@@ -166,7 +173,10 @@ impl Operation {
     fn is_capture(&self) -> bool {
         matches!(
             self,
-            Self::Capture | Self::CaptureAfter { .. } | Self::Record(_)
+            Self::Capture { .. }
+                | Self::CaptureAfter { .. }
+                | Self::Record(_)
+                | Self::RecordingCursor { .. }
         )
     }
 }
