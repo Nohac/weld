@@ -7,6 +7,7 @@ use crate::{
 use anyhow::{Context, Result};
 use pipewire::{
     core::CoreRc,
+    keys,
     properties::properties,
     spa,
     stream::{StreamFlags, StreamListener, StreamRc, StreamState},
@@ -118,10 +119,10 @@ impl CaptureStream {
             core.clone(),
             "Weld application capture",
             properties! {
-                "media.type" => "Audio", "media.category" => "Capture", "media.role" => "Screen",
-                "target.object" => state.serial.to_string(), "stream.capture.sink" => monitor.to_string(),
-                "node.dont-fallback" => "true", "node.dont-reconnect" => "true", "node.passive" => "true",
-                "node.latency" => "960/48000",
+                *keys::MEDIA_TYPE => "Audio", *keys::MEDIA_CATEGORY => "Capture", *keys::MEDIA_ROLE => "Screen",
+                *keys::TARGET_OBJECT => state.serial.to_string(), *keys::STREAM_CAPTURE_SINK => monitor.to_string(),
+                "node.dont-fallback" => "true", *keys::NODE_DONT_RECONNECT => "true", *keys::NODE_PASSIVE => "true",
+                *keys::NODE_LATENCY => "960/48000",
             },
         )?;
         let listener = stream

@@ -1,12 +1,12 @@
 use std::{
     collections::HashMap,
-    ffi::OsString,
+    ffi::{CStr, OsString},
     sync::{Arc, Mutex, OnceLock, Weak},
 };
 static OUTPUTS: OnceLock<Mutex<HashMap<u64, Weak<Output>>>> = OnceLock::new();
 use crate::worker::Worker;
 use anyhow::Result;
-use pipewire::{node::Node, properties::properties};
+use pipewire::{keys, node::Node, properties::properties, spa};
 
 /// A private output remains alive until the last launch/capture owner drops it.
 /// Its node is never linked to hardware. Listening requires a separate playback stream.
@@ -35,18 +35,20 @@ impl PrivateOutput {
         let name = output_name(launch);
         let node_name = name.clone();
         let worker = Worker::spawn(move |core, _| {
+            let audio_position =
+                CStr::from_bytes_with_nul(spa::sys::SPA_KEY_AUDIO_POSITION)?.to_str()?;
             Ok(core.create_object::<Node>(
                 "adapter",
                 &properties! {
-                    "factory.name" => "support.null-audio-sink",
-                    "node.name" => node_name,
-                    "node.description" => "Weld private application audio",
-                    "media.class" => "Audio/Sink",
-                    "audio.position" => "[ FL FR ]",
-                    "audio.rate" => "48000",
-                    "object.linger" => "false",
-                    "node.virtual" => "true",
-                    "priority.session" => "0",
+                    *keys::FACTORY_NAME => "support.null-audio-sink",
+                    *keys::NODE_NAME => node_name,
+                    *keys::NODE_DESCRIPTION => "Weld private application audio",
+                    *keys::MEDIA_CLASS => "Audio/Sink",
+                    audio_position => "[ FL FR ]",
+                    *keys::AUDIO_RATE => "48000",
+                    *keys::OBJECT_LINGER => "false",
+                    *keys::NODE_VIRTUAL => "true",
+                    *keys::PRIORITY_SESSION => "0",
                     "monitor.channel-volumes" => "false",
                 },
             )?)
@@ -92,22 +94,22 @@ pub fn application_target(process: u32, launch: Option<u64>) -> crate::CaptureTa
 /// Launch defaults for an output, including a missing output when audio is unavailable.
 /// Missing private targets fail connection instead of selecting the default speakers.
 pub fn routing_environment(name: &str) -> Vec<(OsString, OsString)> {
+    let target_object = *keys::TARGET_OBJECT;
+    let dont_reconnect = *keys::NODE_DONT_RECONNECT;
     vec![
         ("PULSE_SINK".into(), name.into()),
         ("PIPEWIRE_NODE".into(), name.into()),
         (
             "PULSE_PROP".into(),
             format!(
-                "target.object={} node.dont-fallback=true node.dont-reconnect=true",
-                name
+                "{target_object}={name} node.dont-fallback=true {dont_reconnect}=true"
             )
             .into(),
         ),
         (
             "PIPEWIRE_PROPS".into(),
             format!(
-                "{{ target.object = \"{}\" node.dont-fallback = true node.dont-reconnect = true }}",
-                name
+                "{{ {target_object} = \"{name}\" node.dont-fallback = true {dont_reconnect} = true }}"
             )
             .into(),
         ),

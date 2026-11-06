@@ -5,6 +5,7 @@ use super::{
 use anyhow::Result;
 use pipewire::{
     core::CoreRc,
+    keys,
     proxy::{Listener as ProxyListener, ProxyT},
     registry::{Listener, RegistryRc},
     spa::utils::dict::DictRef,
@@ -107,7 +108,7 @@ impl Discovery {
                                 return Ok(None);
                             };
                             if !matches!(
-                                props.get("media.class"),
+                                props.get(*keys::MEDIA_CLASS),
                                 Some("Stream/Output/Audio" | "Audio/Sink")
                             ) {
                                 return Ok(None);
@@ -158,20 +159,20 @@ impl State {
     fn update_node(&mut self, id: u32, props: &DictRef) {
         let node = self.nodes.entry(id).or_default();
         if let Some(serial) = props
-            .get("object.serial")
+            .get(*keys::OBJECT_SERIAL)
             .and_then(|value| value.parse().ok())
         {
             node.serial = serial;
         }
-        if let Some(name) = props.get("node.name") {
+        if let Some(name) = props.get(*keys::NODE_NAME) {
             node.name = name.into();
         }
-        if let Some(class) = props.get("media.class") {
+        if let Some(class) = props.get(*keys::MEDIA_CLASS) {
             node.class = class.into();
         }
         node.process = process_id(props).or(node.process);
         node.client = props
-            .get("client.id")
+            .get(*keys::CLIENT_ID)
             .and_then(|value| value.parse().ok())
             .or(node.client);
         self.reconcile();
@@ -216,7 +217,7 @@ impl State {
 }
 fn process_id(props: &DictRef) -> Option<u32> {
     props
-        .get("application.process.id")
-        .or_else(|| props.get("pipewire.sec.pid"))
+        .get(*keys::APP_PROCESS_ID)
+        .or_else(|| props.get(*keys::SEC_PID))
         .and_then(|value| value.parse().ok())
 }

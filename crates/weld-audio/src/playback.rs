@@ -1,6 +1,7 @@
 use crate::{format::format, worker::Worker};
 use anyhow::{Context, Result, ensure};
 use pipewire::{
+    keys,
     properties::properties,
     spa,
     stream::{StreamFlags, StreamRc, StreamState},
@@ -23,13 +24,13 @@ impl Playback {
         let (sender, receiver) = mpsc::sync_channel::<AudioPacket>(16);
         let worker = Worker::with_wake(move |core, failure| {
             let mut props = properties! {
-                "media.type" => "Audio", "media.category" => "Playback", "media.role" => "Screen",
-                "node.name" => "weld.remote.audio", "node.latency" => "960/48000",
+                *keys::MEDIA_TYPE => "Audio", *keys::MEDIA_CATEGORY => "Playback", *keys::MEDIA_ROLE => "Screen",
+                *keys::NODE_NAME => "weld.remote.audio", *keys::NODE_LATENCY => "960/48000",
             };
             if let Some(target) = target {
-                props.insert("target.object", target);
+                props.insert(*keys::TARGET_OBJECT, target);
                 props.insert("node.dont-fallback", "true");
-                props.insert("node.dont-reconnect", "true");
+                props.insert(*keys::NODE_DONT_RECONNECT, "true");
             }
             let stream = StreamRc::new(core.clone(), "Weld remote audio", props)?;
             let mut queue = SampleQueue::default();

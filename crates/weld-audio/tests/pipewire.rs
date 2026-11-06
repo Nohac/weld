@@ -1,4 +1,5 @@
 use anyhow::{Result, ensure};
+use pipewire::keys;
 use std::{
     sync::Arc,
     time::{Duration, Instant},
@@ -154,23 +155,22 @@ fn launch_environment_routes_native_and_pulse_clients() -> Result<()> {
                 let props = |value: &serde_json::Value| value["info"]["props"].clone();
                 let sink = objects
                     .iter()
-                    .find(|value| props(value)["node.name"] == output.name())
+                    .find(|value| props(value)[*keys::NODE_NAME] == output.name())
                     .and_then(|value| value["id"].as_u64());
                 let clients: Vec<_> = objects
                     .iter()
                     .filter(|value| {
-                        props(value)["application.process.id"].as_u64()
-                            == Some(u64::from(child.id()))
+                        props(value)[*keys::APP_PROCESS_ID].as_u64() == Some(u64::from(child.id()))
                     })
                     .filter_map(|value| value["id"].as_u64())
                     .collect();
                 let nodes: Vec<_> = objects
                     .iter()
                     .filter(|value| {
-                        props(value)["media.class"] == "Stream/Output/Audio"
-                            && (props(value)["application.process.id"].as_u64()
+                        props(value)[*keys::MEDIA_CLASS] == "Stream/Output/Audio"
+                            && (props(value)[*keys::APP_PROCESS_ID].as_u64()
                                 == Some(u64::from(child.id()))
-                                || props(value)["client.id"]
+                                || props(value)[*keys::CLIENT_ID]
                                     .as_u64()
                                     .is_some_and(|id| clients.contains(&id)))
                     })
@@ -184,7 +184,7 @@ fn launch_environment_routes_native_and_pulse_clients() -> Result<()> {
                             .is_some_and(|id| nodes.contains(&id))
                             && objects.iter().any(|node| {
                                 node["id"] == value["info"]["input-node-id"]
-                                    && props(node)["media.class"] == "Audio/Sink"
+                                    && props(node)[*keys::MEDIA_CLASS] == "Audio/Sink"
                             })
                     })
                     .collect();
