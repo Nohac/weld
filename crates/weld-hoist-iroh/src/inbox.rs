@@ -94,6 +94,21 @@ impl<T> IncomingQueue<T> {
         }
     }
 
+    pub fn try_push(&self, value: T) -> Result<bool> {
+        match self.capacity.clone().try_acquire_owned() {
+            Ok(permit) => {
+                Admission {
+                    queue: self,
+                    permit,
+                }
+                .send(value)?;
+                Ok(true)
+            }
+            Err(TryAcquireError::NoPermits) => Ok(false),
+            Err(TryAcquireError::Closed) => anyhow::bail!("Iroh peer is unavailable"),
+        }
+    }
+
     pub async fn push(&self, value: T) -> Result<()> {
         self.reserve().await?.send(value)
     }

@@ -26,3 +26,6 @@ weld-media-android = { path = "../weld-media-android", optional = true }
 
 [dev-dependencies]
 weld-access = { path = "../weld-access" }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+weld-audio = { path = "../weld-audio" }

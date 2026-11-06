@@ -64,8 +64,11 @@ enum Command {
         #[arg(long, requires = "control")]
         headless: bool,
         /// Use the session's shared Wayland/X11 endpoints, without launch attribution.
-        #[arg(long, conflicts_with_all = ["workspace", "owner", "control", "headless"])]
+        #[arg(long, conflicts_with_all = ["workspace", "owner", "control", "headless", "private_audio"])]
         shared_display: bool,
+        /// Keep application audio off local speakers; implied by --headless.
+        #[arg(long)]
+        private_audio: bool,
         /// Executable and exact arguments, following --.
         #[arg(required = true, num_args = 1.., last = true)]
         command: Vec<String>,
@@ -251,6 +254,7 @@ fn main() -> Result<()> {
             control,
             headless,
             shared_display,
+            private_audio,
             command,
         } => {
             let (program, arguments) = command
@@ -269,6 +273,7 @@ fn main() -> Result<()> {
                     control,
                     headless,
                     shared_display,
+                    private_audio,
                 },
             };
             let Response::Launched(receipt) = call(&path, &Request::Run(request))? else {

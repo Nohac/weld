@@ -55,6 +55,10 @@ pub enum SourceTransportPacket {
 
 /// Nonblocking transport half used by the encoded source port.
 pub trait EncodedSourceTransport {
+    /// Wake native servicing when independently captured audio becomes ready.
+    fn audio_wake(&self) -> Option<std::sync::Arc<dyn Fn() + Send + Sync>> {
+        None
+    }
     /// Agreed during connection setup, before the first surface is admitted.
     fn stream_mode(&self) -> weld_client::SurfaceStreamMode {
         weld_client::SurfaceStreamMode::Independent
@@ -992,6 +996,7 @@ impl Drop for EncodedSourceState {
 
 /// Source relay port that schedules encoded commits over a binding-owned transport.
 pub struct EncodedSourcePort<T> {
+    audio: crate::audio::Source,
     transport: T,
     state: Option<EncodedSourceState>,
     output: SourceOutput,
@@ -1072,6 +1077,7 @@ impl<T: EncodedSourceTransport> EncodedSourcePort<T> {
         state.views = crate::view::SourceViews::new(transport.stream_mode());
         state.diagnostics = transport.diagnostics();
         Self {
+            audio: crate::audio::Source::new(state.started_at, transport.audio_wake()),
             transport,
             state: Some(state),
             output: SourceOutput::default(),
@@ -1208,6 +1214,16 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
                 self.progress()
             }
             SourcePortCommand::Surface { session, event } => {
+                match &event.kind {
+                    ClientSurfaceEventKind::Metadata(metadata) => {
+                        self.audio.observe(session, event.surface, metadata)
+                    }
+                    ClientSurfaceEventKind::Destroyed => self.audio.remove(event.surface),
+                    ClientSurfaceEventKind::Commit(commit) if !commit.mapped => {
+                        self.audio.remove(event.surface)
+                    }
+                    _ => {}
+                }
                 if self.transport.stream_mode() == weld_client::SurfaceStreamMode::Independent {
                     self.state
                         .as_mut()
@@ -1235,6 +1251,7 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
                 self.progress()
             }
             SourcePortCommand::WithdrawSurface { session, surface } => {
+                self.audio.remove(surface);
                 self.output
                     .push(SourceTransportPacket::Control(SourceEnvelope {
                         session,
@@ -1272,6 +1289,12 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
     }
 
     fn poll(&mut self) -> HoistPortResult<Vec<DestinationEnvelope>> {
+        for packet in self.audio.drain() {
+            // Live audio never waits behind retained video or control output.
+            let _ = self
+                .transport
+                .try_send(SourceTransportPacket::Control(packet))?;
+        }
         self.refresh_admission();
         let state = self
             .state
@@ -1374,6 +1397,7 @@ impl<T: EncodedSourceTransport> HoistSourcePort for EncodedSourcePort<T> {
     }
 
     fn disconnect(&mut self) {
+        self.audio = Default::default();
         self.transport.disconnect();
         self.state = None;
         self.output = SourceOutput::default();
@@ -2081,6 +2105,7 @@ impl<P: DecodedFramePublisher> Drop for EncodedDestinationState<P> {
 
 /// Destination relay port that reconstructs decoded client commits.
 pub struct EncodedDestinationPort<T, P: DecodedFramePublisher> {
+    audio: crate::audio::Destination,
     transport: T,
     state: Option<EncodedDestinationState<P>>,
 }
@@ -2095,6 +2120,7 @@ impl<T: EncodedDestinationTransport, P: DecodedFramePublisher> EncodedDestinatio
         let mut state = EncodedDestinationState::new(backend, descriptor, publisher);
         state.diagnostics = transport.diagnostics();
         Self {
+            audio: Default::default(),
             transport,
             state: Some(state),
         }
@@ -2122,6 +2148,17 @@ impl<T: EncodedDestinationTransport, P: DecodedFramePublisher> EncodedDestinatio
                     .map_err(protocol_error)?;
             }
             SourceTransportPacket::Control(packet) => match packet.message {
+                SourceMessage::Audio {
+                    surface,
+                    packet: audio,
+                } => {
+                    if !audio.is_valid() {
+                        return Err(protocol_error("invalid remote audio packet"));
+                    }
+                    if let Err(error) = self.audio.receive(packet.session, surface, audio) {
+                        tracing::warn!(%error, "remote audio unavailable");
+                    }
+                }
                 SourceMessage::Gamepad(status) => records.push(DestinationPortRecord {
                     session: packet.session,
                     event: DestinationPortEvent::Gamepad(status),
@@ -2130,11 +2167,17 @@ impl<T: EncodedDestinationTransport, P: DecodedFramePublisher> EncodedDestinatio
                     session: packet.session,
                     event: DestinationPortEvent::Cursor { update, sequence },
                 }),
-                SourceMessage::Mapped { surface } => records.push(DestinationPortRecord {
-                    session: packet.session,
-                    event: DestinationPortEvent::MappedSurface(surface),
-                }),
+                SourceMessage::Mapped { surface } => {
+                    self.audio.map(packet.session, surface);
+                    records.push(DestinationPortRecord {
+                        session: packet.session,
+                        event: DestinationPortEvent::MappedSurface(surface),
+                    });
+                }
                 SourceMessage::Surface(event) => {
+                    if matches!(event.kind, WireClientSurfaceEventKind::Destroyed) {
+                        self.audio.remove(event.surface);
+                    }
                     let mut decoded = Vec::new();
                     self.state
                         .as_mut()
@@ -2144,6 +2187,7 @@ impl<T: EncodedDestinationTransport, P: DecodedFramePublisher> EncodedDestinatio
                     extend_encoded_records(records, decoded);
                 }
                 SourceMessage::Withdraw { surface } => {
+                    self.audio.remove(surface);
                     self.state
                         .as_mut()
                         .ok_or_else(|| protocol_error("encoded destination port is disconnected"))?
@@ -2154,10 +2198,13 @@ impl<T: EncodedDestinationTransport, P: DecodedFramePublisher> EncodedDestinatio
                         event: DestinationPortEvent::WithdrawSurface(surface),
                     });
                 }
-                SourceMessage::Ended => records.push(DestinationPortRecord {
-                    session: packet.session,
-                    event: DestinationPortEvent::Ended,
-                }),
+                SourceMessage::Ended => {
+                    self.audio = Default::default();
+                    records.push(DestinationPortRecord {
+                        session: packet.session,
+                        event: DestinationPortEvent::Ended,
+                    });
+                }
                 SourceMessage::BufferRetired { .. } => {
                     return Err(protocol_error(
                         "encoded peer sent a native buffer-retirement record",
@@ -2221,6 +2268,7 @@ impl<T: EncodedDestinationTransport, P: DecodedFramePublisher> HoistDestinationP
     }
 
     fn disconnect(&mut self) {
+        self.audio = Default::default();
         self.transport.disconnect();
         self.state = None;
     }

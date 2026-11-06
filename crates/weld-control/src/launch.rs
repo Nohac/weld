@@ -23,6 +23,8 @@ pub struct LaunchOptions {
     pub control: bool,
     pub headless: bool,
     pub shared_display: bool,
+    /// Route audio to a private PipeWire output. Implied by headless.
+    pub private_audio: bool,
 }
 
 impl LaunchOptions {
@@ -32,7 +34,8 @@ impl LaunchOptions {
                 || (self.workspace.is_none()
                     && self.owner.is_none()
                     && !self.control
-                    && !self.headless),
+                    && !self.headless
+                    && !self.private_audio),
             "shared-display launches do not support attribution, placement or automatic control"
         );
         anyhow::ensure!(
@@ -58,3 +61,28 @@ pub struct LaunchReceipt {
 
 pub(crate) type LaunchHandler =
     Box<dyn FnMut(LaunchRequest) -> anyhow::Result<LaunchReceipt> + Send>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn private_audio_requires_attribution_but_not_window_control() {
+        assert!(
+            LaunchOptions {
+                private_audio: true,
+                ..Default::default()
+            }
+            .validate()
+            .is_ok()
+        );
+        assert!(
+            LaunchOptions {
+                private_audio: true,
+                shared_display: true,
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
+    }
+}

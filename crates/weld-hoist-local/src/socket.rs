@@ -500,6 +500,10 @@ impl LocalPacketConnection {
         self.update_interest()
     }
 
+    pub(crate) fn notify(&self) {
+        let _ = rustix::io::write(&self.0.buffered, &1_u64.to_ne_bytes());
+    }
+
     /// Used after codec advancement, only when it has room for another record.
     pub(crate) fn wake_buffered(&self) -> Result<(), TransportError> {
         if !self.state().received.is_empty() {

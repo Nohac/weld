@@ -609,6 +609,7 @@ mod tests {
         let operation = Operation::RecordInput {
             options: weld_recording::Options {
                 include_cursor: false,
+                include_audio: false,
                 duration_ms: 200,
                 codec: Default::default(),
                 region: None,
@@ -678,6 +679,7 @@ mod tests {
         let operation = Operation::RecordInput {
             options: weld_recording::Options {
                 include_cursor: false,
+                include_audio: false,
                 duration_ms: 200,
                 region: None,
                 codec: Default::default(),

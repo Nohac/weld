@@ -102,6 +102,7 @@ pub struct Recorder {
     options: Options,
     info: Info,
     started: Instant,
+    audio: Option<weld_audio::Capture>,
     last_cursor: Option<weld_client::CompositionCursor>,
 }
 
@@ -148,6 +149,8 @@ impl Recorder {
         let port = EncodedSourcePort::composed_input(Sink(collected.clone()), backend)?;
         let info = Info {
             include_cursor: options.include_cursor,
+            include_audio: options.include_audio,
+            audio_packet_count: 0,
             id,
             status: Status::Recording,
             duration_ms: options.duration_ms,
@@ -172,11 +175,25 @@ impl Recorder {
             options,
             info,
             started: now,
+            audio: None,
             last_cursor: None,
         };
         recorder.submit(&initial, now)?;
         recorder.tick(now)?;
         Ok(recorder)
+    }
+
+    pub fn attach_audio(
+        &mut self,
+        target: weld_audio::CaptureTarget,
+        wake: Arc<dyn Fn() + Send + Sync>,
+    ) -> Result<()> {
+        ensure!(
+            self.options.include_audio,
+            "recording audio was not requested"
+        );
+        self.audio = Some(weld_audio::Capture::new(target, self.started, wake)?);
+        Ok(())
     }
 
     pub fn set_include_cursor(&mut self, include: bool, now: Instant) -> Result<()> {
@@ -229,6 +246,38 @@ impl Recorder {
     }
 
     pub fn tick(&mut self, now: Instant) -> Result<bool> {
+        if let Some(audio) = &self.audio {
+            ensure!(
+                audio.dropped_packets() == 0,
+                "recording audio capture cannot keep up"
+            );
+            for mut packet in audio.drain()? {
+                let end = u64::from(self.options.duration_ms) * 1000;
+                if packet.timestamp_micros >= end {
+                    continue;
+                }
+                let frames = (end - packet.timestamp_micros)
+                    * u64::from(weld_media::audio::SAMPLE_RATE)
+                    / 1_000_000;
+                packet
+                    .samples
+                    .truncate((frames as usize).saturating_mul(weld_media::audio::FRAME_BYTES));
+                if packet.samples.is_empty() {
+                    continue;
+                }
+                let mut data = self.collected.borrow_mut();
+                ensure!(
+                    data.bytes.saturating_add(packet.samples.len()) <= MAX_BYTES,
+                    "recording exceeds 2 GiB"
+                );
+                data.bytes += packet.samples.len();
+                data.storage.push_audio(packet)?;
+            }
+        }
+        if now >= self.end() {
+            self.audio = None;
+        }
+
         ensure!(
             now <= self.end() + Duration::from_secs(5),
             "recording encoder drain timed out"
@@ -330,6 +379,7 @@ impl Recorder {
         let data = self.collected.borrow();
         info.bytes = data.bytes;
         info.event_count = data.storage.event_count();
+        info.audio_packet_count = data.storage.audio_count() as u32;
         info.frame_count = data.storage.frame_count() as u32;
         info
     }
@@ -339,9 +389,13 @@ impl Recorder {
         info.status = Status::Complete;
         info.dropped_frames = Some(info.submitted_frames.saturating_sub(info.frame_count));
         info.events = self.timeline().events()?;
-        let frames = self.collected.borrow_mut().storage.finish()?;
+        let (frames, audio) = self.collected.borrow_mut().storage.finish_all()?;
         info.frames = frames.iter().map(|frame| frame.info.clone()).collect();
-        Ok(Clip { info, frames })
+        Ok(Clip {
+            info,
+            frames,
+            audio,
+        })
     }
 }
 

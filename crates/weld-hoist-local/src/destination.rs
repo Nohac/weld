@@ -70,6 +70,9 @@ impl LocalDestinationPort {
         records: &mut Vec<DestinationPortRecord>,
     ) -> HoistPortResult<()> {
         match packet.message {
+            SourceMessage::Audio { .. } => {
+                return Err(self.protocol_failure("audio requires encoded transport".to_owned()));
+            }
             SourceMessage::Gamepad(status) => {
                 if !file_descriptors.is_empty() {
                     return Err(self

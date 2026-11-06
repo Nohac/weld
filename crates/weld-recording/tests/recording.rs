@@ -126,6 +126,7 @@ fn recording_reuses_stream_coalescing_and_keeps_original_observation_times() {
         commit(10),
         Options {
             include_cursor: false,
+            include_audio: false,
             duration_ms: 100,
             region: Some(Region {
                 x: 10.,
@@ -179,6 +180,7 @@ fn recording_reuses_stream_coalescing_and_keeps_original_observation_times() {
 fn recording_rejects_invalid_limits_and_out_of_bounds_crop() {
     let options = Options {
         include_cursor: false,
+        include_audio: false,
         duration_ms: 0,
         codec: Codec::Av1,
         region: None,
@@ -220,6 +222,7 @@ fn ten_minute_recording_outlives_old_frame_and_duration_limits() {
     let now = Instant::now();
     let options = Options {
         include_cursor: false,
+        include_audio: false,
         duration_ms: 600_000,
         codec: Codec::Av1,
         region: None,
@@ -229,6 +232,7 @@ fn ten_minute_recording_outlives_old_frame_and_duration_limits() {
     assert!(
         Options {
             include_cursor: false,
+            include_audio: false,
             duration_ms: 600_001,
             ..options.clone()
         }

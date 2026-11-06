@@ -3,6 +3,9 @@
 import argparse
 import base64
 import json
+import math
+import wave
+import shlex
 import os
 from pathlib import Path
 import select
@@ -21,6 +24,10 @@ def main():
     if not args.no_build:
         subprocess.run(["cargo", "build", "--locked", "-j8", "-p", "weldwm", "-p", "weld-control", "--bins"], cwd=root, check=True)
     run = Path(tempfile.mkdtemp(prefix="recording-", dir=root / "target/validation"))
+    tone = run / "tone.wav"
+    with wave.open(str(tone), "wb") as audio:
+        audio.setparams((2, 2, 48000, 0, "NONE", "not compressed"))
+        audio.writeframes(b"".join(struct.pack("<hh", *([int(math.sin(i * 440 * math.tau / 48000) * 1000)] * 2)) for i in range(48000)))
     config = run / "host.config"
     config.write_text("font monospace 14\ndefault_border pixel 2\n")
     display = run / "wayland"
@@ -55,6 +62,7 @@ def main():
             wait(socket.exists, "private control socket")
             subprocess.run([*ctl, "launch", "--headless", "--control", "--owner", "recording-probe", "--", "foot",
                             "--app-id=weld-recording-probe", "sh", "-c",
+                            f"while true; do paplay {shlex.quote(str(tone))}; done & "
                             "i=0; while true; do printf '\\033[H\\033[2JFrame %s\\n' \"$i\"; i=$((i+1)); sleep 0.016; done"],
                            check=True, capture_output=True, timeout=10)
             def window():
@@ -62,7 +70,7 @@ def main():
             target = wait(window, "controlled Foot")
             control = target["control"]
             wait(lambda: window().get("application_viewport"), "initial frame")
-            options = {"duration_ms": 700, "region": {"x": 0, "y": 0, "width": 160, "height": 96}}
+            options = {"duration_ms": 700, "include_audio": True, "region": {"x": 0, "y": 0, "width": 160, "height": 96}}
             result = subprocess.check_output([*ctl, "window", "record", "--control", control,
                                               "--options", json.dumps(options), "--json"], text=True, timeout=30)
             info = json.loads(result)
@@ -70,6 +78,7 @@ def main():
             assert info["frames"] == [], "recording replies default to summary metadata"
             info = rpc("recording_info", recording=info["id"], include_frames=True)
             assert len(info["frames"]) >= 3, info
+            assert info["include_audio"] and info["audio_packet_count"] > 0, info
             (run / "recording.json").write_text(json.dumps(info, indent=2))
             recording = info["id"]
             sheet_options = {"frames": 6, "width": 600, "height": 240}
@@ -81,6 +90,9 @@ def main():
             rpc("recording_export", recording=recording, output=str(run / "clip.mkv"))
             probe = json.loads(subprocess.check_output(["ffprobe", "-v", "error", "-count_frames", "-show_streams", "-show_format", "-of", "json", str(run / "clip.mkv")], text=True))
             assert int(probe["streams"][0]["nb_read_frames"]) == len(info["frames"]), probe
+            assert any(stream["codec_type"] == "audio" for stream in probe["streams"]), probe
+            pcm = subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(run / "clip.mkv"), "-map", "0:a:0", "-f", "s16le", "-"], timeout=15)
+            assert any(pcm), "recording audio was silent"
             pixels = subprocess.check_output(["ffmpeg", "-v", "error", "-i", str(run / "clip.mkv"),
                                               "-frames:v", "1", "-f", "image2pipe", "-c:v", "png", "-"], timeout=15)
             assert struct.unpack(">II", pixels[16:24]) == (info["width"], info["height"]), "exported video exposed encoder padding"

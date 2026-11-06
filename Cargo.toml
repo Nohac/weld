@@ -16,6 +16,7 @@ test-support = ["weld-app/test-support"]
 
 [workspace]
 members = [
+  "crates/weld-audio",
   "crates/weld-svg",
   "crates/weld-session",
   "crates/weld-accessibility",
@@ -114,6 +115,7 @@ x11-dl = "2.21.0"
 xcursor = "0.3.11"
 
 [dependencies]
+weld-audio = { path = "crates/weld-audio" }
 uuid = { version = "1", features = ["v4"] }
 weld-hoist-protocol = { path = "crates/weld-hoist-protocol" }
 weld-remote-control-ui = { path = "crates/weld-remote-control-ui" }

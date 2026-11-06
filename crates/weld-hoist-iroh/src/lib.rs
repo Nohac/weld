@@ -315,6 +315,57 @@ mod tests {
                 matches!(&received[0], SourceTransportPacket::Media(packet) if packet.access_unit.frame.sequence == sequence)
             );
         }
+        // Audio is independently delivered while video's receive budget is zero.
+        let audio = weld_media::audio::AudioPacket {
+            stream: 42,
+            timestamp_micros: 125_000,
+            samples: vec![3; 3840],
+        };
+        send_source(
+            &source,
+            SourceTransportPacket::Control(SourceEnvelope {
+                session,
+                message: SourceMessage::Audio {
+                    surface,
+                    packet: audio.clone(),
+                },
+            }),
+        )
+        .expect("audio datagrams");
+        let mut captured = Vec::new();
+        wait_for(|| {
+            let packets = destination
+                .drain(ReceiveBudget {
+                    control_records: 0,
+                    media_records: 0,
+                    media_bytes: 0,
+                })
+                .ok()?;
+            for packet in packets {
+                if let SourceTransportPacket::Control(SourceEnvelope {
+                    message: SourceMessage::Audio { packet, .. },
+                    ..
+                }) = packet
+                {
+                    captured.push(packet);
+                }
+            }
+            (captured
+                .iter()
+                .map(|packet| packet.samples.len())
+                .sum::<usize>()
+                == audio.samples.len())
+            .then_some(())
+        });
+        captured.sort_by_key(|packet| packet.timestamp_micros);
+        assert_eq!(captured[0].timestamp_micros, audio.timestamp_micros);
+        assert_eq!(
+            captured
+                .into_iter()
+                .flat_map(|packet| packet.samples)
+                .collect::<Vec<_>>(),
+            audio.samples
+        );
         portable_receiver::check_registration(&source, destination.clone());
         source.disconnect();
         wait_for(|| (!destination.is_available()).then_some(()));

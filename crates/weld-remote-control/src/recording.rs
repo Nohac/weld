@@ -288,7 +288,9 @@ mod tests {
             viewport: Mutex::new(None),
         });
         let info = Info {
+            audio_packet_count: 0,
             include_cursor: false,
+            include_audio: false,
             id: "clip".into(),
             status: Status::Complete,
             duration_ms: 500,
@@ -326,6 +328,7 @@ mod tests {
         archive.update_at(
             info.summary(),
             Some(Clip {
+                audio: Vec::new(),
                 info: info.clone(),
                 frames: vec![],
             }),

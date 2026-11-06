@@ -47,6 +47,9 @@ impl Launcher {
         request.options.validate()?;
         let attributed = !request.options.shared_display;
         let id = uuid::Uuid::new_v4().as_u64_pair().1 & 0xffff_ffff;
+        let audio = (request.options.headless || request.options.private_audio)
+            .then(|| weld_audio::PrivateOutput::new(id))
+            .transpose()?;
         if let Some((sender, wake)) = &self.policy
             && attributed
         {
@@ -78,6 +81,7 @@ impl Launcher {
             arguments: request.arguments.into_iter().map(Into::into).collect(),
             directory: request.directory,
             launch_id: attributed.then_some(id),
+            audio,
         });
         if attributed
             && result

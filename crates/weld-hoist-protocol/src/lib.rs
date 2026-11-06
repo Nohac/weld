@@ -30,7 +30,7 @@ pub struct ProtocolRevision(u32);
 impl ProtocolRevision {
     // Unreleased development baseline: rebuild peers together. This is not a
     // promise of schema compatibility between arbitrary development builds.
-    pub const CURRENT: Self = Self(1);
+    pub const CURRENT: Self = Self(2);
 
     pub const fn new(raw: u32) -> Self {
         Self(raw)
@@ -114,6 +114,11 @@ pub enum SourceMessage<B> {
         sequence: u64,
     },
     Gamepad(gamepad::GamepadStatus),
+    /// Application audio authorized by this mapped surface.
+    Audio {
+        surface: ClientSurfaceId,
+        packet: weld_media::audio::AudioPacket,
+    },
 }
 
 /// Destination-to-source semantic envelope.
@@ -310,7 +315,7 @@ mod tests {
 
     #[test]
     fn protocol_revisions_require_an_exact_match() {
-        assert_eq!(ProtocolRevision::CURRENT.raw(), 1);
+        assert_eq!(ProtocolRevision::CURRENT.raw(), 2);
         assert!(
             ProtocolRevision::CURRENT
                 .ensure_compatible(ProtocolRevision::CURRENT)

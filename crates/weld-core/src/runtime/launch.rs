@@ -41,6 +41,7 @@ pub struct ApplicationLaunch {
     pub directory: PathBuf,
     /// Host-local connection attribution for this launch and its descendants.
     pub launch_id: Option<u64>,
+    pub audio: Option<weld_audio::PrivateOutput>,
 }
 
 impl ApplicationLaunch {
@@ -144,12 +145,16 @@ impl LaunchRequests {
 pub(super) struct LaunchQueue {
     receiver: Receiver<PendingLaunch>,
     wake: ClientRuntimeNotifier,
-    listeners: Vec<(u64, calloop::RegistrationToken)>,
+    listeners: Vec<(
+        u64,
+        calloop::RegistrationToken,
+        Option<weld_audio::PrivateOutput>,
+    )>,
 }
 
 impl LaunchQueue {
     pub(super) fn shutdown(&mut self, handle: &calloop::LoopHandle<'static, ServerState>) {
-        for (_, token) in self.listeners.drain(..) {
+        for (_, token, _) in self.listeners.drain(..) {
             handle.remove(token);
         }
     }
@@ -168,7 +173,7 @@ impl LaunchQueue {
                     "session launch socket limit reached ({MAX_ATTRIBUTED_LAUNCHES})"
                 );
                 ensure!(
-                    !listeners.iter().any(|(existing, _)| *existing == id),
+                    !listeners.iter().any(|(existing, _, _)| *existing == id),
                     "launch identity already exists"
                 );
                 Some((
@@ -182,12 +187,15 @@ impl LaunchQueue {
                 server,
                 &request.program,
                 &request.arguments,
-                Some(&request.directory),
-                listener.as_ref().map(|(_, (name, _))| name.as_os_str()),
+                super::ChildLaunchContext {
+                    directory: Some(&request.directory),
+                    attributed_socket: listener.as_ref().map(|(_, (name, _))| name.as_os_str()),
+                    audio: request.audio.as_ref(),
+                },
             );
             if let Some((id, (_, token))) = listener {
                 if result.is_ok() {
-                    listeners.push((id, token));
+                    listeners.push((id, token, request.audio));
                 } else {
                     handle.remove(token);
                 }
@@ -224,6 +232,7 @@ mod tests {
     fn request() -> ApplicationLaunch {
         ApplicationLaunch {
             launch_id: None,
+            audio: None,
             program: "example-app".into(),
             arguments: vec!["argument with spaces".into()],
             directory: "/tmp".into(),

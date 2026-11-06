@@ -16,6 +16,17 @@ pub(crate) fn run(arguments: AppArguments) -> Result<()> {
     let budget = bitrate_budget::for_source(&arguments)?;
     // Prepare first so GPU/network workers inherit the host shutdown mask.
     let mut runtime = HostRuntime::prepare(runtime_options(&arguments)?)?;
+    // Keep a private destination even when PipeWire is unavailable. Clients then
+    // fail audio connection instead of falling back to the desktop speakers.
+    let audio_name = weld_audio::output_name(u64::MAX);
+    let _audio = match weld_audio::PrivateOutput::new(u64::MAX) {
+        Ok(output) => Some(output),
+        Err(error) => {
+            tracing::warn!(%error, "headless audio unavailable");
+            None
+        }
+    };
+    runtime.set_launch_environment(weld_audio::routing_environment(&audio_name));
     let (launcher, requests) = weld_core::runtime::launch::launch_channel()?;
     runtime.add_launch_requests(requests)?;
     let (access_wake, wake_source) = client_runtime_notifier()?;

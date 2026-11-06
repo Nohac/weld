@@ -721,3 +721,11 @@ including the entry field and both buttons, with window-relative bounds.
 The XWayland-enabled run also validated the existing X11 launch probe; its
 shutdown still reports the previously recorded stale Wayland socket file after
 confirming the endpoint is no longer listening.
+
+### Recording application audio
+
+Set `include_audio: true` in `record` or `record_input` options to capture the
+application's sound alongside its video. Audio defaults off. The recording info
+includes `include_audio` and `audio_packet_count`; export mixes recorded streams
+into one audio track. Sound may be shared with other windows of the same app.
+See [Application audio](audio.md) for streaming support and routing limits.

@@ -129,3 +129,10 @@ the earlier `target/validation/xwayland-ol_pe2cv` run. The runner reports this
 host-lifecycle issue explicitly and verifies that the endpoint no longer accepts
 connections. XWayland callbacks retain event-loop handles; source teardown needs
 a separate audit. The native control endpoint is removed in both modes.
+
+## Private application audio
+
+Headless launches automatically receive a private PipeWire output. Use
+`--private-audio` for the same behavior on an ordinary attributed launch.
+See [Application audio](audio.md) for environment routing, capture, lifecycle,
+and the distinction between routing defaults and isolation.

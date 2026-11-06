@@ -16,6 +16,37 @@ use weld_media::{EncodedAccessUnit, EncodedFrameKind, VideoCodec};
 
 const PENDING_PACKETS: usize = 8;
 
+enum WritePacket {
+    Video(FrameInfo, EncodedAccessUnit),
+    Audio(weld_media::audio::AudioPacket),
+}
+
+pub struct AudioFrame {
+    pub stream: u64,
+    pub timestamp_micros: u64,
+    payload: Payload,
+}
+impl From<weld_media::audio::AudioPacket> for AudioFrame {
+    fn from(packet: weld_media::audio::AudioPacket) -> Self {
+        Self {
+            stream: packet.stream,
+            timestamp_micros: packet.timestamp_micros,
+            payload: Payload::Memory(packet.samples),
+        }
+    }
+}
+impl AudioFrame {
+    pub fn bytes(&self) -> Result<Vec<u8>> {
+        self.payload.bytes()
+    }
+    pub fn len(&self) -> usize {
+        self.payload.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
 pub struct EncodedFrame {
     pub info: FrameInfo,
     pub unit: Packet,
@@ -49,7 +80,19 @@ impl From<EncodedAccessUnit> for Packet {
 
 impl Packet {
     pub fn bytes(&self) -> Result<Vec<u8>> {
-        match &self.payload {
+        self.payload.bytes()
+    }
+    pub fn len(&self) -> usize {
+        self.payload.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.payload.len() == 0
+    }
+}
+
+impl Payload {
+    fn bytes(&self) -> Result<Vec<u8>> {
+        match self {
             Payload::Memory(bytes) => Ok(bytes.clone()),
             Payload::Stored {
                 file,
@@ -64,14 +107,10 @@ impl Packet {
     }
 
     pub fn len(&self) -> usize {
-        match &self.payload {
+        match self {
             Payload::Memory(bytes) => bytes.len(),
             Payload::Stored { length, .. } => *length,
         }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len() == 0
     }
 }
 
@@ -79,6 +118,7 @@ impl Packet {
 struct Progress {
     frames: Vec<EncodedFrame>,
     events: Vec<RecordedEvent>,
+    audio: Vec<AudioFrame>,
     error: Option<String>,
 }
 
@@ -109,17 +149,18 @@ impl Timeline {
 }
 
 pub(crate) struct Storage {
-    sender: SyncSender<(FrameInfo, EncodedAccessUnit)>,
+    sender: SyncSender<WritePacket>,
     progress: Arc<Mutex<Progress>>,
     cancelled: Arc<AtomicBool>,
     submitted: usize,
+    audio_submitted: usize,
     event_count: u32,
 }
 
 impl Storage {
     pub fn new(wake: Arc<dyn Fn() + Send + Sync>) -> Result<Self> {
         // Bound both queue length and individual payloads before admission.
-        let (sender, receiver) = sync_channel::<(FrameInfo, EncodedAccessUnit)>(PENDING_PACKETS);
+        let (sender, receiver) = sync_channel::<WritePacket>(PENDING_PACKETS);
         let progress = Arc::new(Mutex::new(Progress::default()));
         let cancelled = Arc::new(AtomicBool::new(false));
         let worker_progress = progress.clone();
@@ -131,31 +172,42 @@ impl Storage {
                     let file =
                         Arc::new(tempfile::tempfile().context("creating recording storage")?);
                     let mut offset = 0;
-                    for (info, unit) in receiver {
+                    for packet in receiver {
                         if worker_cancelled.load(Ordering::Acquire) {
                             break;
                         }
-                        file.write_all_at(&unit.payload, offset)
+                        let bytes = match &packet {
+                            WritePacket::Video(_, unit) => &unit.payload,
+                            WritePacket::Audio(packet) => &packet.samples,
+                        };
+                        file.write_all_at(bytes, offset)
                             .context("writing recording packet")?;
-                        let length = unit.payload.len();
-                        let frame = EncodedFrame {
-                            info,
-                            unit: Packet {
-                                codec: unit.codec,
-                                kind: unit.kind,
-                                payload: Payload::Stored {
-                                    file: file.clone(),
-                                    offset,
-                                    length,
-                                },
-                            },
+                        let length = bytes.len();
+                        let payload = Payload::Stored {
+                            file: file.clone(),
+                            offset,
+                            length,
                         };
                         offset += length as u64;
-                        worker_progress
+                        let mut progress = worker_progress
                             .lock()
-                            .map_err(|_| anyhow::anyhow!("recording storage unavailable"))?
-                            .frames
-                            .push(frame);
+                            .map_err(|_| anyhow::anyhow!("recording storage unavailable"))?;
+                        match packet {
+                            WritePacket::Video(info, unit) => progress.frames.push(EncodedFrame {
+                                info,
+                                unit: Packet {
+                                    codec: unit.codec,
+                                    kind: unit.kind,
+                                    payload,
+                                },
+                            }),
+                            WritePacket::Audio(packet) => progress.audio.push(AudioFrame {
+                                stream: packet.stream,
+                                timestamp_micros: packet.timestamp_micros,
+                                payload,
+                            }),
+                        }
+                        drop(progress);
                         wake();
                     }
                     Ok(())
@@ -172,6 +224,7 @@ impl Storage {
             progress,
             cancelled,
             submitted: 0,
+            audio_submitted: 0,
             event_count: 0,
         })
     }
@@ -179,10 +232,37 @@ impl Storage {
     pub fn push(&mut self, mut info: FrameInfo, unit: EncodedAccessUnit) -> Result<()> {
         info.index = self.submitted as u32;
         self.sender
-            .try_send((info, unit))
+            .try_send(WritePacket::Video(info, unit))
             .map_err(|_| anyhow::anyhow!("recording storage cannot keep up"))?;
         self.submitted += 1;
         Ok(())
+    }
+
+    pub fn push_audio(&mut self, packet: weld_media::audio::AudioPacket) -> Result<()> {
+        ensure!(packet.is_valid(), "invalid recording audio packet");
+        ensure!(
+            self.audio_submitted < 600_000,
+            "recording audio packet limit reached"
+        );
+        self.sender
+            .try_send(WritePacket::Audio(packet))
+            .map_err(|_| anyhow::anyhow!("recording audio storage cannot keep up"))?;
+        self.audio_submitted += 1;
+        Ok(())
+    }
+    pub fn audio_count(&self) -> usize {
+        self.audio_submitted
+    }
+    pub fn finish_all(&mut self) -> Result<(Vec<EncodedFrame>, Vec<AudioFrame>)> {
+        ensure!(self.is_idle()?, "recording storage is still writing");
+        let mut progress = self
+            .progress
+            .lock()
+            .map_err(|_| anyhow::anyhow!("recording storage unavailable"))?;
+        Ok((
+            std::mem::take(&mut progress.frames),
+            std::mem::take(&mut progress.audio),
+        ))
     }
 
     pub fn is_idle(&self) -> Result<bool> {
@@ -195,12 +275,15 @@ impl Storage {
             "{}",
             progress.error.as_deref().unwrap_or_default()
         );
-        Ok(progress.frames.len() == self.submitted)
+        Ok(progress.frames.len() + progress.audio.len() == self.submitted + self.audio_submitted)
     }
 
     pub fn has_capacity(&self, reserved: usize) -> bool {
         self.progress.lock().ok().is_some_and(|progress| {
-            self.submitted.saturating_sub(progress.frames.len()) + reserved < PENDING_PACKETS
+            (self.submitted + self.audio_submitted)
+                .saturating_sub(progress.frames.len() + progress.audio.len())
+                + reserved
+                < PENDING_PACKETS
         })
     }
 
@@ -249,15 +332,6 @@ impl Storage {
 
     pub fn frame_count(&self) -> usize {
         self.submitted
-    }
-
-    pub fn finish(&mut self) -> Result<Vec<EncodedFrame>> {
-        ensure!(self.is_idle()?, "recording storage is still writing");
-        let mut progress = self
-            .progress
-            .lock()
-            .map_err(|_| anyhow::anyhow!("recording storage unavailable"))?;
-        Ok(std::mem::take(&mut progress.frames))
     }
 }
 
@@ -333,7 +407,7 @@ mod tests {
             notifications.recv_timeout(Duration::from_secs(5))?;
         }
         assert!(storage.is_idle()?);
-        let frames = storage.finish()?;
+        let frames = storage.finish_all()?.0;
         assert_eq!(frames.len(), PENDING_PACKETS + 1);
         let Payload::Stored { file, .. } = &frames[0].unit.payload else {
             anyhow::bail!("packet was not stored in a file");

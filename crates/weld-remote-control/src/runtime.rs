@@ -34,6 +34,7 @@ use weld_hoist_protocol::{DestinationEnvelope, DestinationMessage};
 mod cursor;
 
 struct State {
+    audio_targets: HashMap<ClientSurfaceId, weld_audio::CaptureTarget>,
     positions: HashMap<ClientSurfaceId, InputPosition>,
     cursors: HashMap<ClientSurfaceId, weld_client::ClientCursor>,
     cursor_dirty: HashSet<ClientSurfaceId>,
@@ -234,6 +235,7 @@ pub fn registration(
 ) -> (ClientAdapterRegistration, RemoteControlClient) {
     let (sender, requests) = mpsc::sync_channel(64);
     let state = Rc::new(RefCell::new(State {
+        audio_targets: HashMap::new(),
         positions: HashMap::new(),
         cursors: HashMap::new(),
         cursor_dirty: HashSet::new(),
@@ -473,7 +475,8 @@ impl Adapter {
                 self.recordings.ensure_capacity()?;
                 let backend = self.capture.recording_backend(options.codec.into())?;
                 let id = uuid::Uuid::new_v4().simple().to_string();
-                let recorder = weld_recording::Recorder::new(
+                let include_audio = options.include_audio;
+                let mut recorder = weld_recording::Recorder::new(
                     id.clone(),
                     surface,
                     state.captured_frame(surface, frame)?,
@@ -482,6 +485,14 @@ impl Adapter {
                     Instant::now(),
                     self.wake.clone(),
                 )?;
+                if include_audio {
+                    let target = state
+                        .audio_targets
+                        .get(&surface)
+                        .context("application audio identity unavailable")?
+                        .clone();
+                    recorder.attach_audio(target, self.wake.clone())?;
+                }
                 let info = recorder.info();
                 self.recordings
                     .insert(pending.grant.clone(), info.clone(), recorder.timeline())?;
@@ -1044,6 +1055,12 @@ impl ClientAdapter for Adapter {
     fn observe_event(&mut self, event: &ClientSurfaceEvent) {
         match &event.kind {
             ClientSurfaceEventKind::Metadata(metadata) => {
+                if let Some(process) = metadata.local_process_id() {
+                    self.state.borrow_mut().audio_targets.insert(
+                        event.surface,
+                        weld_audio::application_target(process, metadata.local_launch_id()),
+                    );
+                }
                 if metadata.x11_class().is_none() {
                     self.text_surfaces.insert(event.surface);
                 } else {
@@ -1052,6 +1069,7 @@ impl ClientAdapter for Adapter {
             }
             ClientSurfaceEventKind::Destroyed => {
                 self.text_surfaces.remove(&event.surface);
+                self.state.borrow_mut().audio_targets.remove(&event.surface);
                 self.state.borrow_mut().cursors.remove(&event.surface);
             }
             _ => {}

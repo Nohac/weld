@@ -168,7 +168,7 @@ impl Default for WindowService {
 }
 
 impl WindowService {
-    /// Record and execute a validated input timeline on the recording's monotonic clock.
+    /// Record and execute a validated input timeline on the recording's monotonic clock. include_audio captures application sound, which can be shared with its other windows.
     pub fn record_input(
         &self,
         control: String,
@@ -336,7 +336,7 @@ impl WindowService {
 }
 
 impl WindowService {
-    /// Record all composed updates through the streaming encoder. wait defaults to true; false returns the recording ID immediately.
+    /// Record composed updates through the streaming encoder. include_audio opts into application sound, including streams shared by other windows. wait defaults to true; false returns the recording ID immediately.
     pub fn record(
         &self,
         control: String,

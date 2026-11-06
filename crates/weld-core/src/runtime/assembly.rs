@@ -125,6 +125,11 @@ pub struct HostRuntime {
 }
 
 impl HostRuntime {
+    /// Apply session-owned environment defaults to processes launched by this host.
+    pub fn set_launch_environment(&mut self, environment: Vec<(OsString, OsString)>) {
+        self.runtime.state.children.environment.extend(environment);
+    }
+
     /// Services trusted launch requests through this session's shared child lifecycle.
     pub fn add_launch_requests(
         &mut self,

@@ -5,6 +5,7 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+weld-audio = { path = "../weld-audio" }
 anyhow.workspace = true
 base64 = "0.22"
 ffmpeg-next = { workspace = true, features = ["software-scaling"] }

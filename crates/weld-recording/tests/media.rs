@@ -77,7 +77,9 @@ fn av1_and_h264_recordings_can_be_scrubbed_cropped_and_remuxed() -> Result<()> {
             .collect();
         ensure!(frames.len() == 5, "fixture packet count");
         let info = Info {
+            audio_packet_count: 0,
             include_cursor: false,
+            include_audio: false,
             id: "fixture".into(),
             status: Status::Complete,
             duration_ms: 500,
@@ -100,7 +102,11 @@ fn av1_and_h264_recordings_can_be_scrubbed_cropped_and_remuxed() -> Result<()> {
             events: Vec::new(),
             expires_after_idle_ms: weld_recording::IDLE_RETENTION_MS,
         };
-        let mut clip = Clip { info, frames };
+        let mut clip = Clip {
+            info,
+            frames,
+            audio: Vec::new(),
+        };
         let image = weld_recording::frame(
             &clip,
             FrameOptions {
@@ -165,6 +171,58 @@ fn av1_and_h264_recordings_can_be_scrubbed_cropped_and_remuxed() -> Result<()> {
             (times[4] - 0.4).abs() < 0.002,
             "export preserves observation timestamps: {times:?}"
         );
+        // Independent application streams are mixed into one playable audio track.
+        clip.audio = [30_000_i16, 30_000_i16, -30_000_i16]
+            .into_iter()
+            .enumerate()
+            .map(|(stream, value)| {
+                weld_media::audio::AudioPacket {
+                    stream: stream as u64,
+                    timestamp_micros: 100_000,
+                    samples: value.to_le_bytes().repeat(960 * 2),
+                }
+                .into()
+            })
+            .collect();
+        clip.info.include_audio = true;
+        let with_audio = weld_recording::video(&clip, || Ok(()))?;
+        let audio_export = directory.path().join(format!("audio-{extension}.mkv"));
+        fs::write(
+            &audio_export,
+            STANDARD.decode(with_audio.chunk(0)?.data_base64)?,
+        )?;
+        let audio_demux = ffmpeg_next::format::input(&audio_export)?;
+        assert!(
+            audio_demux
+                .streams()
+                .best(ffmpeg_next::media::Type::Audio)
+                .is_some()
+        );
+        let decoded_audio = Command::new("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(&audio_export)
+            .args(["-map", "0:a:0", "-f", "s16le", "-"])
+            .output()?;
+        ensure!(decoded_audio.status.success(), "decoding recorded audio");
+        let samples: Vec<_> = decoded_audio
+            .stdout
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|sample| i16::from_le_bytes([sample[0], sample[1]]))
+            .collect();
+        assert!(
+            samples[..4800 * 2].iter().all(|sample| *sample == 0),
+            "audio starts at its timestamp"
+        );
+        assert!(
+            samples[4800 * 2..5760 * 2]
+                .iter()
+                .all(|sample| *sample == 30_000),
+            "streams are mixed before clipping"
+        );
+        clip.audio.clear();
+        clip.info.include_audio = false;
         // Hardware codecs can pad their coded raster. Inspection and export
         // retain the smaller visible extent independently of that allocation.
         let full = weld_recording::frame(&clip, FrameOptions::default(), || Ok(()))?;

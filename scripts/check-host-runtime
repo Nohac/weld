@@ -49,8 +49,10 @@ def main():
     validation = root / "target/validation"
     validation.mkdir(parents=True, exist_ok=True)
     run = Path(tempfile.mkdtemp(prefix="host-runtime-", dir=validation))
-    runtime = run / "runtime"
-    runtime.mkdir(mode=0o700)
+    # Unix sockets are limited to 107 pathname bytes on Linux. Keep the runtime
+    # short even when the repository and persistent validation logs are deep.
+    runtime_owner = tempfile.TemporaryDirectory(prefix="weld-runtime-")
+    runtime = Path(runtime_owner.name)
     environment = os.environ.copy()
     if args.nested:
         nested_capture(root, run, environment)

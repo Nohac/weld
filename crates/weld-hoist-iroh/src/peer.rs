@@ -129,6 +129,12 @@ impl weld_hoist_core::session::pairing::ConnectionControl for IrohSourcePeer {
 }
 
 impl EncodedSourceTransport for IrohSourcePeer {
+    fn audio_wake(&self) -> Option<Arc<dyn Fn() + Send + Sync>> {
+        let notifier = self.state.notifier.clone();
+        Some(Arc::new(move || {
+            let _ = notifier.notify();
+        }))
+    }
     fn stream_mode(&self) -> SurfaceStreamMode {
         self.stream_mode
     }
@@ -140,6 +146,15 @@ impl EncodedSourceTransport for IrohSourcePeer {
         packet: SourceTransportPacket,
     ) -> HoistPortResult<SendStatus<SourceTransportPacket>> {
         let result = match packet {
+            SourceTransportPacket::Control(packet)
+                if matches!(
+                    packet.message,
+                    weld_hoist_protocol::SourceMessage::Audio { .. }
+                ) =>
+            {
+                send_audio(&self.state.connection, packet).map_err(peer_error)?;
+                return Ok(SendStatus::Sent);
+            }
             SourceTransportPacket::Control(packet) => {
                 self.control.try_send(packet).map_err(|error| match error {
                     mpsc::error::TrySendError::Full(packet) => {
@@ -199,6 +214,7 @@ impl EncodedSourceTransport for IrohSourcePeer {
 /// Destination-facing half of one authenticated Iroh peer connection.
 #[derive(Clone)]
 pub struct IrohDestinationPeer {
+    audio: Arc<IncomingQueue<SourceEnvelope<EncodedBuffer>>>,
     state: Arc<PeerState<SourceEnvelope<EncodedBuffer>>>,
     media: Arc<IncomingQueue<MediaEnvelope<EncodedAccessUnit>>>,
     control: Arc<InputOutbox>,
@@ -245,6 +261,13 @@ impl EncodedDestinationTransport for IrohDestinationPeer {
             .map(SourceTransportPacket::Control)
             .collect::<Vec<_>>();
         packets.extend(
+            self.audio
+                .drain_matching(64, |_| true)
+                .map_err(peer_error)?
+                .into_iter()
+                .map(SourceTransportPacket::Control),
+        );
+        packets.extend(
             self.media
                 .drain_matching(budget.media_records, |packet| {
                     if packet.access_unit.payload.len() > budget.media_bytes {
@@ -261,6 +284,7 @@ impl EncodedDestinationTransport for IrohDestinationPeer {
     }
 
     fn wake_if_readable(&self, budget: ReceiveBudget) -> HoistPortResult<()> {
+        self.audio.wake_if(|_| true).map_err(peer_error)?;
         self.state
             .incoming
             .wake_if(|_| budget.control_records > 0)
@@ -349,6 +373,7 @@ pub(crate) fn spawn_destination_peer(
     ));
     // Two maximum-sized AUs fit in 64 MiB. Reserve before reading a body so
     // an additional blocked reader cannot allocate a third AU outside the bound.
+    let audio = Arc::new(IncomingQueue::with_capacity(notifier.clone(), 64));
     let media = Arc::new(IncomingQueue::with_capacity(notifier, 2));
     let control = Arc::new(InputOutbox::default());
     tokio::spawn(run_destination_peer(
@@ -358,8 +383,10 @@ pub(crate) fn spawn_destination_peer(
         control.clone(),
         media.clone(),
         media_recv,
+        audio.clone(),
     ));
     IrohDestinationPeer {
+        audio,
         state,
         media,
         control,
@@ -422,15 +449,18 @@ async fn run_destination_peer(
     outgoing_control: Arc<InputOutbox>,
     incoming_media: Arc<IncomingQueue<MediaEnvelope<EncodedAccessUnit>>>,
     media_recv: RecvStream,
+    incoming_audio: Arc<IncomingQueue<SourceEnvelope<EncodedBuffer>>>,
 ) {
     let control_writer = write_destination_control(&outgoing_control, &mut control_send);
     let control_reader = read_source_control(&state.incoming, control_recv);
     let media = read_source_media(&incoming_media, media_recv);
+    let audio = read_audio(&state.connection, &incoming_audio);
     tokio::select! {
         result = async { tokio::try_join!(
             observe_io(&state, weld_diagnostics::Operation::Control, control_writer),
             observe_io(&state, weld_diagnostics::Operation::Control, control_reader),
-            observe_io(&state, weld_diagnostics::Operation::Media, media)) } => {
+            observe_io(&state, weld_diagnostics::Operation::Media, media),
+            observe_io(&state, weld_diagnostics::Operation::Media, audio)) } => {
             if let Err(error) = result {
                 tracing::warn!(error = %format_args!("{error:#}"), "Iroh destination peer stopped");
             }
@@ -441,6 +471,7 @@ async fn run_destination_peer(
     }
     outgoing_control.close();
     incoming_media.fail();
+    incoming_audio.fail();
     state.fail();
 }
 
@@ -523,6 +554,62 @@ impl fmt::Display for PeerError {
 }
 
 impl std::error::Error for PeerError {}
+
+// Audio uses expiring QUIC datagrams, independent of reliable video and control.
+// Each datagram is a complete PCM packet; loss leaves a timestamped silence gap.
+fn send_audio(connection: &Connection, envelope: SourceEnvelope<EncodedBuffer>) -> Result<()> {
+    let weld_hoist_protocol::SourceMessage::Audio { surface, packet } = envelope.message else {
+        anyhow::bail!("expected audio envelope");
+    };
+    ensure!(packet.is_valid(), "invalid outgoing audio");
+    let Some(maximum) = connection.max_datagram_size() else {
+        return Ok(());
+    };
+    let chunk_bytes = maximum
+        .saturating_sub(128)
+        .min(weld_media::audio::MAX_PACKET_BYTES)
+        / 4
+        * 4;
+    ensure!(chunk_bytes > 0, "audio datagram capacity too small");
+    for (index, samples) in packet.samples.chunks(chunk_bytes).enumerate() {
+        let message = SourceEnvelope::<EncodedBuffer> {
+            session: envelope.session,
+            message: weld_hoist_protocol::SourceMessage::Audio {
+                surface,
+                packet: weld_media::audio::AudioPacket {
+                    stream: packet.stream,
+                    timestamp_micros: packet.timestamp_micros
+                        + (index * chunk_bytes / 4) as u64 * 1_000_000 / 48_000,
+                    samples: samples.to_vec(),
+                },
+            },
+        };
+        let bytes = postcard::to_allocvec(&message)?;
+        ensure!(bytes.len() <= maximum, "audio datagram exceeds path limit");
+        if let Err(error) = connection.send_datagram(bytes.into()) {
+            tracing::debug!(%error, "dropped audio datagram");
+        }
+    }
+    Ok(())
+}
+async fn read_audio(
+    connection: &Connection,
+    incoming: &IncomingQueue<SourceEnvelope<EncodedBuffer>>,
+) -> Result<()> {
+    loop {
+        let bytes = connection.read_datagram().await?;
+        ensure!(
+            bytes.len() <= weld_media::audio::MAX_PACKET_BYTES + 128,
+            "oversized audio datagram"
+        );
+        let envelope: SourceEnvelope<EncodedBuffer> = postcard::from_bytes(&bytes)?;
+        ensure!(
+            matches!(&envelope.message, weld_hoist_protocol::SourceMessage::Audio { packet, .. } if packet.is_valid()),
+            "invalid audio datagram"
+        );
+        incoming.try_push(envelope)?;
+    }
+}
 
 #[cfg(test)]
 mod tests {

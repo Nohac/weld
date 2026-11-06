@@ -289,6 +289,7 @@ fn cancellation_retires_control_and_disconnect_expires_all_handles() {
     assert!(control.streams().expect("late completion").is_empty());
     let transport = FakeSourceTransport(Rc::new(RefCell::new(FakeSourceTransportState::default())));
     let mut port = EncodedSourcePort {
+        audio: Default::default(),
         output: SourceOutput::default(),
         transport,
         state: Some(source),

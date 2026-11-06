@@ -635,6 +635,11 @@ fn mux(
     let mut stream = output.add_stream(ffmpeg::encoder::find(codec::Id::None))?;
     stream.set_parameters(parameters);
     stream.set_time_base((1, 1_000_000));
+    let mut audio = if container == "matroska" {
+        crate::audio::AudioMux::new(clip, &mut output, validate)?
+    } else {
+        None
+    };
     output
         .write_header()
         .context("writing recording container header")?;
@@ -644,6 +649,9 @@ fn mux(
         .time_base();
     for (i, frame) in clip.frames.iter().enumerate() {
         validate()?;
+        if let Some(audio) = &mut audio {
+            audio.write_until(frame.info.time_us, &mut output, validate)?;
+        }
         let mut packet = ffmpeg::Packet::copy(&frame.unit.bytes()?);
         packet.set_stream(0);
         packet.set_pts(Some(frame.info.time_us as i64));
@@ -662,6 +670,13 @@ fn mux(
         packet
             .write_interleaved(&mut output)
             .context("writing recording packet")?;
+    }
+    if let Some(audio) = &mut audio {
+        audio.write_until(
+            u64::from(clip.info.duration_ms) * 1000,
+            &mut output,
+            validate,
+        )?;
     }
     output.write_trailer()?;
     Ok(())

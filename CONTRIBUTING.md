@@ -130,6 +130,11 @@ The current Rust bindings require the native library below 0.4; the shared
 Rust Nix shell supplies `libdisplay-info_0_3`. Reload that shell after adding
 this dependency so its headers, pkg-config metadata and runtime library are available.
 
+Application audio requires PipeWire development/runtime libraries (`libpipewire-0.3`
+and `libspa-0.2` pkg-config metadata). The shared Rust shell supplies both.
+PipeWire and WirePlumber must be running for the opt-in audio integration tests;
+those tests use private outputs and silent routing probes. See [Application audio](docs/audio.md).
+
 Hardware media work requires FFmpeg development/runtime libraries, libva
 development/runtime libraries, `libva-utils`, Clang, and bindgen. In
 particular, `libavcodec`, `libavfilter`, `libavformat`, and `libavutil` must be

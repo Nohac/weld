@@ -36,6 +36,10 @@ impl weld_hoist_core::session::pairing::ConnectionControl for LocalEncodedSource
 }
 
 impl EncodedSourceTransport for LocalEncodedSourceTransport {
+    fn audio_wake(&self) -> Option<std::sync::Arc<dyn Fn() + Send + Sync>> {
+        let connection = self.control.clone();
+        Some(std::sync::Arc::new(move || connection.notify()))
+    }
     fn try_send(
         &self,
         packet: SourceTransportPacket,

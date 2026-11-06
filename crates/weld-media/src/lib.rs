@@ -13,6 +13,7 @@ mod submit;
 #[cfg(feature = "decode")]
 pub use submit::WorkerSubmitError;
 
+pub mod audio;
 #[cfg(feature = "config")]
 mod config;
 mod frame;

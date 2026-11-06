@@ -1,6 +1,7 @@
 //! Bounded encoded recordings and off-thread inspection of retained clips.
 
 mod annotations;
+mod audio;
 pub use annotations::Gutter;
 mod engine;
 mod inspect;
@@ -10,7 +11,7 @@ pub use inspect::{
     EventAnchor, EventSelection, FrameOptions, Image, SheetOptions, Tile, Video, VideoFile, frame,
     sheet, video,
 };
-pub use storage::{EncodedFrame, Packet, Timeline};
+pub use storage::{AudioFrame, EncodedFrame, Packet, Timeline};
 
 use anyhow::{Result, ensure};
 use schemars::JsonSchema;
@@ -68,6 +69,9 @@ impl Region {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Options {
+    /// Capture the application audio, including streams shared by its other windows.
+    #[serde(default)]
+    pub include_audio: bool,
     /// Draw the controller cursor; off by default. Client-requested hiding is always respected.
     #[serde(default)]
     pub include_cursor: bool,
@@ -136,6 +140,8 @@ pub enum Status {
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 pub struct Info {
+    pub include_audio: bool,
+    pub audio_packet_count: u32,
     /// Current cursor policy; already encoded frames are unaffected by later changes.
     pub include_cursor: bool,
     pub id: String,
@@ -162,6 +168,8 @@ impl Info {
     pub fn summary(&self) -> Self {
         Self {
             include_cursor: self.include_cursor,
+            include_audio: self.include_audio,
+            audio_packet_count: self.audio_packet_count,
             id: self.id.clone(),
             status: self.status.clone(),
             duration_ms: self.duration_ms,
@@ -183,6 +191,7 @@ impl Info {
 }
 
 pub struct Clip {
+    pub audio: Vec<AudioFrame>,
     pub info: Info,
     pub frames: Vec<EncodedFrame>,
 }

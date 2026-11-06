@@ -9,6 +9,7 @@ profiling-tracy = []
 test-support = ["weld-client/test-support"]
 
 [dependencies]
+weld-audio = { path = "../weld-audio" }
 anyhow.workspace = true
 ash.workspace = true
 calloop.workspace = true

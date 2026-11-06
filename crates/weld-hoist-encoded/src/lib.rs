@@ -2,6 +2,7 @@
 
 mod activity;
 mod adapter;
+mod audio;
 mod pending_source;
 pub mod source_sessions;
 pub use adapter::{

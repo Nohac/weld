@@ -118,6 +118,13 @@ pub(crate) enum HostCommandEffect {
 }
 
 #[derive(Default)]
+struct ChildLaunchContext<'a> {
+    directory: Option<&'a Path>,
+    attributed_socket: Option<&'a OsStr>,
+    audio: Option<&'a weld_audio::PrivateOutput>,
+}
+
+#[derive(Default)]
 pub(crate) struct ChildProcesses {
     processes: Vec<Child>,
     pub(crate) environment: Vec<(OsString, OsString)>,
@@ -171,7 +178,7 @@ impl ChildProcesses {
         program: &OsStr,
         arguments: &[OsString],
     ) -> Result<()> {
-        self.spawn_at(server, program, arguments, None, None)
+        self.spawn_at(server, program, arguments, ChildLaunchContext::default())
             .map(|_| ())
     }
 
@@ -180,20 +187,19 @@ impl ChildProcesses {
         server: &ServerState,
         program: &OsStr,
         arguments: &[OsString],
-        directory: Option<&Path>,
-        attributed_socket: Option<&OsStr>,
+        launch: ChildLaunchContext<'_>,
     ) -> Result<u32> {
         let _launch_span =
             tracing::trace_span!(target: crate::PROFILE_TARGET, "host_launch_client").entered();
         let mut command = Command::new(program);
         command.args(arguments);
-        if let Some(directory) = directory {
+        if let Some(directory) = launch.directory {
             command.current_dir(directory);
         }
         configure_client_command(
             &mut command,
-            attributed_socket.unwrap_or(&server.socket_name),
-            if attributed_socket.is_some() {
+            launch.attributed_socket.unwrap_or(&server.socket_name),
+            if launch.attributed_socket.is_some() {
                 None
             } else {
                 server.x11_display()
@@ -202,6 +208,9 @@ impl ChildProcesses {
             &self.environment,
         );
         command.env("WELD_SESSION", &server.socket_name);
+        if let Some(audio) = launch.audio {
+            command.envs(audio.environment());
+        }
         let child = command
             .spawn()
             .with_context(|| format!("failed to spawn Wayland client {program:?}"))?;
