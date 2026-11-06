@@ -191,6 +191,7 @@ impl LaunchQueue {
                     directory: Some(&request.directory),
                     attributed_socket: listener.as_ref().map(|(_, (name, _))| name.as_os_str()),
                     audio: request.audio.as_ref(),
+                    launch_id: request.launch_id,
                 },
             );
             if let Some((id, (_, token))) = listener {

@@ -38,14 +38,22 @@ mod native {
             surface: ClientSurfaceId,
             metadata: &ClientSurfaceMetadata,
         ) {
-            let (Some(wake), Some(origin), Some(process)) =
-                (&self.wake, self.origin, metadata.local_process_id())
+            let (Some(wake), Some(origin)) = (&self.wake, self.origin) else {
+                return;
+            };
+            let Some(key) = metadata
+                .local_launch_id()
+                .map(Key::Launch)
+                .or_else(|| metadata.local_process_id().map(Key::Process))
             else {
                 return;
             };
-            let key = metadata
-                .local_launch_id()
-                .map_or(Key::Process(process), Key::Launch);
+            let Some(target) = weld_audio::application_target(
+                metadata.local_process_id(),
+                metadata.local_launch_id(),
+            ) else {
+                return;
+            };
             self.mappings.insert(surface, (session, key));
             if self.failed.contains(&key)
                 || self.captures.contains_key(&key)
@@ -53,11 +61,7 @@ mod native {
             {
                 return;
             }
-            match Capture::new(
-                weld_audio::application_target(process, metadata.local_launch_id()),
-                origin,
-                wake.clone(),
-            ) {
+            match Capture::new(target, origin, wake.clone()) {
                 Ok(capture) => {
                     self.captures.insert(key, capture);
                 }

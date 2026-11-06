@@ -136,3 +136,9 @@ Headless launches automatically receive a private PipeWire output. Use
 `--private-audio` for the same behavior on an ordinary attributed launch.
 See [Application audio](audio.md) for environment routing, capture, lifecycle,
 and the distinction between routing defaults and isolation.
+
+Attributed launch listeners also bridge their launch identity into audio client
+properties (`weld.launch.id`) before spawning, so audio helpers can be associated
+with their Wayland windows without walking process ancestry. Existing audio
+routing is preserved. See [Application audio](audio.md) for matching precedence
+and identifier limits.

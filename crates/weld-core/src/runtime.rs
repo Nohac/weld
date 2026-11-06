@@ -121,6 +121,7 @@ pub(crate) enum HostCommandEffect {
 struct ChildLaunchContext<'a> {
     directory: Option<&'a Path>,
     attributed_socket: Option<&'a OsStr>,
+    launch_id: Option<u64>,
     audio: Option<&'a weld_audio::PrivateOutput>,
 }
 
@@ -210,6 +211,9 @@ impl ChildProcesses {
         command.env("WELD_SESSION", &server.socket_name);
         if let Some(audio) = launch.audio {
             command.envs(audio.environment());
+        }
+        if let Some(id) = launch.launch_id {
+            weld_audio::attribute_launch(&mut command, id)?;
         }
         let child = command
             .spawn()

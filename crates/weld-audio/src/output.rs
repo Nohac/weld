@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex, OnceLock, Weak},
 };
 static OUTPUTS: OnceLock<Mutex<HashMap<u64, Weak<Output>>>> = OnceLock::new();
-use crate::worker::Worker;
+use crate::{identity::launch_tag, worker::Worker};
 use anyhow::Result;
 use pipewire::{keys, node::Node, properties::properties, spa};
 
@@ -80,15 +80,27 @@ impl PrivateOutput {
     }
 }
 pub fn output_name(launch: u64) -> String {
-    format!("weld.{}.launch.{launch:x}", std::process::id())
+    launch_tag(launch)
 }
 
-/// Resolve a host-owned launch output before falling back to process capture.
-pub fn application_target(process: u32, launch: Option<u64>) -> crate::CaptureTarget {
+/// Prefer the output owned by the Wayland launch, then its explicit audio tag.
+/// Only windows without launch attribution use exact process identity.
+/// No PID is required when the Wayland listener supplied a launch identity.
+pub fn application_target(
+    process: Option<u32>,
+    launch: Option<u64>,
+) -> Option<crate::CaptureTarget> {
     let output = launch.and_then(|id| OUTPUTS.get()?.lock().ok()?.get(&id)?.upgrade());
-    output.map_or(crate::CaptureTarget::Process(process), |output| {
-        crate::CaptureTarget::Output(output.name.clone())
-    })
+    if let Some(output) = output {
+        return Some(crate::CaptureTarget::Output(output.name.clone()));
+    }
+    launch
+        .map(|id| crate::CaptureTarget::Launch(launch_tag(id)))
+        .or_else(|| {
+            process
+                .filter(|pid| *pid > 0)
+                .map(crate::CaptureTarget::Process)
+        })
 }
 
 /// Launch defaults for an output, including a missing output when audio is unavailable.

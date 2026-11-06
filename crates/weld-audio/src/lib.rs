@@ -4,6 +4,8 @@
 //! receive bounded, owned packets independently of compositor frame delivery.
 mod capture;
 mod format;
+mod identity;
+pub use identity::{LAUNCH_PROPERTY, attribute_launch};
 mod output;
 mod playback;
 pub use playback::Playback;

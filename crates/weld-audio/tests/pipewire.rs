@@ -4,13 +4,19 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-use weld_audio::{Capture, CaptureTarget, Playback, PrivateOutput};
+use weld_audio::{
+    Capture, CaptureTarget, Playback, PrivateOutput, application_target, attribute_launch,
+};
 use weld_media::audio::AudioPacket;
 
 #[test]
 #[ignore = "requires a running PipeWire session; routes only to a private sink"]
 fn private_output_capture_and_playback() -> Result<()> {
     let output = PrivateOutput::new(0xabcdef)?;
+    assert_eq!(
+        application_target(None, Some(0xabcdef)),
+        Some(CaptureTarget::Output(output.name().into()))
+    );
     let origin = Instant::now();
     let capture = Capture::new(
         CaptureTarget::Output(output.name().into()),
@@ -141,14 +147,29 @@ fn launch_environment_routes_native_and_pulse_clients() -> Result<()> {
     file.write_all(b"data")?;
     file.write_all(&length.to_le_bytes())?;
     file.write_all(&vec![0; length as usize])?;
-    for executable in ["pw-play", "paplay"] {
-        let mut child = Command::new(executable)
+    for (index, executable) in ["pw-play", "paplay"].into_iter().enumerate() {
+        // This launch deliberately has no registered private output of its own:
+        // capture must associate the child through the inherited tag alone.
+        let launch = 0xabcdef02 + index as u64;
+        let target =
+            application_target(Some(std::process::id()), Some(launch)).expect("launch target");
+        assert!(matches!(&target, CaptureTarget::Launch(_)));
+        let capture = Capture::new(target, Instant::now(), Arc::new(|| {}))?;
+        let wrong = Capture::new(
+            application_target(None, Some(launch + 100)).expect("other launch"),
+            Instant::now(),
+            Arc::new(|| {}),
+        )?;
+        let mut command = Command::new(executable);
+        command
             .arg(file.path())
             .envs(output.environment())
-            .stdout(Stdio::null())
-            .spawn()?;
+            .stdout(Stdio::null());
+        attribute_launch(&mut command, launch)?;
+        let mut child = command.spawn()?;
         let result = (|| -> Result<()> {
             let deadline = Instant::now() + Duration::from_secs(2);
+            let mut identity_seen = Vec::new();
             while Instant::now() < deadline {
                 let dump = Command::new("pw-dump").output()?;
                 let objects: Vec<serde_json::Value> = serde_json::from_slice(&dump.stdout)?;
@@ -176,6 +197,19 @@ fn launch_environment_routes_native_and_pulse_clients() -> Result<()> {
                     })
                     .filter_map(|value| value["id"].as_u64())
                     .collect();
+                identity_seen = objects
+                    .iter()
+                    .filter(|value| {
+                        nodes.contains(&value["id"].as_u64().unwrap_or_default())
+                            || clients.contains(&value["id"].as_u64().unwrap_or_default())
+                    })
+                    .map(|value| {
+                        (
+                            value["id"].clone(),
+                            props(value)[weld_audio::LAUNCH_PROPERTY].clone(),
+                        )
+                    })
+                    .collect();
                 let links: Vec<_> = objects
                     .iter()
                     .filter(|value| {
@@ -196,11 +230,16 @@ fn launch_environment_routes_native_and_pulse_clients() -> Result<()> {
                                 .all(|link| link["info"]["input-node-id"].as_u64() == sink),
                         "{executable} was linked outside its private output"
                     );
-                    return Ok(());
+                    if !capture.drain()?.is_empty() {
+                        ensure!(wrong.drain()?.is_empty(), "unrelated launch captured audio");
+                        return Ok(());
+                    }
                 }
                 std::thread::sleep(Duration::from_millis(30));
             }
-            anyhow::bail!("{executable} did not connect to its private output")
+            anyhow::bail!(
+                "{executable} did not route and publish capturable launch-tagged audio: {identity_seen:?}"
+            )
         })();
         let _ = child.kill();
         let _ = child.wait();

@@ -1,11 +1,12 @@
 //! Resolve stream identities through node properties and their owning clients.
-use super::{
-    CaptureState, CaptureStream, CaptureTarget, Consumer, Failure, belongs_to, monotonic_ns,
-};
+use super::{CaptureState, CaptureStream, CaptureTarget, Consumer, Failure, monotonic_ns};
+use crate::identity::StreamIdentity;
 use anyhow::Result;
 use pipewire::{
+    client::ClientChangeMask,
     core::CoreRc,
     keys,
+    node::NodeChangeMask,
     proxy::{Listener as ProxyListener, ProxyT},
     registry::{Listener, RegistryRc},
     spa::utils::dict::DictRef,
@@ -34,7 +35,7 @@ struct NodeIdentity {
     serial: u64,
     name: String,
     class: String,
-    process: Option<u32>,
+    identity: StreamIdentity,
     client: Option<u32>,
 }
 struct State {
@@ -45,7 +46,7 @@ struct State {
     consumers: Arc<Mutex<Vec<Weak<Consumer>>>>,
     failure: Failure,
     nodes: HashMap<u32, NodeIdentity>,
-    clients: HashMap<u32, u32>,
+    clients: HashMap<u32, StreamIdentity>,
     captures: HashMap<u32, CaptureStream>,
 }
 impl Discovery {
@@ -89,11 +90,13 @@ impl Discovery {
                             let listener = client
                                 .add_listener_local()
                                 .info(move |info| {
-                                    if let Some(props) = info.props() {
+                                    if info.change_mask().contains(ClientChangeMask::PROPS)
+                                        && let Some(props) = info.props()
+                                    {
                                         let mut state = observed.borrow_mut();
-                                        if let Some(pid) = process_id(props) {
-                                            state.clients.insert(id, pid);
-                                        }
+                                        state
+                                            .clients
+                                            .insert(id, StreamIdentity::from_properties(props));
                                         state.reconcile();
                                     }
                                 })
@@ -118,7 +121,9 @@ impl Discovery {
                             let listener = node
                                 .add_listener_local()
                                 .info(move |info| {
-                                    if let Some(props) = info.props() {
+                                    if info.change_mask().contains(NodeChangeMask::PROPS)
+                                        && let Some(props) = info.props()
+                                    {
                                         observed.borrow_mut().update_node(id, props);
                                     }
                                 })
@@ -170,7 +175,7 @@ impl State {
         if let Some(class) = props.get(*keys::MEDIA_CLASS) {
             node.class = class.into();
         }
-        node.process = process_id(props).or(node.process);
+        node.identity = StreamIdentity::from_properties(props);
         node.client = props
             .get(*keys::CLIENT_ID)
             .and_then(|value| value.parse().ok())
@@ -181,19 +186,19 @@ impl State {
         for (id, node) in &self.nodes {
             let selected = match &self.target {
                 CaptureTarget::Output(name) => node.class == "Audio/Sink" && node.name == *name,
-                CaptureTarget::Process(root) => {
+                CaptureTarget::Process(_) | CaptureTarget::Launch(_) => {
                     node.class == "Stream/Output/Audio"
-                        && node
-                            .process
-                            .or_else(|| self.clients.get(&node.client?).copied())
-                            .is_some_and(|pid| belongs_to(pid, *root))
+                        && node.identity.belongs_to(
+                            &self.target,
+                            node.client.and_then(|id| self.clients.get(&id)),
+                        )
                 }
             };
-            if !selected
-                || node.serial == 0
-                || self.captures.contains_key(id)
-                || self.captures.len() >= 16
-            {
+            if !selected {
+                self.captures.remove(id);
+                continue;
+            }
+            if node.serial == 0 || self.captures.contains_key(id) || self.captures.len() >= 16 {
                 continue;
             }
             match CaptureStream::new(
@@ -214,10 +219,4 @@ impl State {
             }
         }
     }
-}
-fn process_id(props: &DictRef) -> Option<u32> {
-    props
-        .get(*keys::APP_PROCESS_ID)
-        .or_else(|| props.get(*keys::SEC_PID))
-        .and_then(|value| value.parse().ok())
 }

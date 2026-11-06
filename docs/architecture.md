@@ -9,6 +9,9 @@ Weld is a workspace of reusable layers and one standard distribution:
 - `weld-audio` owns native PipeWire routing, discovery, shared application capture
   subscriptions, and receiver playback on independent worker loops. Launch owners
   retain private outputs; hoist mappings and recording grants retain consumers.
+  Native launching bridges the Wayland listener identity into inherited audio
+  properties. Discovery prefers that identity and uses exact PID matches only
+  for unattributed windows, without inspecting process ancestry.
   `weld-media` supplies bounded timestamped PCM contracts. Iroh carries audio in
   independent datagrams; recording storage spools packets and export mixes them
   into a stereo track. See [Application audio](audio.md) for routing, limits,

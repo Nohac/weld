@@ -95,6 +95,10 @@ def main():
             wait_for(host, lambda: (run / "child.json").exists(), "launched child")
             child = json.loads((run / "child.json").read_text())
             assert str(child["pid"]) in output, (child, output)
+            launch_id = int(json.loads(output)["launch_id"], 16)
+            expected_audio_tag = f"weld.{host.pid}.launch.{launch_id:x}"
+            assert child["audio_launch"] == {"native": expected_audio_tag, "pulse": expected_audio_tag}, child
+            assert Path(child["environment"]["WAYLAND_DISPLAY"]).name == f"weld-run-{launch_id:08x}", child
             assert child["cwd"] == str(run), child
             assert child["argv"] == ["argument with spaces", "$(literal); untouched"], child
             assert Path(child["environment"]["WAYLAND_DISPLAY"]).parent == display.parent, child
@@ -103,7 +107,7 @@ def main():
             assert child["environment"]["WELD_SESSION"] == str(display), child
             assert "WAYLAND_SOCKET" not in child["environment"], child
             assert "DISPLAY" not in child["environment"], child
-            print("PASS exact arguments, working directory, display routing and failure recovery", flush=True)
+            print("PASS exact arguments, working directory, display/audio launch identity and failure recovery", flush=True)
             if args.nested:
                 ipc = child["environment"]["SWAYSOCK"]
                 def mapped(name):
@@ -597,6 +601,10 @@ def child():
     root = Path(__file__).resolve().parent.parent
     facts = {
         "pid": os.getpid(), "cwd": os.getcwd(), "argv": sys.argv[3:],
+        "audio_launch": {
+            "native": json.loads(os.environ.get("PIPEWIRE_PROPS", "{}")).get("weld.launch.id"),
+            "pulse": os.environ.get("PULSE_PROP_weld.launch.id"),
+        },
         "environment": {key: os.environ[key] for key in (
             "WAYLAND_DISPLAY", "WAYLAND_SOCKET", "DISPLAY", "SWAYSOCK", "I3SOCK", "WELD_SESSION",
         ) if key in os.environ},

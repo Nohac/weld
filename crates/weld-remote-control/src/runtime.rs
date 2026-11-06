@@ -1055,11 +1055,16 @@ impl ClientAdapter for Adapter {
     fn observe_event(&mut self, event: &ClientSurfaceEvent) {
         match &event.kind {
             ClientSurfaceEventKind::Metadata(metadata) => {
-                if let Some(process) = metadata.local_process_id() {
-                    self.state.borrow_mut().audio_targets.insert(
-                        event.surface,
-                        weld_audio::application_target(process, metadata.local_launch_id()),
-                    );
+                if let Some(target) = weld_audio::application_target(
+                    metadata.local_process_id(),
+                    metadata.local_launch_id(),
+                ) {
+                    self.state
+                        .borrow_mut()
+                        .audio_targets
+                        .insert(event.surface, target);
+                } else {
+                    self.state.borrow_mut().audio_targets.remove(&event.surface);
                 }
                 if metadata.x11_class().is_none() {
                     self.text_surfaces.insert(event.surface);

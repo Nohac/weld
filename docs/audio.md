@@ -46,11 +46,25 @@ paths, not `/tmp` or another tmpfs.
 
 Audio belongs to an application, not a Wayland surface. An authorized window's
 recording or stream can include sound shared with that application's other
-windows. Private attributed launches use their named output. Other applications
-are matched by native process identity and descendants, using stream properties
-and owning PipeWire client properties. Reparented/shared audio helper processes
-outside that ancestry cannot be identified automatically. Application names are
-never used as a broad capture fallback.
+windows. Matching prefers the output owned by the Wayland launch. Ordinary
+attributed launches carry the same listener launch ID in a host-qualified
+`weld.launch.id` property, inherited by native PipeWire and Pulse-compatible
+clients and their audio helpers. Weld adds it before spawning, preserves existing
+audio properties/routing, and replaces the tag for nested launches. PipeWire does
+not infer this identity from the Wayland socket: Weld explicitly bridges the two.
+
+Discovery reads the tag from the stream, or its owning client when absent on the
+stream. A conflicting stream tag takes precedence over the client's tag. Missing
+or mismatched launch tags remain unmatched; an attributed capture never broadens
+to PID matching. Private-output capture still works for applications that omit
+properties but obey their output routing.
+
+Windows without launch attribution use an exact PID match from the stream or
+its owning client. There is no `/proc` read or parent-process walk. Untagged helper
+processes with a different PID, applications reusing an existing process, and
+clients that discard the launch environment cannot be associated automatically.
+These identifiers are association hints, not process-lifetime handles or security
+credentials; names and application IDs are never broad capture fallbacks.
 
 ## Streaming
 
@@ -113,6 +127,7 @@ scripts/check-window-recording
 
 The PipeWire tests use a private output for generated tones. The launch-routing
 test plays silence with both `pw-play` and `paplay` and inspects their actual
-links. Other assertions cover PID/client discovery, fanout, timestamp progress,
+links and capture child streams by launch tag while rejecting another launch.
+Other assertions cover exact PID/client discovery, fanout, timestamp progress,
 consumer backpressure, recorded stream mixing and offsets, and audio datagram
 delivery with a zero video receive budget.

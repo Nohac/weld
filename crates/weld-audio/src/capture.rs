@@ -23,9 +23,11 @@ use std::{
 };
 use weld_media::audio::{AudioPacket, FRAME_BYTES, MAX_PACKET_BYTES, SAMPLE_RATE};
 
-/// Select an output explicitly or the streams belonging to a local process.
+/// Prefer a launch-owned output or explicit launch tag; process targets match
+/// only the exact local PID reported by a stream or its owning client.
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 pub enum CaptureTarget {
+    Launch(String),
     Output(String),
     Process(u32),
 }
@@ -201,32 +203,6 @@ impl CaptureStream {
             _stream: stream,
         })
     }
-}
-
-fn belongs_to(mut candidate: u32, root: u32) -> bool {
-    // Bounded ancestry lookup occurs only on stream discovery, never per sample.
-    for _ in 0..64 {
-        if candidate == root {
-            return true;
-        }
-        if candidate <= 1 {
-            break;
-        }
-        let Ok(status) = std::fs::read_to_string(format!("/proc/{candidate}/status")) else {
-            break;
-        };
-        let Some(parent) = status.lines().find_map(|line| {
-            line.strip_prefix("PPid:")
-                .and_then(|v| v.trim().parse::<u32>().ok())
-        }) else {
-            break;
-        };
-        if parent == candidate {
-            break;
-        }
-        candidate = parent;
-    }
-    false
 }
 
 impl CaptureState {
