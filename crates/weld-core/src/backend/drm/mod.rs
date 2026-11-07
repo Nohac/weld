@@ -11,6 +11,7 @@ use crate::host::{PreparedHost, RunOptions};
 
 mod cursor;
 mod device;
+mod gamma;
 mod host;
 mod output;
 mod presentation;

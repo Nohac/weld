@@ -31,6 +31,12 @@ page flip, pause, and activation lifecycle. Weld owns the Wayland server, Bevy
 scene, frame demand, target selection, callback payload, and the unavoidable
 wgpu Vulkan-import seam.
 
+Weld also owns per-output hardware gamma tables through
+`wlr-gamma-control-unstable-v1`. Color-only commits are serialized with output
+frame admission and leave Smithay's mode/plane state untouched. Original tables
+are saved for restoration; nested/headless hosts do not advertise the protocol.
+See [Gamma control](gamma-control.md) for Gammastep usage and validation.
+
 All connected desktop connectors with a usable CRTC and mode are enabled at
 startup. Connectors carrying the DRM `non-desktop` property are rejected. A
 stable internal-first/name ordering chooses the primary and output IDs; every
@@ -238,6 +244,6 @@ scripts/run-smithay-drm-compositor-probe
 - Partial Bevy scene damage.
 - Primary direct scanout and overlay promotion.
 - Remote-presenter, lock-surface and cursor-surface presentation feedback.
-- VRR, HDR, color management, rotation, and cross-GPU paths.
+- VRR, HDR, color management beyond output gamma tables, rotation, and cross-GPU paths.
 - EDID make/model/serial extraction; the optional `libdisplay-info` dependency
   is not enabled in the current development shell.

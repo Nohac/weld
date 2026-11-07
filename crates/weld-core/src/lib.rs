@@ -11,6 +11,7 @@ mod backend;
 pub mod benchmark;
 pub mod cursor;
 pub mod dmabuf;
+mod gamma;
 pub mod geometry;
 pub mod host;
 pub mod input;

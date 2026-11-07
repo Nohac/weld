@@ -210,6 +210,11 @@ pub(super) fn run(
         &runtime.state.data.server,
     )?;
     runtime.state.data.server.enable_session_lock();
+    runtime
+        .state
+        .data
+        .server
+        .enable_gamma_control(desktop.gamma_capabilities());
 
     let session_events = runtime.state.data.events.clone();
     runtime
@@ -510,6 +515,7 @@ impl NativeDriver<HostEvent> for DrmDriver {
                     }
                     state.data.server.apply_pending_client_work();
                     self.libinput_context.suspend();
+                    self.desktop.restore_gamma();
                     self.desktop.pause();
                 }
                 HostEvent::Session(SessionEvent::ActivateSession) => {
@@ -518,6 +524,7 @@ impl NativeDriver<HostEvent> for DrmDriver {
                         .resume()
                         .map_err(|_| anyhow!("failed to resume libinput after VT activation"))?;
                     self.desktop.activate()?;
+                    state.data.server.reapply_gamma();
                     self.presentation_schedule.activate_all();
                     self.target = SessionTarget::ActivePhysical;
                     state
@@ -610,6 +617,9 @@ impl NativeDriver<HostEvent> for DrmDriver {
             }
         }
 
+        if self.target == SessionTarget::ActivePhysical {
+            self.desktop.service_gamma(&mut state.data.server);
+        }
         Ok(())
     }
     fn client_demand(&mut self, demand: CompositionDemand) {
@@ -1026,6 +1036,9 @@ impl NativeDriver<HostEvent> for DrmDriver {
         Ok(!self.exit_requested)
     }
     fn shutdown(&mut self) {
+        if self.target == SessionTarget::ActivePhysical {
+            self.desktop.restore_gamma();
+        }
         self.desktop.pause();
     }
 }

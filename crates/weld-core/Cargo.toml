@@ -11,6 +11,8 @@ test-support = ["weld-client/test-support"]
 [dependencies]
 weld-audio = { path = "../weld-audio" }
 anyhow.workspace = true
+# Match Smithay's DRM bindings; the safe slice API creates variable-sized LUT blobs.
+drm-ffi = "=0.8.0"
 ash.workspace = true
 calloop.workspace = true
 input.workspace = true

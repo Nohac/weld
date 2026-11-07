@@ -107,6 +107,7 @@ struct PhysicalOutputState {
     id: OutputId,
     crtc: crtc::Handle,
     output: PhysicalOutput,
+    gamma: Option<super::gamma::GammaDevice>,
     composition: CompositionElement,
     cursor: CursorState,
     admission: FrameAdmission,
@@ -156,7 +157,21 @@ impl PhysicalDesktop {
                         format!("Smithay failed to initialize DRM output {:?}", selected.id)
                     })?
             };
+            let gamma = output
+                .with_compositor(|compositor| {
+                    let surface = compositor.surface();
+                    super::gamma::GammaDevice::new(
+                        surface.device_fd().clone(),
+                        surface.crtc(),
+                        surface.is_legacy(),
+                    )
+                })
+                .unwrap_or_else(|error| {
+                    tracing::warn!(output = ?selected.id, %error, "output gamma unavailable");
+                    None
+                });
             outputs.push(PhysicalOutputState {
+                gamma,
                 generation: 0,
                 feedback: None,
                 frame_interval: selected.configuration.presentation_rate().interval(),
@@ -195,6 +210,52 @@ impl PhysicalDesktop {
             render_state,
             outputs,
         })
+    }
+
+    pub(super) fn gamma_capabilities(&self) -> Vec<(OutputId, u32)> {
+        self.outputs
+            .iter()
+            .filter_map(|output| output.gamma.as_ref().map(|gamma| (output.id, gamma.size())))
+            .collect()
+    }
+
+    pub(super) fn service_gamma(&mut self, server: &mut ServerState) {
+        for output in &mut self.outputs {
+            if !output.available {
+                server.remove_gamma_output(output.id);
+                if let Some(gamma) = output.gamma.take()
+                    && let Err(error) = gamma.apply(None)
+                {
+                    tracing::warn!(output = ?output.id, %error, "could not restore unavailable output gamma");
+                }
+                continue;
+            }
+            if !output.admission.is_idle() {
+                continue;
+            }
+            let Some(gamma) = &output.gamma else {
+                continue;
+            };
+            if let Err(error) = server.service_gamma(output.id, |ramp| gamma.apply(ramp)) {
+                tracing::warn!(output = ?output.id, %error, "output gamma control failed");
+                if let Err(error) = gamma.apply(None) {
+                    tracing::warn!(%error, "could not restore output gamma after failure");
+                }
+                output.gamma = None;
+            }
+        }
+    }
+
+    /// Called before releasing the DRM device; the protocol retains its desired
+    /// table separately for reapplication on the next activation.
+    pub(super) fn restore_gamma(&self) {
+        for output in &self.outputs {
+            if let Some(gamma) = &output.gamma
+                && let Err(error) = gamma.apply(None)
+            {
+                tracing::warn!(output = ?output.id, %error, "could not restore original output gamma");
+            }
+        }
     }
 
     pub(super) fn request_all_compositions(&mut self) {

@@ -205,6 +205,11 @@ Weld is a workspace of reusable layers and one standard distribution:
   Lock subsurfaces share ordinary surface-tree import and callback handling;
   authenticated remote hoists retain their independent input and presentation.
   See [Session locking](drm-presentation.md#session-locking).
+  Its gamma-control protocol owns exclusive per-output controllers and validated
+  tables. Only the physical DRM host advertises it; the DRM adapter owns the
+  original hardware tables and applies changes between output frame commits.
+  Gamma changes do not enter Bevy or captured content. See
+  [Gamma control](gamma-control.md).
 - `weld-app` owns the Bevy application and render bridge, the plugin-facing
   application model, input projection, surface entities, and composition into
   a core-owned texture. Plugin APIs use Weld and Bevy types rather than

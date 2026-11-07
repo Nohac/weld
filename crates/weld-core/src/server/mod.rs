@@ -6,6 +6,7 @@ mod capture;
 mod cursor;
 mod dmabuf;
 mod file_drag;
+mod gamma;
 mod input_admission;
 mod input_seat;
 mod keyboard;
@@ -112,6 +113,7 @@ pub struct ServerState {
     pub socket_name: OsString,
     compositor_state: CompositorState,
     capture: capture::OutputCapture,
+    gamma: gamma::GammaControl,
     _presentation_time: smithay::wayland::presentation::PresentationState,
     session_lock: session_lock::SessionLock,
     file_drag: file_drag::FileDragState,
@@ -388,6 +390,7 @@ impl ServerState {
             layers: layer::LayerStore::default(),
             pending_work_areas: HashMap::new(),
             workspaces: workspace::WorkspaceProtocol::default(),
+            gamma: gamma::GammaControl::default(),
             _xdg_decoration_state: xdg_decoration_state,
             _cursor_shape_manager_state: cursor_shape_manager_state,
             _pointer_gestures_state: pointer_gestures_state,

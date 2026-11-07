@@ -8,6 +8,8 @@ mod clipboard_tests;
 mod cursor_tests;
 #[path = "file_drag_tests.rs"]
 mod file_drag_tests;
+#[path = "gamma_tests.rs"]
+mod gamma_tests;
 #[path = "input_binding_tests.rs"]
 mod input_binding_tests;
 #[path = "input_seat_tests.rs"]
@@ -69,6 +71,7 @@ struct ObservedSurface {
 
 #[derive(Default)]
 struct Observer {
+    gamma: gamma_tests::Probe,
     constraints: pointer_constraints_tests::Probe,
     presentation: presentation_time_tests::Probe,
     lock: session_lock_tests::Probe,
@@ -111,6 +114,9 @@ impl Dispatch<wl_registry::WlRegistry, ()> for Observer {
         } = event
         {
             match interface.as_str() {
+                "zwlr_gamma_control_manager_v1" => {
+                    state.gamma.manager = Some(registry.bind(name, 1, qh, ()))
+                }
                 "zwp_pointer_constraints_v1" => {
                     state.constraints.manager = Some(registry.bind(name, 1, qh, ()));
                 }
@@ -318,6 +324,10 @@ impl Fixture {
     }
 
     fn with_session_lock(enable: bool) -> Self {
+        Self::with_protocols(enable, false)
+    }
+
+    fn with_protocols(enable: bool, gamma: bool) -> Self {
         let event_loop = EventLoop::try_new().expect("event loop");
         let (_, receiver) = channel::channel();
         let display = Display::new().expect("display");
@@ -360,6 +370,9 @@ impl Fixture {
         .expect("server");
         if enable {
             server.enable_session_lock();
+        }
+        if gamma {
+            server.enable_gamma_control([(OutputId::new(1), 4), (OutputId::new(2), 8)]);
         }
         let (server_socket, client_socket) = UnixStream::pair().expect("socket pair");
         let client = handle

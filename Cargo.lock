@@ -9744,6 +9744,7 @@ dependencies = [
  "ash",
  "calloop 0.14.4",
  "clap",
+ "drm-ffi 0.8.0",
  "input",
  "png",
  "pollster",
