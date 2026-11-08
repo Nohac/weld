@@ -16,6 +16,7 @@ def main():
     parser.add_argument("--visible", action="store_true", help="explicitly run on the current desktop")
     parser.add_argument("--portal", action="store_true", help="also check a private portal session (requires PyGObject and WELD_TEST_PORTAL_FRONTEND/BACKEND)")
     parser.add_argument("--kooha", action="store_true", help="also record a short video with installed Kooha in the private portal session")
+    parser.add_argument("--kooha-region", action="store_true", help="exercise Kooha's region selection and cropped recording")
     options = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     subprocess.run(["cargo", "build", "--locked", "-p", "weldwm", "--bins"], cwd=root, check=True)
@@ -96,8 +97,8 @@ def main():
                 subprocess.run([probe, "--frames", "4", "--compare"], env=client_env, check=True, timeout=20)
                 (run / "measurements.json").write_text(json.dumps(observations, indent=2) + "\n")
                 print("PASS DMA-BUF reuse, cursor capture, and capture after disconnect", flush=True)
-                if options.portal or options.kooha:
-                    portal = subprocess.Popen(["dbus-run-session", "--", os.environ.get("WELD_TEST_PORTAL_PYTHON", "python3"), str(root / "scripts/probe-screencast-portal"), str(run), *(["--kooha"] if options.kooha else [])], env=client_env, start_new_session=True)
+                if options.portal or options.kooha or options.kooha_region:
+                    portal = subprocess.Popen(["dbus-run-session", "--", os.environ.get("WELD_TEST_PORTAL_PYTHON", "python3"), str(root / "scripts/probe-screencast-portal"), str(run), *(["--kooha"] if options.kooha or options.kooha_region else []), *(["--region"] if options.kooha_region else [])], env=client_env, start_new_session=True)
                     children.append(portal)
                     if portal.wait(timeout=65) != 0:
                         raise RuntimeError("private portal capture failed")

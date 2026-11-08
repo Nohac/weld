@@ -1,2 +1,4 @@
 # Preserve the locked third-party skill package verbatim, including Markdown breaks.
 /.agents/skills/rust-skills/** whitespace=-trailing-space
+# Unified diff context prefixes precede upstream C indentation.
+/scripts/portal-patches/*.patch whitespace=-space-before-tab

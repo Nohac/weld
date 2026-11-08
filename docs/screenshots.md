@@ -139,7 +139,12 @@ The existing PipeWire server transports the test stream. Live portal services
 and their settings remain untouched.
 `--kooha` additionally starts the installed application with private settings,
 records through its normal window action, and checks the resulting WebM with
-FFprobe. Recordings stay in the validation directory.
+FFprobe. `--kooha-region` instead exercises the region preview, drags a selection,
+presses Done, and verifies that preview shutdown and cropped recording complete.
+Both check motion in decoded frames after the first two seconds, and save a CPU
+sample. The recorder uses its packaged media libraries instead of inheriting the
+development shell's GStreamer plugin/library paths. Recordings stay in the
+validation directory.
 
 Verified on 2026-11-08 with the AMD render node, headless Weston 16, portal-wlr
 0.8.4, portal 1.22.1, and PipeWire 1.6.9:
@@ -162,7 +167,8 @@ Verified on 2026-11-08 with the AMD render node, headless Weston 16, portal-wlr
   frames. An animated terminal and decoded frame hashes after the first two
   seconds verify motion, not merely repeated frames. This passed with both the
   installed portal-wlr 0.8.4 and an isolated upstream 0.8.5 build; no backend
-  upgrade is required. Kooha's default software VP8 profile negotiated SHM.
+  upgrade was needed for that whole-output test. The region workflow has
+  additional failures described below. Kooha's default software VP8 profile negotiated SHM.
   DMA-BUF delivery is separately verified by the portal consumer above.
 
 Logs and measurements are written under `target/validation/output-capture-*`.
@@ -178,3 +184,55 @@ warning was reproduced with the previously installed `0fa1be8e` build in a
 headless parent, before any capture requests. The swapchain-free render-node
 regression above isolates capture synchronization from that presentation issue;
 the full nested Vulkan validation run is not recorded as clean.
+
+
+## Kooha region preview failures
+
+On 2026-11-08, Kooha 2.3.1 region capture exposed a portal-wlr buffer ownership
+race, reproduced with both 0.8.4 and unmodified 0.8.5. During the initial
+STREAMING → PAUSED → STREAMING transitions, the backend returned an unfinished
+buffer with timestamp zero, then acquired a different buffer before the old
+Wayland capture completed. That completion consequently queued the wrong
+buffer. GStreamer then received timestamps separated by approximately 14 hours
+(the host uptime), and its source thread waited in `gst_clock_id_wait` while
+preview remained at Loading. Increasing the buffer pool does not fix ownership.
+
+The local compatibility patch
+[`keep-ext-capture-buffer-on-pause.patch`](../scripts/portal-patches/keep-ext-capture-buffer-on-pause.patch)
+retains the ext-image-copy buffer across pause/resume until its existing capture
+completes. It preserves the older wlr-screencopy path. It applies to 0.8.4 and
+0.8.5. This is an external backend patch, not a change to Weld or a claim that
+upstream has accepted the fix. Build a patched backend and pass its executable
+via `WELD_TEST_PORTAL_BACKEND` to the headless test. For a Nix package override:
+
+```nix
+pkgs.xdg-desktop-portal-wlr.overrideAttrs (old: {
+  patches = (old.patches or []) ++ [
+    /path/to/weld/scripts/portal-patches/keep-ext-capture-buffer-on-pause.patch
+  ];
+})
+```
+
+Patched 0.8.4 and 0.8.5 completed the headless selection-to-recording workflow,
+producing cropped, decodable videos with changing pixels. These package builds
+and tests do not replace or restart the installed desktop portal service.
+
+A separate live observation captured the reported sustained 100% CPU after
+selection: Kooha PID 117773's `pipewiresrc0:sr` thread consumed 2.00 CPU-seconds
+in a two-second sample. Its stack was `gst_video_rate_transform_ip` →
+`gst_video_rate_swap_prev` → `gst_video_rate_flush_prev` → buffer copying.
+The UI thread waited in `gst_base_transform_activate` while shutting down the
+preview pipeline. GStreamer 1.28.7's duplication loop in `swap_prev` ignores
+flush errors. This establishes where the live CPU and UI stall occur, but the
+live frame timestamps were not captured. The link between that loop and the
+portal race remains to be verified on the physical session; passing nested
+tests alone does not establish that the live 100% CPU symptom is fixed.
+
+Evidence is retained in `target/validation/kooha-live-{cpu.json,stacks.log}`;
+`output-capture-q7x4yyk1` and `output-capture-ez042w2s` show the unpatched
+preview stall; `output-capture-n4na86io` and `output-capture-ok92bk5f` contain
+passing cropped recordings from patched 0.8.5 and 0.8.4 respectively.
+The final installed-library regression `output-capture-31zu6qyl` produced a
+606×396 video with 124 decoded frames. `output-capture-i5d_5hmv` additionally
+passed the 90-frame DMA-BUF portal test with no corrupted buffers and the
+whole-output Kooha motion check using patched 0.8.4.

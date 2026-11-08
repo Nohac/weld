@@ -1,0 +1,23 @@
+--- a/src/screencast/pipewire_screencast.c
++++ b/src/screencast/pipewire_screencast.c
+@@ -365,11 +365,19 @@
+ 	switch (state) {
+ 	case PW_STREAM_STATE_STREAMING:
+ 		cast->pwr_stream_state = true;
++		// An ext capture can still own its buffer across a pause/resume.
++		if (cast->current_frame.pw_buffer) {
++			break;
++		}
+ 		xdpw_pwr_dequeue_buffer(cast);
+ 		xdpw_wlr_frame_capture(cast);
+ 		break;
+ 	case PW_STREAM_STATE_PAUSED:
+-		if (old == PW_STREAM_STATE_STREAMING && cast->current_frame.pw_buffer) {
++		// ext-image-copy completion owns this buffer until ready/failed.
++		// Returning it here lets the consumer read unfinished pixels and
++		// an unset timestamp; resuming can also replace it before ready.
++		if (old == PW_STREAM_STATE_STREAMING && cast->current_frame.pw_buffer
++				&& !cast->ext_session.capture_session) {
+ 			xdpw_pwr_enqueue_buffer(cast);
+ 		}
+ 		// fall through
