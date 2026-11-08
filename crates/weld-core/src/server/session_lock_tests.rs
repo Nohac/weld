@@ -74,7 +74,7 @@ fn session_lock_confirms_after_all_outputs_and_isolates_input_until_unlock() {
     capture_source
         .user_data()
         .insert_if_missing(|| OutputId::new(1));
-    f.server.enable_output_capture();
+    f.server.enable_capture();
     assert!(
         smithay::wayland::image_copy_capture::ImageCopyCaptureHandler::capture_constraints(
             &mut f.server,

@@ -29,6 +29,7 @@ pub(crate) struct GpuCapture {
     cursor_blitter: CompositionBlitter,
     jobs: SyncSender<Completion>,
     active: Arc<AtomicUsize>,
+    format: wgpu::TextureFormat,
 }
 pub(crate) struct GpuCaptureTask(Receiver<Result<(), String>>);
 struct Completion {
@@ -52,6 +53,15 @@ impl GpuCapture {
         queue: &wgpu::Queue,
         wake: ClientRuntimeNotifier,
     ) -> Result<Self> {
+        Self::with_format(device, queue, wake, wgpu::TextureFormat::Bgra8UnormSrgb)
+    }
+
+    pub(crate) fn with_format(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        wake: ClientRuntimeNotifier,
+        format: wgpu::TextureFormat,
+    ) -> Result<Self> {
         let (jobs, receiver) = mpsc::sync_channel::<Completion>(MAX_IN_FLIGHT);
         thread::Builder::new()
             .name("weld-capture-gpu".into())
@@ -74,14 +84,12 @@ impl GpuCapture {
             })
             .context("starting GPU capture completion worker")?;
         Ok(Self {
+            format,
             device: device.clone(),
             queue: queue.clone(),
             imports: HashMap::new(),
-            blitter: CompositionBlitter::new(device, wgpu::TextureFormat::Bgra8UnormSrgb),
-            cursor_blitter: CompositionBlitter::straight_alpha(
-                device,
-                wgpu::TextureFormat::Bgra8UnormSrgb,
-            ),
+            blitter: CompositionBlitter::new(device, format),
+            cursor_blitter: CompositionBlitter::straight_alpha(device, format),
             jobs,
             active: Arc::new(AtomicUsize::new(0)),
         })
@@ -101,6 +109,27 @@ impl GpuCapture {
             &mut wgpu::CommandEncoder,
         ) -> Result<()>,
     ) -> Result<GpuCaptureTask> {
+        let device = self.device.clone();
+        self.submit_render(buffer, None, None, |blitter, cursor, target, encoder| {
+            let binding = blitter.create_bind_group(&device, "capture composition", source);
+            blitter.encode(encoder, "output capture copy", target, &binding);
+            overlay(cursor, target, encoder)
+        })
+    }
+
+    /// Sources and destination acquire/release on the same queue submission.
+    pub(crate) fn submit_render(
+        &mut self,
+        buffer: &Dmabuf,
+        before: Option<wgpu::CommandBuffer>,
+        after: Option<wgpu::CommandBuffer>,
+        render: impl FnOnce(
+            &CompositionBlitter,
+            &CompositionBlitter,
+            &wgpu::TextureView,
+            &mut wgpu::CommandEncoder,
+        ) -> Result<()>,
+    ) -> Result<GpuCaptureTask> {
         let reserved = self
             .active
             .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
@@ -112,24 +141,26 @@ impl GpuCapture {
         let key = buffer.weak();
         if !self.imports.contains_key(&key) {
             ensure!(self.imports.len() < 64, "capture import cache is full");
-            self.imports
-                .insert(key.clone(), import_capture_target(&self.device, buffer)?);
+            self.imports.insert(
+                key.clone(),
+                import_capture_target(&self.device, buffer, self.format)?,
+            );
         }
         let target = self
             .imports
             .get(&key)
             .context("capture import disappeared")?;
-        let binding = self
-            .blitter
-            .create_bind_group(&self.device, "capture composition", source);
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("output DMA-BUF capture"),
+                label: Some("DMA-BUF image capture"),
             });
-        self.blitter
-            .encode(&mut encoder, "output capture copy", &target.view, &binding);
-        overlay(&self.cursor_blitter, &target.view, &mut encoder)?;
+        render(
+            &self.blitter,
+            &self.cursor_blitter,
+            &target.view,
+            &mut encoder,
+        )?;
         // SAFETY: the imported image and raw device belong to this wgpu device.
         // The completion job retains the allocation through acquire/draw/release.
         // The host has waited for foreign readers before calling submit.
@@ -157,7 +188,12 @@ impl GpuCapture {
                 )?,
             )
         };
-        let submission = self.queue.submit([acquire, encoder.finish(), release]);
+        let submission = self.queue.submit(
+            before
+                .into_iter()
+                .chain([acquire, encoder.finish(), release])
+                .chain(after),
+        );
         let (done, result) = mpsc::sync_channel(1);
         let work = Completion {
             device: self.device.clone(),

@@ -23,8 +23,10 @@ mod presenter;
 mod startup;
 mod surface;
 mod text;
+mod view;
 pub use composition::{ComposedBuffer, CompositionCursor, CompositionLayer};
 pub use startup::{InitialPresentation, WindowPreference};
+pub use view::{SourceViews, ViewTarget};
 mod touch;
 #[cfg(feature = "serde")]
 mod wire;

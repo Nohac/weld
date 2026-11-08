@@ -22,8 +22,8 @@ use std::{
 
 use anyhow::{Context, Result};
 use weld_client::{
-    ClientBufferUseId, ClientEventQueue, ClientRuntime, ClientRuntimeEffectError,
-    ClientRuntimeEventError,
+    ClientBufferUseId, ClientEventQueue, ClientEventSink, ClientRuntime, ClientRuntimeEffectError,
+    ClientRuntimeEventError, ClientSurfaceEvent,
 };
 
 use crate::{cursor::CursorConfiguration, server::ServerState};
@@ -68,6 +68,17 @@ impl<Event> BackendEvents<Event> {
     }
 }
 
+struct CaptureEventSink<'a> {
+    server: &'a mut ServerState,
+    events: &'a mut ClientEventQueue,
+}
+impl ClientEventSink for CaptureEventSink<'_> {
+    fn push_event(&mut self, event: ClientSurfaceEvent) {
+        self.server.observe_capture_event(&event);
+        self.events.push(event);
+    }
+}
+
 /// Preserve completion-before-ingress and input-before-resize ordering across
 /// native hosts. Remote effects are serviced here, outside composition pacing.
 pub(crate) fn service_client_adapters(
@@ -83,7 +94,7 @@ pub(crate) fn service_client_adapters(
         complete_uses(&completed);
     }
     server.flush_cursor_feedback();
-    clients.drain_events(events, invalid_events);
+    clients.drain_events(&mut CaptureEventSink { server, events }, invalid_events);
     for invalid in invalid_events.drain(..) {
         tracing::warn!(%invalid, "client adapter published an invalid event");
     }

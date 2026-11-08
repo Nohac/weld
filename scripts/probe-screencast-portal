@@ -8,6 +8,7 @@ import base64
 import json
 import os
 import shutil
+import shlex
 from pathlib import Path
 import subprocess
 import sys
@@ -25,7 +26,12 @@ def main():
     (config / "xdg-desktop-portal").mkdir(parents=True, exist_ok=True)
     (config / "xdg-desktop-portal/portals.conf").write_text("[preferred]\ndefault=wlr\norg.freedesktop.impl.portal.ScreenCast=wlr\n")
     backend_config = config / "wlr.ini"
-    backend_config.write_text("[screencast]\nchooser_type=none\noutput_name=weld-nested\nmax_fps=60\n")
+    if "--window" in sys.argv:
+        chooser = run / "choose-window.py"
+        chooser.write_text("import sys\nrows=sys.stdin.read().splitlines()\nfor title in ['Animated capture validation', 'Capture validation']:\n    matches=[row for row in rows if row.startswith('Window: '+title+' (')]\n    if matches:\n        print(matches[0]);break\n")
+        backend_config.write_text("[screencast]\nchooser_type=dmenu\nchooser_cmd=" + shlex.join([sys.executable, str(chooser)]) + "\nmax_fps=60\n")
+    else:
+        backend_config.write_text("[screencast]\nchooser_type=none\noutput_name=weld-nested\nmax_fps=60\n")
     env = dict(os.environ, XDG_CONFIG_HOME=str(config), XDG_CURRENT_DESKTOP="WeldCaptureTest")
     children = []
     connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
@@ -79,8 +85,10 @@ def main():
 
         if "--region" not in sys.argv:
             session = request("CreateSession", GLib.Variant("(a{sv})", ({"session_handle_token": GLib.Variant("s", "capturetest")},)))["session_handle"]
-            request("SelectSources", GLib.Variant("(oa{sv})", (session, {"types": GLib.Variant("u", 1), "cursor_mode": GLib.Variant("u", 2)})))
+            request("SelectSources", GLib.Variant("(oa{sv})", (session, {"types": GLib.Variant("u", 2 if "--window" in sys.argv else 1), "cursor_mode": GLib.Variant("u", 2)})))
             streams = request("Start", GLib.Variant("(osa{sv})", (session, "", {})))["streams"]
+            if "--window" in sys.argv and streams[0][1].get("source_type") != 2:
+                raise RuntimeError("Portal returned an output instead of a window: " + str(streams))
             result, descriptors = connection.call_with_unix_fd_list_sync(destination, path, interface, "OpenPipeWireRemote", GLib.Variant("(oa{sv})", (session, {})), None, Gio.DBusCallFlags.NONE, 5000, None, None)
             descriptor = descriptors.get(result.unpack()[0])
             Gst.init(None)
@@ -116,6 +124,8 @@ def main():
             if not kooha:
                 raise RuntimeError("Kooha is not installed")
             app_env = dict(env, GSETTINGS_BACKEND="keyfile", GDK_BACKEND="wayland", RUST_LOG="kooha=debug", GST_DEBUG=os.environ.get("WELD_TEST_GST_DEBUG", "2"), GST_DEBUG_DUMP_DOT_DIR=str(run))
+            if "--window" in sys.argv:
+                app_env["KOOHA_EXPERIMENTAL"] = "window-recording"
             # Exercise the installed recorder's media libraries, not the Rust
             # development shell's GStreamer plugins and shared libraries.
             for key in list(app_env):
@@ -133,9 +143,14 @@ def main():
                 kooha_process = subprocess.Popen([kooha], env=app_env, stdout=log, stderr=subprocess.STDOUT)
                 children.append(kooha_process)
             wait_owner(app_id)
-            with (run / "animation.log").open("w") as log:
-                children.append(subprocess.Popen(["foot", "--title=Animated capture validation", "sh", "-c", "while :; do printf '\033[41m\033[2J\033[HRED'; sleep 0.2; printf '\033[44m\033[2J\033[HBLUE'; sleep 0.2; done"], env=app_env, stdout=log, stderr=subprocess.STDOUT))
             weldctl = str(Path(__file__).resolve().parent.parent / "target/debug/weldctl")
+            animation = ["foot", "--title=Animated capture validation", sys.executable, "-c", "import time; [(print('\\033[41m\\033[2J\\033[HRED' if i%2 else '\\033[44m\\033[2J\\033[HBLUE',flush=True),time.sleep(.2)) for i in range(150)]"]
+            if "--window" in sys.argv:
+                launched = subprocess.check_output([weldctl, "--session", env["WAYLAND_DISPLAY"], "run", "--workspace", "capture-hidden", "--owner", "capture-test", "--", *animation], env=app_env, text=True, timeout=10)
+                (run / "hidden-launch.json").write_text(launched)
+            else:
+                with (run / "animation.log").open("w") as log:
+                    children.append(subprocess.Popen(animation, env=app_env, stdout=log, stderr=subprocess.STDOUT))
             def control(*args):
                 return json.loads(subprocess.check_output([weldctl, "--session", env["WAYLAND_DISPLAY"], "window", *args, "--json"], env=app_env, text=True, timeout=5))
             deadline = time.monotonic() + 10
@@ -155,7 +170,24 @@ def main():
                         return window["control"]
                     time.sleep(0.05)
                 raise RuntimeError("Test window did not acquire control")
+            if "--window" in sys.argv:
+                deadline = time.monotonic() + 10
+                while True:
+                    catalogue = control("list")
+                    hidden = [item for item in catalogue["windows"] if item.get("title") == "Animated capture validation"]
+                    if hidden:
+                        if hidden[0]["visible"]:
+                            raise RuntimeError("Window capture fixture must remain on an inactive workspace")
+                        (run / "hidden-window.json").write_text(json.dumps(hidden[0], indent=2))
+                        break
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("Hidden capture target did not map")
+                    time.sleep(0.1)
             target = acquire_control(windows[0]["id"])
+            if "--window" in sys.argv:
+                time.sleep(0.5)
+                probe = str(Path(__file__).resolve().parent.parent / "target/debug/examples/output_capture_probe")
+                subprocess.run([probe, "--window-title", "Kooha", "--compare", "--frames", "4"], env=env, check=True, timeout=15)
             def toggle():
                 control("input", "--params-json", json.dumps({"control": target, "actions": [["p", ["Control_L", "r"], 30]]}))
             toggle()

@@ -31,6 +31,7 @@ const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Bgra8Unorm;
 
 mod capture;
 mod cursor;
+pub(crate) mod image_capture;
 pub use capture::{SourceCapture, SourceCaptureTask};
 
 struct Target {

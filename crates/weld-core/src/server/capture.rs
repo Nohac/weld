@@ -1,4 +1,4 @@
-//! Output capture sessions, bounded readback requests, and client SHM delivery.
+//! Output and window image-copy sessions, bounded GPU work, and SHM delivery.
 
 use calloop::{Interest, LoopHandle, RegistrationToken};
 use std::{
@@ -43,18 +43,42 @@ use crate::{
         capture_task::{CaptureTask, CaptureWorker},
         read_owned_frame_async,
     },
-    surface::Extent,
+    surface::{Extent, SurfaceId},
 };
 
 mod cursor;
+mod window;
 use cursor::CaptureCursor;
 
 const MAX_SESSIONS: usize = 64;
 const MAX_FRAMES: usize = 8;
 const FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 
-pub(super) struct OutputCapture {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CaptureTarget {
+    Output(OutputId),
+    Window(SurfaceId),
+}
+impl CaptureTarget {
+    fn of(source: &ImageCaptureSource) -> Option<Self> {
+        source
+            .user_data()
+            .get::<OutputId>()
+            .copied()
+            .map(Self::Output)
+            .or_else(|| {
+                source
+                    .user_data()
+                    .get::<SurfaceId>()
+                    .copied()
+                    .map(Self::Window)
+            })
+    }
+}
+
+pub(super) struct ImageCaptures {
     sources: OutputCaptureSourceState,
+    windows: window::WindowSources,
     copies: ImageCopyCaptureState,
     enabled: bool,
     sessions: Vec<Session>,
@@ -66,7 +90,7 @@ pub(super) struct OutputCapture {
 }
 
 struct PendingFrame {
-    output: OutputId,
+    target: CaptureTarget,
     session: SessionRef,
     frame: Frame,
     extent: Extent,
@@ -95,7 +119,7 @@ enum FrameWork {
     Failed(CaptureFailureReason),
 }
 
-impl OutputCapture {
+impl ImageCaptures {
     pub(super) fn new(
         display: &DisplayHandle,
         loop_handle: LoopHandle<'static, ServerState>,
@@ -123,6 +147,7 @@ impl OutputCapture {
         });
         Self {
             sources: OutputCaptureSourceState::new::<ServerState>(display),
+            windows: window::WindowSources::new(display, capabilities),
             copies: ImageCopyCaptureState::new::<ServerState>(display),
             enabled: false,
             sessions: Vec::new(),
@@ -158,10 +183,29 @@ impl ImageCopyCaptureHandler for ServerState {
         if !self.capture.enabled || self.session_locked() {
             return None;
         }
-        let id = source.user_data().get::<OutputId>()?;
-        let output = self.outputs.get(id)?;
+        let size = match CaptureTarget::of(source)? {
+            CaptureTarget::Output(id) => {
+                let size = self.outputs.get(&id)?.metrics.mode().size;
+                (size.w, size.h).into()
+            }
+            CaptureTarget::Window(id) => {
+                if source
+                    .user_data()
+                    .get::<smithay::wayland::foreign_toplevel_list::ForeignToplevelHandle>()
+                    .is_none_or(|handle| handle.is_closed())
+                {
+                    return None;
+                }
+                let extent = self.capture.windows.extent(id)?;
+                (
+                    i32::try_from(extent.width).ok()?,
+                    i32::try_from(extent.height).ok()?,
+                )
+                    .into()
+            }
+        };
         Some(BufferConstraints {
-            size: (output.metrics.mode().size.w, output.metrics.mode().size.h).into(),
+            size,
             shm: vec![wl_shm::Format::Xrgb8888],
             dma: self.capture.dma.clone(),
         })
@@ -170,6 +214,7 @@ impl ImageCopyCaptureHandler for ServerState {
     fn new_session(&mut self, session: Session) {
         if self.capture.sessions.len() < MAX_SESSIONS {
             self.capture.sessions.push(session);
+            self.refresh_capture_demand();
         } else {
             session.stop();
         }
@@ -181,7 +226,7 @@ impl ImageCopyCaptureHandler for ServerState {
             frame.fail(CaptureFailureReason::Stopped);
             return;
         };
-        let Some(&output) = source.user_data().get::<OutputId>() else {
+        let Some(target) = CaptureTarget::of(&source) else {
             frame.fail(CaptureFailureReason::Stopped);
             return;
         };
@@ -248,7 +293,7 @@ impl ImageCopyCaptureHandler for ServerState {
             None
         };
         self.capture.pending.push(PendingFrame {
-            output,
+            target,
             session: session.clone(),
             frame,
             extent: Extent::new(width, height),
@@ -258,12 +303,14 @@ impl ImageCopyCaptureHandler for ServerState {
             cursor: None,
             writable,
         });
+        self.refresh_capture_demand();
     }
 
     fn frame_aborted(&mut self, frame: FrameRef) {
         self.capture
             .pending
             .retain(|pending| pending.frame != frame);
+        self.refresh_capture_demand();
     }
 
     fn session_destroyed(&mut self, session: SessionRef) {
@@ -272,11 +319,12 @@ impl ImageCopyCaptureHandler for ServerState {
             .retain(|pending| pending.session != session);
         self.capture.sessions.retain(|owned| *owned != session);
         self.capture.copies.cleanup();
+        self.refresh_capture_demand();
     }
 }
 
 impl ServerState {
-    pub(super) fn stop_output_captures(&mut self) {
+    pub(super) fn stop_captures(&mut self) {
         for pending in self.capture.pending.drain(..) {
             pending.frame.fail(CaptureFailureReason::Stopped);
         }
@@ -284,26 +332,30 @@ impl ServerState {
             session.stop();
         }
         self.capture.cached.clear();
+        self.refresh_capture_demand();
     }
-    pub(crate) fn enable_output_capture(&mut self) {
+    pub(crate) fn enable_capture(&mut self) {
         self.capture.enabled = true;
     }
 
     pub(crate) fn output_capture_requested(&self) -> bool {
-        self.capture
-            .pending
-            .iter()
-            .any(|pending| matches!(pending.work, FrameWork::Waiting))
+        self.capture.pending.iter().any(|pending| {
+            matches!(pending.target, CaptureTarget::Output(_))
+                && matches!(pending.work, FrameWork::Waiting)
+        })
     }
 
     /// Only the first request without a current snapshot needs composition.
     pub(crate) fn output_capture_needs_composition(&self) -> bool {
         self.capture.pending.iter().any(|pending| {
+            let CaptureTarget::Output(output) = pending.target else {
+                return false;
+            };
             matches!(pending.work, FrameWork::Waiting)
                 && self
                     .capture
                     .cached
-                    .get(&pending.output)
+                    .get(&output)
                     .is_none_or(|frame| frame.target().extent() != pending.extent)
         })
     }
@@ -321,7 +373,7 @@ impl ServerState {
         self.capture.cached = cached;
     }
 
-    pub(crate) fn output_capture_timeout(&self, now: Instant) -> Option<Duration> {
+    pub(crate) fn capture_timeout(&self, now: Instant) -> Option<Duration> {
         self.capture
             .pending
             .iter()
@@ -378,7 +430,7 @@ impl ServerState {
         }
         let sampled_at = Clock::<Monotonic>::new().now().into();
         let draw_cursor = self.capture.pending.iter().any(|pending| {
-            pending.output == output
+            pending.target == CaptureTarget::Output(output)
                 && matches!(pending.work, FrameWork::Waiting)
                 && pending.session.draw_cursor()
         });
@@ -388,7 +440,7 @@ impl ServerState {
             Ok(None)
         };
         for pending in &mut self.capture.pending {
-            if pending.output != output
+            if pending.target != CaptureTarget::Output(output)
                 || !matches!(pending.work, FrameWork::Waiting)
                 || pending.frame.has_failed()
                 || pending
@@ -457,7 +509,7 @@ impl ServerState {
         }
     }
 
-    pub(crate) fn poll_output_captures(&mut self) {
+    pub(crate) fn poll_captures(&mut self) {
         let now = Instant::now();
         let mut index = 0;
         while index < self.capture.pending.len() {
@@ -556,10 +608,16 @@ impl ServerState {
                 {
                     session.update_constraints(constraints);
                 }
-            } else {
-                self.capture.sessions.retain(|owned| *owned != session);
+            } else if let Some(index) = self
+                .capture
+                .sessions
+                .iter()
+                .position(|owned| *owned == session)
+            {
+                self.capture.sessions.swap_remove(index).stop();
             }
         }
+        self.refresh_capture_demand();
     }
 }
 

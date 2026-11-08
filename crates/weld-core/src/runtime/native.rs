@@ -207,7 +207,7 @@ impl<Event: 'static> NativeRuntime<Event> {
         interval: Duration,
     ) -> Result<()> {
         if integration.driver().is_some() {
-            self.state.data.server.enable_output_capture();
+            self.state.data.server.enable_capture();
         }
         let result = self.serve(&mut integration, interval);
         if let Some(launches) = &mut self.launches {
@@ -255,12 +255,7 @@ impl<Event: 'static> NativeRuntime<Event> {
             if let Some(deadline) = self.state.data.server.file_drag_timeout(Instant::now()) {
                 timeout = timeout.min(deadline);
             }
-            if let Some(deadline) = self
-                .state
-                .data
-                .server
-                .output_capture_timeout(Instant::now())
-            {
+            if let Some(deadline) = self.state.data.server.capture_timeout(Instant::now()) {
                 timeout = timeout.min(deadline);
             }
             if let Some(deadline) = self
@@ -285,7 +280,11 @@ impl<Event: 'static> NativeRuntime<Event> {
             } else if !self.state.data.events.is_empty() {
                 break;
             }
-            self.state.data.server.poll_output_captures();
+            self.state
+                .data
+                .server
+                .capture_windows(&self.state.capture_worker);
+            self.state.data.server.poll_captures();
             if let Some(drags) = &self.drags {
                 drags.service(&mut self.state.data.server);
             }

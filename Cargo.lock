@@ -9699,8 +9699,10 @@ dependencies = [
 name = "weld-client"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "cursor-icon",
  "serde",
+ "tracing",
  "weld-diagnostics",
 ]
 

@@ -1,3 +1,14 @@
+use crate::HoistSessionId;
+use std::rc::Rc;
+use weld_client::{
+    ClientBufferId, ClientBufferLease, ClientBufferMetadata, ClientBufferUseId,
+    ClientCommitRevision, ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceId,
+    ClientSurfaceRole, ClientSurfaceState, ComposedBuffer, Extent, InputPosition, LogicalPoint,
+    LogicalSize, SurfaceAlphaMode, SurfaceBufferChange, SurfaceBufferUpdate, SurfaceContentView,
+    SurfaceInputPlacement, SurfaceInputRect, SurfaceLayerId, SurfaceLayerPlacement,
+    SurfaceStreamMode, SurfaceWindowGeometry,
+};
+
 use super::*;
 use crate::view_input::ViewInput;
 use weld_client::{
@@ -322,4 +333,34 @@ fn invalid_viewport_hides_only_its_view_and_recovers_on_next_commit() {
         )
         .expect("recovery");
     assert_eq!(frame(&recovered).layers.len(), 1);
+}
+
+#[test]
+fn on_demand_capture_reuses_streaming_geometry_and_retained_content() {
+    let mut streamed = setup();
+    let session = HoistSessionId::new(1);
+    let update = commit(1, (120, 80), LogicalPoint::new(5.0, 10.0));
+    let events = streamed.observe(session, update.clone()).expect("stream");
+    let mut captured = setup();
+    captured.retain(session, update).expect("retain");
+    let composed_event = captured
+        .compose(surface(1))
+        .expect("compose")
+        .expect("mapped");
+    let capture_events = [composed_event];
+    let actual = frame(&capture_events);
+    let expected = frame(&events);
+    assert_eq!(actual.extent, expected.extent);
+    assert_eq!(actual.logical_size, expected.logical_size);
+    assert_eq!(actual.layers.len(), expected.layers.len());
+    assert_eq!(actual.layers[0].placement, expected.layers[0].placement);
+    assert_eq!(
+        captured.viewport(surface(1)).expect("viewport").origin,
+        LogicalPoint::new(5.0, 10.0)
+    );
+    captured
+        .retain(session, event(1, ClientSurfaceEventKind::Destroyed))
+        .expect("destroy");
+    assert!(captured.viewport(surface(1)).is_none());
+    assert!(captured.compose(surface(1)).expect("closed").is_none());
 }

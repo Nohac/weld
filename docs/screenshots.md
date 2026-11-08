@@ -2,10 +2,13 @@
 
 Weld's nested and DRM presenters expose output capture through
 `ext-output-image-capture-source-v1` and `ext-image-copy-capture-v1`.
+Native Wayland and XWayland toplevels are listed through
+`ext-foreign-toplevel-list-v1` and selected through
+`ext-foreign-toplevel-image-capture-source-v1`.
 Capture accepts both SHM and compatible DMA-BUF destinations. The latter can
 feed screen recorders through `xdg-desktop-portal-wlr` and PipeWire without CPU
-pixel readback in Weld. This is whole-output capture; window/workspace sources
-and a native OBS plugin are not implemented yet.
+pixel readback in Weld. Both whole-output and individual-window sources are
+implemented. Workspace sources and a native OBS plugin are not implemented yet.
 Grim 1.5 supports these protocols. Slurp supplies region selection through
 Weld's layer-shell support, and `wl-copy` owns clipboard delivery.
 
@@ -46,6 +49,44 @@ Sway IPC tree/output queries. Child applications inherit `SWAYSOCK` and `I3SOCK`
 The tree includes nested tiling groups, floating windows, global logical geometry,
 selection, visibility and application metadata. Vacant persistent slots remain
 in the tree and are excluded from Grimshot's application selection boxes.
+
+## Individual windows
+
+Window capture uses the application's rectangular viewport and its popup /
+subsurface composition, shared with phone streaming. Weld titlebars, borders,
+rounded clipping, and other desktop windows are excluded. Application-drawn
+chrome remains part of the client's pixels. Like the existing streaming view,
+the capture output is opaque and popups are constrained to the viewport.
+
+The recorder supplies its destination buffer. Weld draws directly into that
+DMA-BUF on the GPU; it does not hand the recorder an application's reusable
+buffer or read pixels back through the CPU. SHM remains available for consumers
+that require it. Source buffer leases survive GPU completion even if a capture
+request is cancelled. Destination buffers are released only after their GPU
+writes finish. Imports and in-flight work are bounded.
+
+Active frame requests add an independent presentation claim to the selected
+window and its popups. This keeps a captured window updating on an inactive
+workspace without composing the whole desktop. An open session with no frame
+requests adds no rendering demand. Visible native windows keep their normal
+frame callbacks and presentation feedback; capture only supplies the missing
+demand for hidden windows. Closing, unmapping, locking the session, or
+ending capture withdraws that claim without removing another stream's claim.
+The window-source protocol requires an available DRM render node.
+Window resize updates buffer constraints; old source handles remain stopped
+if the application later remaps.
+
+OBS can use its PipeWire window source. Kooha 2.3.1 gates window requests behind
+an experimental flag:
+
+```sh
+KOOHA_EXPERIMENTAL=window-recording kooha
+```
+
+Use the portal's source picker to choose a window. The portal backend must use
+a window-capable picker such as Rofi's dmenu mode; `chooser_type=none` always
+selects an output. The default portal-wlr chooser skips Slurp when windows
+are requested and tries its menu pickers. This does not add workspace sources.
 
 ## Ownership and safety
 
@@ -141,7 +182,11 @@ and their settings remain untouched.
 records through its normal window action, and checks the resulting WebM with
 FFprobe. `--kooha-region` instead exercises the region preview, drags a selection,
 presses Done, and verifies that preview shutdown and cropped recording complete.
-Both check motion in decoded frames after the first two seconds, and save a CPU
+`--kooha-window` records an animated window on an inactive workspace, verifies
+that the portal returns a window source, and also compares capture pixels for
+a GPU-backed GTK window. The base runner checks same-session window resizing
+and closes a fixture to verify capture termination and foreign-handle cleanup.
+All recorder modes check motion after the first two seconds, and save a CPU
 sample. The recorder uses its packaged media libraries instead of inheriting the
 development shell's GStreamer plugin/library paths. Recordings stay in the
 validation directory.
@@ -236,3 +281,36 @@ The final installed-library regression `output-capture-31zu6qyl` produced a
 606×396 video with 124 decoded frames. `output-capture-i5d_5hmv` additionally
 passed the 90-frame DMA-BUF portal test with no corrupted buffers and the
 whole-output Kooha motion check using patched 0.8.4.
+
+
+Window capture was verified in the private nested host on 2026-11-08
+(`output-capture-maw5v2gs`), using the compatibility-patched portal 0.8.4:
+
+- The 940×620 terminal viewport and 238×230 GPU-backed GTK viewport matched
+  exactly between SHM and DMA-BUF capture; the output itself was 960×640.
+- A live window-capture session renegotiated to 400×300 after resize, then
+  emitted `stopped` and removed its foreign handle after the window closed.
+- The portal delivered 90 complete DMA-BUF frames for a window source.
+- Kooha advertised `MONITOR | WINDOW`, selected a `WINDOW` source on an inactive
+  workspace, and recorded a 696×494 WebM with 119 decoded frames and verified
+  changing pixels. The target's desktop visibility remained false at selection.
+- Shared phone-view geometry / input routing tests and independent callback
+  ownership tests passed, including release of capture's claim while another
+  consumer still owns a claim.
+
+The additional `--xwayland` run (`output-capture-dvoacdcw`) verified a 464×620
+X11 application's SHM/DMA-BUF equality and all four expected corner colors.
+It uses the private XWayland server through `weldctl run --shared-display`.
+The isolated GPU destination-reuse regression also passed after generalizing
+capture submission. The build-graph check still reports identical shared
+features across desktop application, tests, examples, and Clippy.
+
+These are headless nested tests; physical-session OBS UI checks still need
+separate validation. The live Kooha/GStreamer loop described
+above remains an external validation item for the next installed session.
+
+
+The final run (`output-capture-cwo00sg1`) repeated native, GTK, XWayland,
+resize/close, portal, and hidden-window motion checks, and delivered 180 window
+frames at 60 fps with **zero additional desktop compositions**. Capture preserves
+native callback ownership for visible windows; all six callback-policy tests pass.

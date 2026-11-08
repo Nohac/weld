@@ -320,7 +320,7 @@ capture, cursor inclusion and cancellation. It defaults to a GPU-backed headless
 Weston parent so tests do not open windows on the running Weld desktop. Set
 `WELD_TEST_WESTON` when Weston is not on PATH. A visible fallback is permitted on
 other identified desktops; `--visible` explicitly permits it on Weld. Optional
-`--portal`, `--kooha`, and `--kooha-region` checks use a private D-Bus session
+`--portal`, `--kooha`, `--kooha-region`, and `--kooha-window` checks use a private D-Bus session
 and portal services;
 their dependencies and environment are documented in [Screenshots](docs/screenshots.md).
 

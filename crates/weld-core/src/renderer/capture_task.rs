@@ -82,7 +82,7 @@ impl CaptureWorker {
         Ok(Self { jobs, wake })
     }
 
-    pub(super) fn submit(
+    pub(crate) fn submit(
         &self,
         device: wgpu::Device,
         capture: CaptureReadback,

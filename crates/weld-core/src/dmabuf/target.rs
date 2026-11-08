@@ -270,8 +270,9 @@ pub(crate) fn import_render_target(
 pub(crate) fn import_capture_target(
     device: &wgpu::Device,
     dmabuf: &Dmabuf,
+    format: wgpu::TextureFormat,
 ) -> Result<ImportedRenderTarget> {
-    import_target(device, dmabuf, wgpu::TextureFormat::Bgra8UnormSrgb, false)
+    import_target(device, dmabuf, format, false)
 }
 
 fn import_target(

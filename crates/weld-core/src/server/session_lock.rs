@@ -389,7 +389,7 @@ impl SessionLockHandler for ServerState {
             return;
         }
         self.release_host_input(self.event_time());
-        self.stop_output_captures();
+        self.stop_captures();
         self.session_lock.owner = Some(confirmation.ext_session_lock().clone());
         self.session_lock.confirmation = Some(confirmation);
         self.session_lock.outputs.clear();

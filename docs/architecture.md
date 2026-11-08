@@ -2052,3 +2052,14 @@ manual versus scanned device-name defaults as follow-ups. Activity recreation
 also needs to verify that the previous session releases the state-directory lock.
 Keyboard/IME, workspace/family grouping, thumbnails, remote application launch
 and multi-window desktop presentation remain future client slices.
+
+
+Individual-window portal capture and phone streaming share `SourceViews` in
+`weld-client`. It retains protocol-neutral surface trees and assembles the same
+viewport, popup placement, and input origins. Hoist wraps that implementation
+with its session IDs; native image capture uses on-demand assembly without a
+transport session. `weld-core` owns foreign toplevel identities, image-copy
+protocol sessions, presentation claims, and destination-buffer lifetime.
+Its window capture backend reuses `SourceCompositor` to draw directly into the
+consumer's DMA-BUF (or an asynchronous SHM readback target), retaining source
+leases until GPU completion. Bevy does not render window-capture frames.

@@ -21,6 +21,9 @@ use std::{
 
 #[derive(Parser)]
 struct Options {
+    /// Keep pixels stable for capture comparisons.
+    #[arg(long)]
+    static_content: bool,
     #[arg(long, default_value_t = 60)]
     seconds: u64,
     #[arg(long, default_value = "Weld X11 probe")]
@@ -350,7 +353,7 @@ fn main() -> Result<()> {
                 _ => {}
             }
         }
-        if options.popup_cycle && !redraw {
+        if (options.popup_cycle || options.static_content) && !redraw {
             thread::sleep(Duration::from_millis(16));
             continue;
         }
@@ -389,7 +392,9 @@ fn main() -> Result<()> {
             format!("X11: {} inputs", presses).as_bytes(),
         )?;
         connection.flush()?;
-        frame = frame.wrapping_add(5);
+        if !options.static_content {
+            frame = frame.wrapping_add(5);
+        }
         thread::sleep(Duration::from_millis(16));
     }
     connection.destroy_window(window)?;

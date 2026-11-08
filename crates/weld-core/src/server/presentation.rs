@@ -18,9 +18,15 @@ use weld_client::{
     ClientPresentationClaim, ClientPresentationUpdate, ClientSourceId, PresentationRate,
 };
 
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum PresentationOwner {
+    Adapter(ClientSourceId),
+    Capture,
+}
+
 #[derive(Default)]
 struct Demand {
-    owners: HashMap<ClientSourceId, ClientPresentationClaim>,
+    owners: HashMap<PresentationOwner, ClientPresentationClaim>,
     last: Option<Instant>,
 }
 
@@ -41,6 +47,9 @@ impl PresentationClaims {
         pending
     }
     fn update(&mut self, owner: ClientSourceId, update: ClientPresentationUpdate) {
+        self.update_owner(PresentationOwner::Adapter(owner), update);
+    }
+    fn update_owner(&mut self, owner: PresentationOwner, update: ClientPresentationUpdate) {
         match update.claim {
             ClientPresentationClaim::Release => {
                 if let Some(demand) = self.roots.get_mut(&update.surface) {
@@ -70,8 +79,13 @@ impl PresentationClaims {
         let active_adapter = self.roots.get(&surface).is_some_and(|demand| {
             demand
                 .owners
-                .values()
-                .any(|claim| matches!(claim, ClientPresentationClaim::Active { .. }))
+                .iter()
+                // Capture supplements hidden-window demand; it must not steal
+                // callbacks or presentation feedback from a visible native view.
+                .any(|(owner, claim)| {
+                    matches!(owner, PresentationOwner::Adapter(_))
+                        && matches!(claim, ClientPresentationClaim::Active { .. })
+                })
         });
         if active_adapter {
             return false;
@@ -182,6 +196,24 @@ impl ServerState {
             .flat_map(|(_, groups)| groups)
             .map(|group| group.callbacks.len())
             .sum()
+    }
+
+    pub(super) fn set_capture_presentation(&mut self, surface: SurfaceId, active: bool) {
+        let was_native = self.presentation_claims.native(surface);
+        self.presentation_claims.update_owner(
+            PresentationOwner::Capture,
+            ClientPresentationUpdate {
+                surface,
+                claim: if active {
+                    ClientPresentationClaim::Active {
+                        rate: Some(PresentationRate::HZ_60),
+                    }
+                } else {
+                    ClientPresentationClaim::Release
+                },
+            },
+        );
+        self.transition_callback_owner(surface, was_native);
     }
 
     pub(super) fn apply_presentation_claim(
@@ -361,6 +393,74 @@ impl ServerState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn capture_keeps_hidden_windows_paced_and_releases_only_its_own_claim() {
+        let mut claims = PresentationClaims::default();
+        let surface = SurfaceId::for_test(11);
+        let now = Instant::now();
+        claims.local.insert(surface, None);
+        claims.update_owner(
+            PresentationOwner::Capture,
+            ClientPresentationUpdate {
+                surface,
+                claim: ClientPresentationClaim::Active {
+                    rate: Some(PresentationRate::HZ_60),
+                },
+            },
+        );
+        assert_eq!(
+            claims.timeout(surface, PresentationRate::HZ_60, now),
+            Some(Duration::ZERO)
+        );
+        claims.completed(surface, now);
+        assert_eq!(
+            claims.timeout(surface, PresentationRate::HZ_60, now),
+            Some(PresentationRate::HZ_60.interval())
+        );
+        claims.local.insert(surface, Some(PresentationRate::HZ_60));
+        assert!(
+            claims.native(surface),
+            "capture must preserve visible native presentation"
+        );
+        assert_eq!(claims.timeout(surface, PresentationRate::HZ_60, now), None);
+        claims.local.insert(surface, None);
+        let other = ClientSourceId::new(9);
+        claims.update(
+            other,
+            ClientPresentationUpdate {
+                surface,
+                claim: ClientPresentationClaim::Active {
+                    rate: Some(PresentationRate::HZ_60),
+                },
+            },
+        );
+        claims.update_owner(
+            PresentationOwner::Capture,
+            ClientPresentationUpdate {
+                surface,
+                claim: ClientPresentationClaim::Release,
+            },
+        );
+        assert!(
+            claims
+                .timeout(surface, PresentationRate::HZ_60, now)
+                .is_some()
+        );
+        claims.update(
+            other,
+            ClientPresentationUpdate {
+                surface,
+                claim: ClientPresentationClaim::Release,
+            },
+        );
+        assert!(
+            claims
+                .timeout(surface, PresentationRate::HZ_60, now)
+                .is_none()
+        );
+        assert!(!claims.native(surface));
+    }
 
     #[test]
     fn explicit_local_demand_and_independent_consumers_aggregate_without_implicit_reactivation() {
