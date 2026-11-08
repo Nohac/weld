@@ -336,6 +336,8 @@ struct SurfaceLayerContent {
 pub enum SurfaceBufferContent {
     Retained,
     Pixels(Vec<u8>),
+    /// Pixels already uploaded into a stable compositor-owned GPU image.
+    UploadedImage(Handle<Image>),
     RenderImage(SurfaceRenderImage),
 }
 
@@ -718,7 +720,9 @@ pub(crate) fn referenced_dmabuf_ids(world: &World) -> HashSet<ImportId> {
                 .flat_map(|snapshot| snapshot.buffers.iter())
                 .filter_map(|buffer| match &buffer.content {
                     SurfaceBufferContent::RenderImage(image) => Some(image.import),
-                    SurfaceBufferContent::Retained | SurfaceBufferContent::Pixels(_) => None,
+                    SurfaceBufferContent::Retained
+                    | SurfaceBufferContent::Pixels(_)
+                    | SurfaceBufferContent::UploadedImage(_) => None,
                 }),
         )
         .collect()
@@ -749,7 +753,9 @@ pub(crate) fn promote_dmabuf_sources(world: &mut World, promoted: &[ImportId]) {
         .flat_map(|snapshot| snapshot.buffers.iter_mut())
         .filter_map(|buffer| match &mut buffer.content {
             SurfaceBufferContent::RenderImage(image) => Some(image),
-            SurfaceBufferContent::Retained | SurfaceBufferContent::Pixels(_) => None,
+            SurfaceBufferContent::Retained
+            | SurfaceBufferContent::Pixels(_)
+            | SurfaceBufferContent::UploadedImage(_) => None,
         })
     {
         if promoted.contains(&image.import) {
@@ -1195,7 +1201,7 @@ fn apply_surface_tree_snapshot(
                     .get(&buffer.layer)
                     .is_none_or(|previous| previous.encoding != image.encoding)
         }
-        SurfaceBufferContent::Retained => false,
+        SurfaceBufferContent::Retained | SurfaceBufferContent::UploadedImage(_) => false,
     });
     let removed = entry
         .buffers
@@ -1255,6 +1261,36 @@ fn apply_surface_tree_snapshot(
                         generation,
                     },
                 );
+            } else if let SurfaceBufferContent::UploadedImage(image) = content {
+                if images.get(&image).is_none() {
+                    entry.revision = None;
+                    warn!(?surface, ?buffer.layer, "discarded an unknown uploaded surface image");
+                    continue;
+                }
+                let encoding = if buffer.opaque {
+                    SurfaceImageEncoding::EncodedOpaque
+                } else {
+                    SurfaceImageEncoding::EncodedPremultiplied
+                };
+                policy_changed |= entry.buffers.get(&buffer.layer).is_none_or(|previous| {
+                    previous.image != image || previous.encoding != encoding
+                });
+                if let Some(previous) = entry.buffers.insert(
+                    buffer.layer,
+                    SurfaceBufferAsset {
+                        image: image.clone(),
+                        pixel_size,
+                        opaque: buffer.opaque,
+                        encoding,
+                        displayed_dmabuf: None,
+                        displayed_pixel_size: None,
+                        pending_dmabuf: None,
+                        generation: 0,
+                    },
+                ) && previous.image != image
+                {
+                    images.remove(previous.image.id());
+                }
             } else if let SurfaceBufferContent::RenderImage(render_image) = content {
                 if images.get(&render_image.image).is_none() {
                     warn!(?surface, ?buffer.layer, "discarded an unknown rendered surface image");
@@ -1758,7 +1794,9 @@ fn validate_snapshot(snapshot: &SurfaceTreeSnapshot) -> bool {
                         .and_then(|bytes| usize::try_from(bytes).ok())
                         == Some(pixels.len())
                 }
-                SurfaceBufferContent::Retained | SurfaceBufferContent::RenderImage(_) => true,
+                SurfaceBufferContent::Retained
+                | SurfaceBufferContent::RenderImage(_)
+                | SurfaceBufferContent::UploadedImage(_) => true,
             }
     });
     let valid_geometry = match (snapshot.root, snapshot.window_geometry) {
@@ -2639,6 +2677,74 @@ pub(crate) mod tests {
                 .resource::<SurfaceCommitRevisions>()
                 .revision(surface),
             revision + 1
+        );
+    }
+
+    #[test]
+    fn uploaded_pixels_retain_identity_across_dmabuf_transitions() {
+        let mut app = test_app();
+        let surface = SurfaceId::for_test(34);
+        register_window(&mut app, surface);
+        let uploaded = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(transparent_surface_image());
+        let imported = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(transparent_surface_image());
+        let pixels = || {
+            let mut snapshot = root_snapshot(None);
+            snapshot.buffers[0].content = SurfaceBufferContent::UploadedImage(uploaded.clone());
+            snapshot
+        };
+        enqueue_surface_event(app.world_mut(), snapshot_event(surface, pixels()));
+        assert!(prepare_surface_events(app.world_mut()));
+        app.update();
+        enqueue_surface_event(app.world_mut(), snapshot_event(surface, pixels()));
+        assert!(!prepare_surface_events(app.world_mut()));
+
+        let import = ImportId::for_test(42);
+        let mut snapshot = pixels();
+        let layer = snapshot.buffers[0].layer;
+        snapshot.buffers[0].content = SurfaceBufferContent::RenderImage(SurfaceRenderImage {
+            import,
+            image: imported,
+            encoding: SurfaceImageEncoding::EncodedOpaque,
+            y_inverted: false,
+            promoted: false,
+        });
+        enqueue_surface_event(app.world_mut(), snapshot_event(surface, snapshot));
+        prepare_surface_events(app.world_mut());
+        let buffer = &app.world().resource::<SurfaceRegistry>().entries[&surface].buffers[&layer];
+        assert_eq!(
+            buffer.image, uploaded,
+            "SHM remains the fallback before promotion"
+        );
+        assert!(
+            app.world()
+                .resource::<Assets<Image>>()
+                .get(&uploaded)
+                .is_some()
+        );
+        promote_dmabuf_sources(app.world_mut(), &[import]);
+        assert!(
+            app.world().resource::<SurfaceRegistry>().entries[&surface].buffers[&layer]
+                .displayed_dmabuf
+                .is_some()
+        );
+
+        enqueue_surface_event(app.world_mut(), snapshot_event(surface, pixels()));
+        prepare_surface_events(app.world_mut());
+        let buffer = &app.world().resource::<SurfaceRegistry>().entries[&surface].buffers[&layer];
+        assert_eq!(buffer.image, uploaded);
+        assert!(buffer.displayed_dmabuf.is_none() && buffer.pending_dmabuf.is_none());
+        let mut translucent = pixels();
+        translucent.buffers[0].opaque = false;
+        enqueue_surface_event(app.world_mut(), snapshot_event(surface, translucent));
+        assert!(
+            prepare_surface_events(app.world_mut()),
+            "opacity changes still reach policy"
         );
     }
 

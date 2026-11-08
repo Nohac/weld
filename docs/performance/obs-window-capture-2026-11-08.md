@@ -139,8 +139,45 @@ Cache unchanged geometry uniforms. Measure this independently of visible
 desktop rendering; suppressing Bevy work cannot remove the capture worker's
 command-pool reset cost.
 
-No performance fix or reduction is claimed by this report. Validation of
-changes should cover repeated same-size SHM and DMA-BUF updates, visible
-and hidden capture, pixel correctness against full preparation, resize and
-buffer-kind transitions, resource retirement, and equivalent optimized
-headless workloads before repeating the live OBS measurement.
+## SHM implementation and optimized comparison
+
+`weld-app::shm` now owns reusable uploaded textures per surface layer. The
+shell uploads directly from the shared host snapshot, avoiding the second CPU
+pixel vector. Same-size content updates preserve image IDs, GPU textures and
+bindings, and bypass main-policy and full UI preparation. Resize and opacity
+changes still reach policy. The render-world registration runs after renderer
+startup and leaves GPU-image change ticks untouched for installed textures.
+Layer removal and destruction retire uploads. A previous SHM texture remains
+available through a DMA-BUF transition until the surface/layer is retired or
+resized, preserving fallback content and reuse if SHM resumes.
+
+`WELD_RENDER_BENCH_SHM_UPDATES=1` selects a new `shell_render` mode with
+900×600 changing SHM snapshots, an extra snapshot owner modeling the native
+host, production policy admission, and GPU completion per frame. Each run
+warms up for 30 frames, then measures 1,200 frames. CPU time includes the
+fixture's pixel-vector allocation/fill. This is an unpaced offscreen benchmark,
+not native Wayland ingress or live desktop utilization.
+
+Both versions used the release profile and RADV STRIX1, pinned to CPU 4.
+Compilation and other validation finished before the ABBA sequence. The
+baseline is `ad0dab7` plus only the new benchmark mode.
+
+| Run | Main updates / 1,200 frames | CPU µs/frame | Wall µs/frame |
+| --- | ---: | ---: | ---: |
+| Before A | 1,200 | 1,383.33 | 2,968.41 |
+| After B | 0 | 483.33 | 1,738.06 |
+| After B | 0 | 458.33 | 1,707.43 |
+| Before A | 1,200 | 1,200.00 | 2,539.41 |
+
+The mean CPU reduction is approximately 64% for this fixture. It does not
+predict the same reduction for DMA-BUF clients or the complete OBS workload.
+The host's initial SHM snapshot and GPU staging upload still copy pixels.
+`target/validation/shm-abba-*.log` retains the results; saved executables are
+`shm-before` (SHA-256 `3313c2c5868a4893402e56025a3aa350c7c03f4d5bbcb6c853de2326f5a36060`)
+and `shm-after` (`f8c993877b0fa2066841edf4f1a90bd0aba7582ae92faad70c32c290239e2080`).
+
+The expanded offscreen shell regression verifies alternating pixels with no
+main update and no UI preparation, stable bind groups, resize, hide/show and
+GPU-image retirement. A focused state test covers SHM → DMA-BUF promotion →
+SHM and opacity changes. All 98 existing application tests passed on the GPU;
+the additional transition test passed separately.

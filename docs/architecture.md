@@ -1059,8 +1059,14 @@ changes. Surface clipping supports resolved elliptical corner radii while
 keeping exact circular distances for crisp pixel-snapped content.
 
 Weld accepts multiple xdg-toplevels backed by `wl_shm` or linux-dmabuf and
-exposes their lifecycle through protocol-neutral ECS entities. SHM pixels are
-copied into Bevy images. A DMA-BUF is imported as an external Vulkan image and
+exposes their lifecycle through protocol-neutral ECS entities. The host snapshots
+SHM pixels once; `weld-app::shm` uploads directly from that shared snapshot into
+a reusable texture per surface layer. Same-size updates retain their image and
+binding identities without cloning pixels into Bevy assets. Texture registration
+runs after renderer startup; resize, layer removal and destruction retire old
+registrations. One SHM texture remains available across DMA-BUF transitions as a
+fallback until promotion completes and for reuse if SHM resumes.
+A DMA-BUF is imported as an external Vulkan image and
 sampled directly by the private material behind `SurfaceNode`; the path has no
 CPU pixel copy, GPU normalization blit, or intermediate surface texture.
 
@@ -1124,10 +1130,11 @@ than mutating every incoming shared commit.
 Native hosts distinguish content demand from application updates. Immediately
 before a due update or composition, `HostPolicy::prepare_presentation` admits
 selected content and reports structural or asset work. Stable imported DMA-BUF
-content updates the surface registry and commit revision without running the
+and uploaded SHM content updates the surface registry and commit revision without running the
 main application schedule. Mapping, geometry, input-region, role and metadata
-changes escalate to policy in the same iteration. SHM uploads and prepromoted
-importer images retain full asset processing. New/pruned native images and
+changes escalate to policy in the same iteration. CPU image assets supplied
+directly to ECS and prepromoted importer images retain full asset processing.
+New/resized SHM textures, new/pruned native images and
 post-promotion material changes also request that processing. Startup and
 structural settling still run paced application updates. Disabling retained
 presentation, or declaring a continuously prepared custom scene, keeps full

@@ -57,6 +57,7 @@ use crate::output::{
     OutputGeometry, OutputId, OutputInfo, OutputPlacement, OutputPosition, OutputPreferencesReader,
     PrimaryOutput, RendersOutput, WeldOutput,
 };
+use crate::shm::ShmImages;
 use crate::surface::{
     HostSurfaceEvent, HostSurfaceEventKind, SurfaceAction, SurfaceBufferContent,
     SurfaceBufferUpdate, SurfaceContentView, SurfaceInputPlacement, SurfaceInputRect,
@@ -103,6 +104,7 @@ pub struct AppShell {
     outputs: HashMap<OutputId, AppOutput>,
     redraw_requests: RedrawRequests,
     dmabuf_importer: Option<DmabufImporter>,
+    shm_images: ShmImages,
     pending_surfaces: ClientPresentationInbox,
     local_presentation: LocalPresentationState,
     // A native frame selects jitter-buffered content once, even when ingress
@@ -465,6 +467,7 @@ impl AppShell {
             .context("Bevy WindowPlugin did not register redraw messages")?;
         let dmabuf_importer =
             DmabufImporter::new(&context.device, &context.queue, &context.dmabuf)?;
+        let shm_images = ShmImages::new(&mut app, &context.device, &context.queue)?;
         let keyboard_settings = KeyboardSettingsReader::new(app.world_mut());
         let pointer_device_settings = PointerDeviceSettingsReader::new(app.world_mut());
         let output_preferences = OutputPreferencesReader::new(app.world_mut());
@@ -476,6 +479,7 @@ impl AppShell {
             keyboard_settings,
             pointer_device_settings,
             output_preferences,
+            shm_images,
             device: context.device,
             outputs,
             redraw_requests,
@@ -814,6 +818,7 @@ impl AppShell {
                 );
             }
             ClientSurfaceEventKind::Destroyed => {
+                self.shm_images.remove_surface(&mut self.app, surface);
                 if let Some(importer) = &mut self.dmabuf_importer {
                     importer.remove_surface(surface);
                 }
@@ -873,6 +878,8 @@ impl AppShell {
         if let Some(importer) = &mut self.dmabuf_importer {
             importer.retain_surface_layers(surface, &retained);
         }
+        self.shm_images
+            .retain_layers(&mut self.app, surface, &retained);
         let buffers = buffers
             .into_iter()
             .filter_map(|buffer| {
@@ -892,16 +899,17 @@ impl AppShell {
                                 if let Some(importer) = &mut self.dmabuf_importer {
                                     importer.remove_layer(surface, buffer.layer);
                                 }
-                                drop(lease);
-                                let pixels = match std::rc::Rc::try_unwrap(access) {
-                                    Ok(DirectClientBufferAccess::Shm(buffer)) => buffer.bgra_pixels,
-                                    Ok(DirectClientBufferAccess::Dmabuf(_)) => return None,
-                                    Err(access) => match access.as_ref() {
-                                        DirectClientBufferAccess::Shm(buffer) => buffer.bgra_pixels.clone(),
-                                        DirectClientBufferAccess::Dmabuf(_) => return None,
-                                    },
+                                let DirectClientBufferAccess::Shm(snapshot) = access.as_ref() else {
+                                    return None;
                                 };
-                                SurfaceBufferContent::Pixels(pixels)
+                                match self.shm_images.upload(&mut self.app, surface, buffer.layer, metadata.extent, &snapshot.bgra_pixels) {
+                                    Ok(image) => SurfaceBufferContent::UploadedImage(image),
+                                    Err(error) => {
+                                        imported_all = false;
+                                        tracing::warn!(%error, ?surface, layer = ?buffer.layer, "failed to upload client SHM pixels");
+                                        SurfaceBufferContent::Retained
+                                    }
+                                }
                             }
                             ClientBufferAccessResolution::Direct(access)
                                 if matches!(access.as_ref(), DirectClientBufferAccess::Dmabuf(_)) =>
@@ -1471,6 +1479,7 @@ mod tests {
             BackgroundColor, BorderColor, BorderRadius, BoxShadow, Color, PositionType, UiRect, px,
         },
         render::view::Msaa,
+        render::{render_asset::RenderAssets, texture::GpuImage},
         text::TextFont,
         ui::{
             UiTargetCamera,
@@ -2641,32 +2650,77 @@ mod tests {
             "later material preparation preserves ready parameters"
         );
         update_diagnostic_surface(&mut shell, surface, [255, 0, 0, 255]);
-        shell.advance_main(20);
+        assert!(
+            !shell.prepare_presentation(),
+            "same-size SHM pixels need no policy update"
+        );
         assert_surface_pixel(
             render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID),
             [0, 0, 255, 255],
         );
         assert_eq!(
-            binding_cache_allocations(&shell.app).1,
-            ready_bindings.1,
-            "new image generations reuse unchanged parameter buffers"
+            binding_cache_allocations(&shell.app),
+            ready_bindings,
+            "SHM uploads preserve the texture, bind group and parameter buffer"
         );
         assert_eq!(
             binding_cache_allocations(&shell.app).0.len(),
             1,
-            "replacing pixels retires the previous generation's GPU binding"
+            "pixel updates retain one GPU binding"
         );
         for tick in 21..29 {
-            update_diagnostic_surface(&mut shell, surface, [255, 0, 0, 255]);
+            let blue = tick % 2 == 0;
+            update_diagnostic_surface(
+                &mut shell,
+                surface,
+                if blue {
+                    [255, 0, 0, 255]
+                } else {
+                    [0, 255, 0, 255]
+                },
+            );
+            assert!(!shell.prepare_presentation(), "content-only SHM frame");
+            assert_surface_pixel(
+                render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID),
+                if blue {
+                    [0, 0, 255, 255]
+                } else {
+                    [0, 255, 0, 255]
+                },
+            );
+            assert_eq!(binding_cache_allocations(&shell.app), ready_bindings);
+            assert!(
+                !shell
+                    .app
+                    .world()
+                    .resource::<crate::retained_ui::RetainedUiStats>()
+                    .last_prepared,
+                "changing pixels must replay prepared UI without main updates"
+            );
+        }
+        update_diagnostic_surface_extent(&mut shell, surface, 64, |_, _| [255, 0, 0, 255]);
+        assert!(shell.prepare_presentation(), "resize still requests policy");
+        for tick in 29..33 {
             shell.advance_main(tick);
             assert_surface_pixel(
                 render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID),
                 [0, 0, 255, 255],
             );
-            let allocations = binding_cache_allocations(&shell.app);
-            assert_eq!(allocations.0.len(), 1, "SHM history must remain bounded");
-            assert_eq!(allocations.1, ready_bindings.1);
         }
+        let uploaded = shell
+            .app
+            .sub_app(RenderApp)
+            .world()
+            .resource::<RenderAssets<GpuImage>>()
+            .iter()
+            .filter(|(_, image)| image.texture_descriptor.label == Some("Weld retained SHM image"))
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            uploaded.len(),
+            1,
+            "resize retires the previous uploaded texture"
+        );
         shell
             .app
             .world_mut()
@@ -2701,6 +2755,31 @@ mod tests {
             retired.0.is_empty() && retired.1.is_empty(),
             "removed selectors release cached GPU resources"
         );
+        shell.enqueue_client_event(ClientSurfaceEvent {
+            surface,
+            kind: ClientSurfaceEventKind::Destroyed,
+        });
+        assert!(shell.prepare_presentation());
+        for id in uploaded {
+            assert!(
+                shell
+                    .app
+                    .world()
+                    .resource::<Assets<Image>>()
+                    .get(id)
+                    .is_none()
+            );
+            assert!(
+                shell
+                    .app
+                    .sub_app(RenderApp)
+                    .world()
+                    .resource::<RenderAssets<GpuImage>>()
+                    .get(id)
+                    .is_none(),
+                "destroy retires the uploaded GPU image"
+            );
+        }
     }
 
     #[cfg(feature = "test-support")]

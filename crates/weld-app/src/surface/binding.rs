@@ -118,9 +118,9 @@ pub(crate) fn publish_surface_bindings(
     valid_images: HashSet<AssetId<Image>>,
 ) -> bool {
     let mut assets_changed = false;
-    // Imported images retain their identity across buffer-pool rotations. SHM
-    // uploads replace the GPU image behind a stable asset ID, so only its latest
-    // generation can remain cached.
+    // Native imports and uploaded SHM textures retain their GPU identity. Image
+    // assets supplied as CPU pixels can replace that identity during extraction,
+    // so only their latest generation can remain cached.
     let mut image_generations = valid_images
         .into_iter()
         .map(|image| (image, 0))

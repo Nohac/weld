@@ -12,7 +12,7 @@ use weld_client::{
 };
 use weld_core::{
     OutputId,
-    host::{CompositionDestination, CompositionOutputRequest},
+    host::{CompositionDestination, CompositionOutputRequest, HostPolicy},
     input::{ButtonState, InputPosition, LinuxButtonCode, RawSeatEvent, RawSeatEventKind},
     surface::{
         LogicalPoint, LogicalSize, SurfaceContentView, SurfaceId, SurfaceInputPlacement,
@@ -58,6 +58,9 @@ impl InputWorkload {
 }
 
 fn main() -> Result<()> {
+    if std::env::var_os("WELD_RENDER_BENCH_SHM_UPDATES").is_some() {
+        return run_shm_updates();
+    }
     if std::env::var_os("WELD_RENDER_BENCH_CACHE_AGING").is_some() {
         return run_cache_aging();
     }
@@ -80,6 +83,60 @@ fn main() -> Result<()> {
             input,
         )?;
     }
+    Ok(())
+}
+
+/// Exercise real SHM ingress and the production policy-admission decision. A
+/// second owner models the host retaining its latest snapshot while we present.
+fn run_shm_updates() -> Result<()> {
+    let (mut shell, adapter) = benchmark::rendering_shell(configure_shell)?;
+    map_synthetic_client(&mut shell);
+    let requests = output_request();
+    let mut compositions = Vec::new();
+    for tick in 0..30 {
+        shell.advance_main(tick);
+        shell.render_outputs(&requests, &mut compositions)?;
+    }
+    shell.wait_for_gpu_for_benchmark()?;
+    let _ = HostPolicy::take_policy_wake(&mut shell);
+    let clock = std::process::Command::new("getconf")
+        .arg("CLK_TCK")
+        .output()?;
+    ensure!(clock.status.success(), "getconf CLK_TCK failed");
+    let ticks_per_second = std::str::from_utf8(&clock.stdout)?.trim().parse::<f64>()?;
+    ensure!(ticks_per_second > 0., "invalid CPU clock frequency");
+    let frames = environment_usize("WELD_RENDER_BENCH_FRAMES", 600);
+    let cpu_before = cpu_ticks()?;
+    let started = Instant::now();
+    let mut main_updates = 0;
+    for frame in 0..frames {
+        let snapshot = surface_snapshot_with_size(
+            SyntheticContent::Pixels(vec![
+                frame.to_le_bytes()[0];
+                (CLIENT_WIDTH * CLIENT_HEIGHT * 4) as usize
+            ]),
+            CLIENT_WIDTH,
+            CLIENT_HEIGHT,
+        );
+        shell.enqueue_client_event(snapshot.clone());
+        let policy =
+            HostPolicy::prepare_presentation(&mut shell) | HostPolicy::take_policy_wake(&mut shell);
+        if policy {
+            shell.advance_main(frame as u32);
+            main_updates += 1;
+        }
+        shell.render_outputs(&requests, &mut compositions)?;
+        shell.wait_for_gpu_for_benchmark()?;
+        drop(snapshot);
+    }
+    let elapsed = started.elapsed();
+    let cpu_seconds = (cpu_ticks()? - cpu_before) as f64 / ticks_per_second;
+    println!(
+        "SHM_UPDATES adapter={:?} frames={frames} main_updates={main_updates} cpu_us_per_frame={:.3} wall_us_per_frame={:.3}",
+        adapter.name,
+        cpu_seconds * 1e6 / frames as f64,
+        micros_per_frame(elapsed, frames)
+    );
     Ok(())
 }
 
