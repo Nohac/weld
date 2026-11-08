@@ -6,6 +6,7 @@ changes = [
   "ManualTextureView carries output scale into camera target metrics.",
   "Manual target changes invalidate camera metrics only when size or scale changes; texture rotation retains stable projection and layout.",
   "Tracy GPU initialization checks enabled timestamp features on the supplied device.",
+  "Render finalization creates and submits screenshot/readback commands only when requests exist.",
 ]
-refresh = "Replace with the target published crate and reapply these three changes. Run weld-app shell regressions for manual-target metrics, scaling and retained frames; check the optional trace_tracy path separately."
-remove_when = "Upstream exposes equivalent manual-target scale/change detection and guards timestamp queries on externally supplied devices."
+refresh = "Replace with the target published crate and reapply these four changes. Run weld-app shell regressions for manual-target metrics, scaling, retained frames and Bevy screenshot/readback completion; check the optional trace_tracy path separately."
+remove_when = "Upstream exposes equivalent manual-target scale/change detection, guards timestamp queries on externally supplied devices, and avoids empty screenshot/readback submissions."

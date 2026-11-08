@@ -1476,10 +1476,16 @@ mod tests {
         image::Image,
         math::Vec2,
         prelude::{
-            BackgroundColor, BorderColor, BorderRadius, BoxShadow, Color, PositionType, UiRect, px,
+            BackgroundColor, BorderColor, BorderRadius, BoxShadow, Color, On, PositionType, UiRect,
+            px,
         },
         render::view::Msaa,
-        render::{render_asset::RenderAssets, texture::GpuImage},
+        render::{
+            gpu_readback::{Readback, ReadbackComplete},
+            render_asset::RenderAssets,
+            texture::GpuImage,
+            view::screenshot::{Screenshot, ScreenshotCaptured},
+        },
         text::TextFont,
         ui::{
             UiTargetCamera,
@@ -2574,6 +2580,104 @@ mod tests {
             images[0],
             "removing the container clip restores the child's independent rounding"
         );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn bevy_screenshot_and_readback_complete_after_idle_frames() {
+        #[derive(Resource, Default)]
+        struct Results {
+            screenshot: Option<Image>,
+            readback: Option<Vec<u8>>,
+        }
+
+        let (mut shell, _, device, queue) = crate::benchmark::rendering_shell_with_outputs(
+            vec![diagnostic_output(
+                PRIMARY_OUTPUT_ID,
+                LogicalPoint::ZERO,
+                true,
+                0.0,
+            )],
+            |app| {
+                app.init_resource::<Results>();
+            },
+        )
+        .expect("offscreen GPU shell");
+        let surface = SurfaceId::for_test(1);
+        install_diagnostic_surface(&mut shell, surface, [0, 255, 0, 255]);
+        shell.app.world_mut().spawn((
+            SurfaceNode {
+                surface,
+                view: SurfaceView::FullSurface,
+            },
+            Node::default(),
+        ));
+        for tick in 0..8 {
+            shell.advance_main(tick);
+            render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+        }
+        let view = shell.outputs[&PRIMARY_OUTPUT_ID].view;
+        shell
+            .app
+            .world_mut()
+            .spawn(Screenshot::texture_view(view))
+            .observe(
+                |capture: On<ScreenshotCaptured>, mut results: ResMut<Results>| {
+                    results.screenshot = Some(capture.event().image.clone());
+                },
+            );
+        let mut image = Image::new_fill(
+            wgpu::Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+            wgpu::TextureDimension::D2,
+            &[23, 45, 67, 255],
+            wgpu::TextureFormat::Rgba8Unorm,
+            RenderAssetUsages::all(),
+        );
+        image.texture_descriptor.usage |= wgpu::TextureUsages::COPY_SRC;
+        let image = shell
+            .app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(image);
+        shell
+            .app
+            .world_mut()
+            .spawn(Readback::texture(image))
+            .observe(
+                |readback: On<ReadbackComplete>, mut results: ResMut<Results>| {
+                    results.readback = Some(readback.event().data.clone());
+                },
+            );
+        for tick in 8..108 {
+            shell.advance_main(tick);
+            render_owned_output(&mut shell, &device, &queue, PRIMARY_OUTPUT_ID);
+            let results = shell.app.world().resource::<Results>();
+            if results.screenshot.is_some() && results.readback.is_some() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        let results = shell.app.world().resource::<Results>();
+        let screenshot = results
+            .screenshot
+            .as_ref()
+            .expect("Bevy screenshot completed");
+        let size = screenshot.texture_descriptor.size;
+        assert_eq!((size.width, size.height), (64, 64));
+        let pixels = screenshot.data.as_ref().expect("screenshot pixels");
+        assert_eq!(
+            &pixels[(16 * 64 + 16) * 4..(16 * 64 + 16) * 4 + 4],
+            &[0, 255, 0, 255]
+        );
+        let readback = results
+            .readback
+            .as_ref()
+            .expect("Bevy texture readback completed");
+        assert_eq!(&readback[..4], &[23, 45, 67, 255]);
     }
 
     #[cfg(feature = "test-support")]

@@ -93,6 +93,8 @@ pub fn render_system(
 
     world.run_schedule(RenderGraph);
 
+    if crate::view::screenshot::has_screenshot_commands(world)
+        || crate::gpu_readback::has_readback_commands(world)
     {
         let render_device = world.resource::<RenderDevice>();
         let render_queue = world.resource::<RenderQueue>();
