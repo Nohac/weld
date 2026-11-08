@@ -31,7 +31,7 @@ use crate::{
 
 use super::{
     device::DrmRuntimeBootstrap,
-    presentation::{PhysicalDesktop, PhysicalRenderOutcome},
+    presentation::{FrameDelivery, PhysicalDesktop, PhysicalRenderOutcome},
     schedule::PresentationSchedule,
 };
 
@@ -655,7 +655,9 @@ impl NativeDriver<HostEvent> for DrmDriver {
                 .set_cursor_position(self.input.pointer_position());
             application.restore_input_focus();
         }
-        if state.data.server.output_capture_requested() {
+        self.desktop
+            .capture_cached_outputs(&mut state.data.server, &state.capture_worker);
+        if state.data.server.output_capture_needs_composition() {
             self.frame_state.request_composition();
         }
         if !locked && state.data.server.presentation_requested() {
@@ -884,8 +886,7 @@ impl NativeDriver<HostEvent> for DrmDriver {
         } else if frame.work.render_composition {
             self.frame_callbacks
                 .composition_rendered(state.data.server.presentation_requested());
-            let protocol_capture = state.data.server.output_capture_requested();
-            match composition_route(self.target, capture_ready || protocol_capture) {
+            match composition_route(self.target, capture_ready) {
                 CompositionRoute::Owned {
                     complete_callbacks,
                     capture,
@@ -959,8 +960,11 @@ impl NativeDriver<HostEvent> for DrmDriver {
                 application
                     .composition()
                     .context("DRM presenter requires local composition")?,
-                &mut state.data.server,
-                &mut state.callbacks,
+                FrameDelivery {
+                    server: &mut state.data.server,
+                    callbacks: &mut state.callbacks,
+                    capture_worker: &state.capture_worker,
+                },
                 &vblank_phases,
                 stage_callbacks,
             )?;

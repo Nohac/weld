@@ -1,20 +1,31 @@
 //! Output capture sessions, bounded readback requests, and client SHM delivery.
 
-use std::time::{Duration, Instant};
+use calloop::{Interest, LoopHandle, RegistrationToken};
+use std::{
+    cell::Cell,
+    collections::HashMap,
+    rc::Rc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, ensure};
 use smithay::{
+    backend::{
+        allocator::{Buffer, Fourcc},
+        drm::DrmNode,
+    },
     output::Output,
     reexports::wayland_server::{DisplayHandle, Resource, protocol::wl_shm},
     utils::{Clock, IsAlive, Monotonic, Rectangle, Transform},
     wayland::{
+        dmabuf::get_dmabuf,
         image_capture_source::{
             ImageCaptureSource, ImageCaptureSourceHandler, OutputCaptureSourceHandler,
             OutputCaptureSourceState,
         },
         image_copy_capture::{
-            BufferConstraints, CaptureFailureReason, Frame, FrameRef, ImageCopyCaptureHandler,
-            ImageCopyCaptureState, Session, SessionRef,
+            BufferConstraints, CaptureFailureReason, DmabufConstraints, Frame, FrameRef,
+            ImageCopyCaptureHandler, ImageCopyCaptureState, Session, SessionRef,
         },
         shm::{BufferData, with_buffer_contents, with_buffer_contents_mut},
     },
@@ -24,8 +35,11 @@ use tracing::warn;
 use super::ServerState;
 use crate::{
     OutputId,
+    dmabuf::DmabufCapabilities,
     host::CompositionFrame,
     renderer::{
+        capture_gpu::{GpuCapture, GpuCaptureTask},
+        capture_snapshot::snapshot_composition,
         capture_task::{CaptureTask, CaptureWorker},
         read_owned_frame_async,
     },
@@ -45,6 +59,10 @@ pub(super) struct OutputCapture {
     enabled: bool,
     sessions: Vec<Session>,
     pending: Vec<PendingFrame>,
+    dma: Option<DmabufConstraints>,
+    gpu: Option<GpuCapture>,
+    cached: HashMap<OutputId, CompositionFrame>,
+    loop_handle: LoopHandle<'static, ServerState>,
 }
 
 struct PendingFrame {
@@ -56,22 +74,63 @@ struct PendingFrame {
     work: FrameWork,
     sampled_at: Duration,
     cursor: Option<CaptureCursor>,
+    writable: Option<BufferReady>,
+}
+
+struct BufferReady {
+    ready: Rc<Cell<bool>>,
+    token: RegistrationToken,
+    handle: LoopHandle<'static, ServerState>,
+}
+impl Drop for BufferReady {
+    fn drop(&mut self) {
+        self.handle.remove(self.token);
+    }
 }
 
 enum FrameWork {
     Waiting,
     Readback(CaptureTask),
+    Gpu(GpuCaptureTask),
     Failed(CaptureFailureReason),
 }
 
 impl OutputCapture {
-    pub(super) fn new(display: &DisplayHandle) -> Self {
+    pub(super) fn new(
+        display: &DisplayHandle,
+        loop_handle: LoopHandle<'static, ServerState>,
+        capabilities: Option<&DmabufCapabilities>,
+    ) -> Self {
+        let dma = capabilities.and_then(|cap| {
+            if cap.capture_formats.is_empty() {
+                return None;
+            }
+            Some(DmabufConstraints {
+                node: DrmNode::from_dev_id(cap.main_device).ok()?,
+                formats: [Fourcc::Argb8888, Fourcc::Xrgb8888]
+                    .into_iter()
+                    .filter_map(|code| {
+                        let modifiers: Vec<_> = cap
+                            .capture_formats
+                            .iter()
+                            .filter(|format| format.code == code)
+                            .map(|format| format.modifier)
+                            .collect();
+                        (!modifiers.is_empty()).then_some((code, modifiers))
+                    })
+                    .collect(),
+            })
+        });
         Self {
             sources: OutputCaptureSourceState::new::<ServerState>(display),
             copies: ImageCopyCaptureState::new::<ServerState>(display),
             enabled: false,
             sessions: Vec::new(),
             pending: Vec::new(),
+            dma,
+            gpu: None,
+            cached: HashMap::new(),
+            loop_handle,
         }
     }
 }
@@ -104,13 +163,15 @@ impl ImageCopyCaptureHandler for ServerState {
         Some(BufferConstraints {
             size: (output.metrics.mode().size.w, output.metrics.mode().size.h).into(),
             shm: vec![wl_shm::Format::Xrgb8888],
-            dma: None,
+            dma: self.capture.dma.clone(),
         })
     }
 
     fn new_session(&mut self, session: Session) {
         if self.capture.sessions.len() < MAX_SESSIONS {
             self.capture.sessions.push(session);
+        } else {
+            session.stop();
         }
     }
 
@@ -124,10 +185,22 @@ impl ImageCopyCaptureHandler for ServerState {
             frame.fail(CaptureFailureReason::Stopped);
             return;
         };
-        let buffer_matches = with_buffer_contents(&frame.buffer(), |_, _, data| {
-            (data.width, data.height) == (constraints.size.w, constraints.size.h)
-        })
-        .unwrap_or(false);
+        let buffer_matches = if let Ok(dmabuf) = get_dmabuf(&frame.buffer()) {
+            dmabuf.size() == constraints.size
+                && dmabuf.num_planes() == 1
+                && dmabuf.flags().is_empty()
+                && constraints.dma.as_ref().is_some_and(|dma| {
+                    dma.formats.iter().any(|(code, modifiers)| {
+                        *code == dmabuf.format().code
+                            && modifiers.contains(&dmabuf.format().modifier)
+                    })
+                })
+        } else {
+            with_buffer_contents(&frame.buffer(), |_, _, data| {
+                (data.width, data.height) == (constraints.size.w, constraints.size.h)
+            })
+            .unwrap_or(false)
+        };
         if !buffer_matches
             || session
                 .current_constraints()
@@ -148,6 +221,32 @@ impl ImageCopyCaptureHandler for ServerState {
             frame.fail(CaptureFailureReason::BufferConstraints);
             return;
         };
+        let writable = if let Ok(buffer) = get_dmabuf(&frame.buffer())
+            && let Ok((_, source)) = buffer.generate_blocker(Interest::WRITE)
+        {
+            let ready = Rc::new(Cell::new(false));
+            let signal = ready.clone();
+            match self
+                .capture
+                .loop_handle
+                .insert_source(source, move |_, _, _| {
+                    signal.set(true);
+                    Ok(())
+                }) {
+                Ok(token) => Some(BufferReady {
+                    ready,
+                    token,
+                    handle: self.capture.loop_handle.clone(),
+                }),
+                Err(error) => {
+                    warn!(%error, "could not watch capture buffer fences");
+                    frame.fail(CaptureFailureReason::Unknown);
+                    return;
+                }
+            }
+        } else {
+            None
+        };
         self.capture.pending.push(PendingFrame {
             output,
             session: session.clone(),
@@ -157,6 +256,7 @@ impl ImageCopyCaptureHandler for ServerState {
             work: FrameWork::Waiting,
             sampled_at: Duration::ZERO,
             cursor: None,
+            writable,
         });
     }
 
@@ -183,6 +283,7 @@ impl ServerState {
         for session in self.capture.sessions.drain(..) {
             session.stop();
         }
+        self.capture.cached.clear();
     }
     pub(crate) fn enable_output_capture(&mut self) {
         self.capture.enabled = true;
@@ -195,13 +296,41 @@ impl ServerState {
             .any(|pending| matches!(pending.work, FrameWork::Waiting))
     }
 
+    /// Only the first request without a current snapshot needs composition.
+    pub(crate) fn output_capture_needs_composition(&self) -> bool {
+        self.capture.pending.iter().any(|pending| {
+            matches!(pending.work, FrameWork::Waiting)
+                && self
+                    .capture
+                    .cached
+                    .get(&pending.output)
+                    .is_none_or(|frame| frame.target().extent() != pending.extent)
+        })
+    }
+
+    pub(crate) fn capture_cached_outputs(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        worker: &CaptureWorker,
+    ) {
+        let cached = std::mem::take(&mut self.capture.cached);
+        for (output, frame) in &cached {
+            self.deliver_output_frame(*output, frame, device, queue, worker);
+        }
+        self.capture.cached = cached;
+    }
+
     pub(crate) fn output_capture_timeout(&self, now: Instant) -> Option<Duration> {
         self.capture
             .pending
             .iter()
-            .map(|pending| match pending.work {
-                FrameWork::Failed(_) => Duration::ZERO,
-                _ => pending.deadline.saturating_duration_since(now),
+            .filter_map(|pending| match pending.work {
+                FrameWork::Failed(_) => Some(Duration::ZERO),
+                // Submitted writes retain their allocations until completion;
+                // an expired CPU deadline must not turn a slow GPU into polling.
+                FrameWork::Gpu(_) => None,
+                _ => Some(pending.deadline.saturating_duration_since(now)),
             })
             .min()
     }
@@ -215,6 +344,38 @@ impl ServerState {
         queue: &wgpu::Queue,
         worker: &CaptureWorker,
     ) {
+        if !self
+            .capture
+            .sessions
+            .iter()
+            .any(|session| session.source().user_data().get::<OutputId>() == Some(&output))
+        {
+            return;
+        }
+        let snapshot =
+            snapshot_composition(device, queue, frame, self.capture.cached.remove(&output));
+        match snapshot {
+            Ok(snapshot) => {
+                self.deliver_output_frame(output, &snapshot, device, queue, worker);
+                self.capture.cached.insert(output, snapshot);
+            }
+            Err(error) => {
+                warn!(%error, "could not retain output for capture");
+            }
+        }
+    }
+
+    fn deliver_output_frame(
+        &mut self,
+        output: OutputId,
+        frame: &CompositionFrame,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        worker: &CaptureWorker,
+    ) {
+        if self.session_locked() {
+            return;
+        }
         let sampled_at = Clock::<Monotonic>::new().now().into();
         let draw_cursor = self.capture.pending.iter().any(|pending| {
             pending.output == output
@@ -230,6 +391,10 @@ impl ServerState {
             if pending.output != output
                 || !matches!(pending.work, FrameWork::Waiting)
                 || pending.frame.has_failed()
+                || pending
+                    .writable
+                    .as_ref()
+                    .is_some_and(|fence| !fence.ready.get())
             {
                 continue;
             }
@@ -247,6 +412,37 @@ impl ServerState {
                         continue;
                     }
                 }
+            }
+            pending.writable = None;
+            if let Ok(buffer) = get_dmabuf(&pending.frame.buffer()) {
+                let result = (|| -> Result<GpuCaptureTask> {
+                    if self.capture.gpu.is_none() {
+                        self.capture.gpu = Some(GpuCapture::new(device, queue, worker.notifier())?);
+                    }
+                    let gpu = self
+                        .capture
+                        .gpu
+                        .as_mut()
+                        .context("GPU capture unavailable")?;
+                    gpu.submit(buffer, frame.target().view(), |blitter, target, encoder| {
+                        if let Some(cursor) = &pending.cursor {
+                            cursor.paint_gpu(device, queue, blitter, target, encoder)?;
+                        }
+                        Ok(())
+                    })
+                })();
+                match result {
+                    Ok(task) => {
+                        pending.work = FrameWork::Gpu(task);
+                        pending.sampled_at = sampled_at;
+                        tracing::trace!(target: "weld_capture", ?output, "submitted DMA-BUF output capture");
+                    }
+                    Err(error) => {
+                        warn!(%error, "could not submit DMA-BUF output capture");
+                        pending.work = FrameWork::Failed(CaptureFailureReason::Unknown);
+                    }
+                }
+                continue;
             }
             match read_owned_frame_async(device, queue, frame, None, worker) {
                 Ok(task) => {
@@ -279,6 +475,27 @@ impl ServerState {
             }
             if let FrameWork::Failed(reason) = pending.work {
                 self.capture.pending.swap_remove(index).frame.fail(reason);
+                continue;
+            }
+            if let FrameWork::Gpu(task) = &pending.work {
+                if let Some(result) = task.poll() {
+                    let pending = self.capture.pending.swap_remove(index);
+                    match result {
+                        Ok(()) => pending.frame.success(
+                            Transform::Normal,
+                            Some(vec![Rectangle::from_size(
+                                (pending.extent.width as i32, pending.extent.height as i32).into(),
+                            )]),
+                            pending.sampled_at,
+                        ),
+                        Err(error) => {
+                            warn!(%error, "GPU capture completion failed");
+                            pending.frame.fail(CaptureFailureReason::Unknown);
+                        }
+                    }
+                } else {
+                    index += 1;
+                }
                 continue;
             }
             let result = match &pending.work {
@@ -320,6 +537,15 @@ impl ServerState {
             }
         }
         self.capture.sessions.retain(|session| session.alive());
+        self.capture.cached.retain(|id, _| {
+            self.capture
+                .sessions
+                .iter()
+                .any(|session| session.source().user_data().get::<OutputId>() == Some(id))
+        });
+        if let Some(gpu) = &mut self.capture.gpu {
+            gpu.prune();
+        }
         self.capture.copies.cleanup();
         let sessions: Vec<_> = self.capture.sessions.iter().map(Session::as_ref).collect();
         for session in sessions {

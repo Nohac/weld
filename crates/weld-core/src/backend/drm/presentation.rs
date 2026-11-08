@@ -30,6 +30,12 @@ use super::{
     renderer::{BatchFinish, CompositionElement, DrmRenderState, DrmRenderer, OutputElement},
 };
 
+pub(super) struct FrameDelivery<'a> {
+    pub server: &'a mut ServerState,
+    pub callbacks: &'a mut CallbackLedger,
+    pub capture_worker: &'a crate::renderer::capture_task::CaptureWorker,
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FrameAdmission {
     Idle,
@@ -328,11 +334,15 @@ impl PhysicalDesktop {
         &mut self,
         requested_outputs: &[OutputId],
         host: &mut dyn CompositionHost,
-        server: &mut ServerState,
-        callbacks: &mut CallbackLedger,
+        delivery: FrameDelivery<'_>,
         vblank_phases: &HashMap<OutputId, Duration>,
         stage_callbacks: bool,
     ) -> Result<PhysicalRenderOutcome> {
+        let FrameDelivery {
+            server,
+            callbacks,
+            capture_worker,
+        } = delivery;
         let mut outcome = PhysicalRenderOutcome::default();
         let mut indices = Vec::with_capacity(requested_outputs.len());
         for output_id in requested_outputs {
@@ -372,9 +382,19 @@ impl PhysicalDesktop {
             })?
         } else {
             self.lock_composition.update(HashMap::new());
+            let device = self.render_state.device().clone();
+            let queue = self.render_state.queue().clone();
             self.render_state.finish_batch(|requests, frames| {
                 host.render_outputs(requests, frames)?;
                 for frame in frames {
+                    tracing::trace!(target: "weld_capture", output = ?frame.output, "completed output composition");
+                    server.capture_output_frame(
+                        frame.output,
+                        &frame.frame,
+                        &device,
+                        &queue,
+                        capture_worker,
+                    );
                     if let Some(batch) =
                         server.take_presentation_feedback(frame.output, &frame.surfaces)
                     {
@@ -584,6 +604,18 @@ impl PhysicalDesktop {
         server.capture_output_frame(
             output.output,
             &output.frame,
+            self.render_state.device(),
+            self.render_state.queue(),
+            worker,
+        );
+    }
+
+    pub(super) fn capture_cached_outputs(
+        &self,
+        server: &mut ServerState,
+        worker: &crate::renderer::capture_task::CaptureWorker,
+    ) {
+        server.capture_cached_outputs(
             self.render_state.device(),
             self.render_state.queue(),
             worker,

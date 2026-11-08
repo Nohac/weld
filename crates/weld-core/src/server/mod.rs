@@ -212,7 +212,8 @@ impl ServerState {
         } = options;
         let display_handle = display.handle();
         let compositor_state = CompositorState::new::<Self>(&display_handle);
-        let capture = capture::OutputCapture::new(&display_handle);
+        let capture =
+            capture::OutputCapture::new(&display_handle, loop_handle.clone(), dmabuf_capabilities);
         let presentation_time = presentation_time::global(&display_handle);
         let session_lock = session_lock::SessionLock::new(&display_handle);
         let xdg_shell_state = XdgShellState::new::<Self>(&display_handle);

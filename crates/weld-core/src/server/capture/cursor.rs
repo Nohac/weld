@@ -46,6 +46,68 @@ impl ServerState {
 }
 
 impl CaptureCursor {
+    pub(super) fn paint_gpu(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        blitter: &crate::renderer::CompositionBlitter,
+        target: &wgpu::TextureView,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<()> {
+        let x = self.x.max(0).min(i64::from(target.texture().width()));
+        let y = self.y.max(0).min(i64::from(target.texture().height()));
+        let right = (self.x + i64::from(self.width)).min(i64::from(target.texture().width()));
+        let bottom = (self.y + i64::from(self.height)).min(i64::from(target.texture().height()));
+        if right <= x || bottom <= y {
+            return Ok(());
+        }
+        let width = u32::try_from(right - x)?;
+        let height = u32::try_from(bottom - y)?;
+        let mut pixels = Vec::with_capacity((width * height * 4) as usize);
+        for row in y..bottom {
+            let start = usize::try_from(((row - self.y) * i64::from(self.width) + x - self.x) * 4)?;
+            pixels.extend_from_slice(&self.pixels[start..start + width as usize * 4]);
+        }
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("output capture cursor"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8UnormSrgb,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        queue.write_texture(
+            texture.as_image_copy(),
+            &pixels,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 4),
+                rows_per_image: Some(height),
+            },
+            texture.size(),
+        );
+        let binding = blitter.create_bind_group(
+            device,
+            "output capture cursor",
+            &texture.create_view(&Default::default()),
+        );
+        blitter.encode_overlay(
+            encoder,
+            "capture cursor overlay",
+            target,
+            &binding,
+            (x as f32, y as f32, width as f32, height as f32),
+            [(x as u32, y as u32, width, height)],
+        );
+        Ok(())
+    }
+
     pub(super) fn paint(&self, extent: Extent, pixels: &mut [u8]) -> Result<()> {
         let expected = u64::from(extent.width) * u64::from(extent.height) * 4;
         ensure!(

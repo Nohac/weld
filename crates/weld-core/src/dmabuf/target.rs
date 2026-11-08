@@ -47,8 +47,8 @@ pub(crate) fn renderable_scanout_formats(adapter: &wgpu::Adapter) -> Result<Vec<
         instance,
         physical_device,
         vk::Format::B8G8R8A8_SRGB,
-        vk::FormatFeatureFlags::COLOR_ATTACHMENT,
-        vk::ImageUsageFlags::COLOR_ATTACHMENT,
+        vk::FormatFeatureFlags::COLOR_ATTACHMENT | vk::FormatFeatureFlags::TRANSFER_SRC,
+        vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC,
     )?
     .into_iter()
     .map(|modifier| Format {
@@ -264,6 +264,22 @@ pub(crate) fn import_render_target(
     dmabuf: &Dmabuf,
     format: wgpu::TextureFormat,
 ) -> Result<ImportedRenderTarget> {
+    import_target(device, dmabuf, format, true)
+}
+
+pub(crate) fn import_capture_target(
+    device: &wgpu::Device,
+    dmabuf: &Dmabuf,
+) -> Result<ImportedRenderTarget> {
+    import_target(device, dmabuf, wgpu::TextureFormat::Bgra8UnormSrgb, false)
+}
+
+fn import_target(
+    device: &wgpu::Device,
+    dmabuf: &Dmabuf,
+    format: wgpu::TextureFormat,
+    copy_source: bool,
+) -> Result<ImportedRenderTarget> {
     let size = dmabuf.size();
     let width = u32::try_from(size.w).context("negative GBM buffer width")?;
     let height = u32::try_from(size.h).context("negative GBM buffer height")?;
@@ -287,12 +303,17 @@ pub(crate) fn import_render_target(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUses::COLOR_TARGET,
+        usage: wgpu::TextureUses::COLOR_TARGET
+            | if copy_source {
+                wgpu::TextureUses::COPY_SRC
+            } else {
+                wgpu::TextureUses::empty()
+            },
         memory_flags: wgpu::hal::MemoryFlags::empty(),
         view_formats: Vec::new(),
     };
-    // SAFETY: capability discovery and Smithay selected this exact explicit,
-    // single-plane modifier for scanout and Vulkan color-attachment use.
+    // SAFETY: callers validate this explicit, single-plane modifier against
+    // capability discovery for the supplied format and attachment/copy usage.
     let hal_texture = unsafe {
         let raw = device
             .as_hal::<wgpu::hal::api::Vulkan>()
@@ -312,7 +333,12 @@ pub(crate) fn import_render_target(
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
         format,
-        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+            | if copy_source {
+                wgpu::TextureUsages::COPY_SRC
+            } else {
+                wgpu::TextureUsages::empty()
+            },
         view_formats: &[],
     };
     // SAFETY: the HAL texture was created by this exact device and descriptor.

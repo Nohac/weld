@@ -50,6 +50,8 @@ const PROFILING_FEATURES: wgpu::Features = wgpu::Features::TIMESTAMP_QUERY
 pub struct DmabufCapabilities {
     pub(crate) main_device: Dev,
     pub(crate) formats: Vec<Format>,
+    /// Renderable capture destinations, also accepted by the linux-dmabuf importer.
+    pub(crate) capture_formats: Vec<Format>,
     pub(crate) syncobj_import_device: Option<DrmDeviceFd>,
 }
 
@@ -189,6 +191,22 @@ fn discover_capabilities(adapter: &wgpu::Adapter) -> Result<Option<DmabufCapabil
     if formats.is_empty() {
         return Ok(None);
     }
+    let capture_formats = super::target::modifiers_for_usage(
+        instance,
+        physical_device,
+        vk::Format::B8G8R8A8_SRGB,
+        vk::FormatFeatureFlags::COLOR_ATTACHMENT,
+        vk::ImageUsageFlags::COLOR_ATTACHMENT,
+    )?
+    .into_iter()
+    .flat_map(|modifier| {
+        [Fourcc::Argb8888, Fourcc::Xrgb8888].map(|code| Format {
+            code,
+            modifier: Modifier::from(modifier),
+        })
+    })
+    .filter(|format| formats.contains(format))
+    .collect();
     let syncobj_import_device = match open_syncobj_import_device(main_device) {
         Ok(device) => Some(device),
         Err(error) => {
@@ -199,6 +217,7 @@ fn discover_capabilities(adapter: &wgpu::Adapter) -> Result<Option<DmabufCapabil
     Ok(Some(DmabufCapabilities {
         main_device,
         formats,
+        capture_formats,
         syncobj_import_device,
     }))
 }

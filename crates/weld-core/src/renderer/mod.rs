@@ -21,6 +21,8 @@ use crate::dmabuf::{DmabufCapabilities, DmabufSourceCache};
 use crate::host::CompositionFrame;
 use crate::runtime::gpu::NativeGpu;
 
+pub(crate) mod capture_gpu;
+pub(crate) mod capture_snapshot;
 pub(crate) mod capture_task;
 pub(crate) mod composite;
 pub(crate) mod session_lock;

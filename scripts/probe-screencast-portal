@@ -1,0 +1,178 @@
+#!/usr/bin/env python3
+"""Exercise ScreenCast and PipeWire on a private D-Bus session and test output.
+
+Requires PyGObject/GIO, GStreamer pipewiresrc, and portal frontend/backend paths.
+Invoked by check-output-capture --portal; never reconfigures desktop services.
+"""
+import os
+import json
+import shutil
+from pathlib import Path
+import subprocess
+import sys
+import time
+
+import gi
+gi.require_version("Gst", "1.0")
+gi.require_version("GstAllocators", "1.0")
+from gi.repository import Gio, GLib, Gst, GstAllocators
+
+
+def main():
+    run = Path(sys.argv[1])
+    config = run / "portal-config"
+    (config / "xdg-desktop-portal").mkdir(parents=True, exist_ok=True)
+    (config / "xdg-desktop-portal/portals.conf").write_text("[preferred]\ndefault=wlr\norg.freedesktop.impl.portal.ScreenCast=wlr\n")
+    backend_config = config / "wlr.ini"
+    backend_config.write_text("[screencast]\nchooser_type=none\noutput_name=weld-nested\nmax_fps=60\n")
+    env = dict(os.environ, XDG_CONFIG_HOME=str(config), XDG_CURRENT_DESKTOP="WeldCaptureTest")
+    children = []
+    connection = Gio.bus_get_sync(Gio.BusType.SESSION, None)
+    destination = "org.freedesktop.portal.Desktop"
+    path = "/org/freedesktop/portal/desktop"
+    interface = "org.freedesktop.portal.ScreenCast"
+    session = None
+    def wait_owner(name):
+        deadline = time.monotonic() + 15
+        while time.monotonic() < deadline:
+            owned = connection.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "NameHasOwner", GLib.Variant("(s)", (name,)), None, Gio.DBusCallFlags.NONE, 1000, None).unpack()[0]
+            if owned:
+                return
+            time.sleep(0.05)
+        raise RuntimeError("D-Bus service did not start: " + name)
+    try:
+        for name, command in [
+            ("backend", [os.environ["WELD_TEST_PORTAL_BACKEND"], "--config", str(backend_config), "--loglevel", "TRACE"]),
+            ("frontend", [os.environ["WELD_TEST_PORTAL_FRONTEND"], "--verbose"]),
+        ]:
+            with (run / f"portal-{name}.log").open("w") as log:
+                children.append(subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT))
+            wait_owner("org.freedesktop.impl.portal.desktop.wlr" if name == "backend" else destination)
+        deadline = time.monotonic() + 15
+        while True:
+            try:
+                connection.call_sync(destination, path, "org.freedesktop.DBus.Properties", "Get", GLib.Variant("(ss)", (interface, "version")), None, Gio.DBusCallFlags.NONE, 1000, None)
+                break
+            except GLib.Error:
+                if time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.1)
+
+        def request(method, parameters):
+            responses = []
+            loop = GLib.MainLoop()
+            def response(*args):
+                responses.append(args[5].unpack())
+                loop.quit()
+            subscription = connection.signal_subscribe(destination, "org.freedesktop.portal.Request", "Response", None, None, Gio.DBusSignalFlags.NONE, response)
+            timer = GLib.timeout_add_seconds(15, lambda: (loop.quit(), False)[1])
+            try:
+                connection.call_sync(destination, path, interface, method, parameters, None, Gio.DBusCallFlags.NONE, 5000, None)
+                loop.run()
+                if not responses or responses[0][0] != 0:
+                    raise RuntimeError(f"{method} failed: {responses}")
+                return responses[0][1]
+            finally:
+                connection.signal_unsubscribe(subscription)
+                GLib.source_remove(timer)
+
+        session = request("CreateSession", GLib.Variant("(a{sv})", ({"session_handle_token": GLib.Variant("s", "capturetest")},)))["session_handle"]
+        request("SelectSources", GLib.Variant("(oa{sv})", (session, {"types": GLib.Variant("u", 1), "cursor_mode": GLib.Variant("u", 2)})))
+        streams = request("Start", GLib.Variant("(osa{sv})", (session, "", {})))["streams"]
+        result, descriptors = connection.call_with_unix_fd_list_sync(destination, path, interface, "OpenPipeWireRemote", GLib.Variant("(oa{sv})", (session, {})), None, Gio.DBusCallFlags.NONE, 5000, None, None)
+        descriptor = descriptors.get(result.unpack()[0])
+        Gst.init(None)
+        pipeline = Gst.parse_launch(f"pipewiresrc fd={descriptor} path={streams[0][0]} num-buffers=90 min-buffers=8 max-buffers=8 ! video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format=XR24 ! fakesink name=sink sync=false enable-last-sample=false signal-handoffs=true")
+        observed = {"frames": 0, "dmabuf_frames": 0}
+        def handoff(_sink, buffer, _pad):
+            observed["frames"] += 1
+            if buffer.n_memory() and GstAllocators.is_dmabuf_memory(buffer.peek_memory(0)):
+                observed["dmabuf_frames"] += 1
+        pipeline.get_by_name("sink").connect("handoff", handoff)
+        try:
+            pipeline.set_state(Gst.State.PLAYING)
+            message = pipeline.get_bus().timed_pop_filtered(20 * Gst.SECOND, Gst.MessageType.EOS | Gst.MessageType.ERROR)
+            if message is None:
+                raise RuntimeError("PipeWire consumer timed out: " + str(observed))
+            if message.type == Gst.MessageType.ERROR:
+                raise RuntimeError(str(message.parse_error()))
+            (run / "portal-stream.log").write_text(str(observed) + "\n")
+            if observed["frames"] != 90 or observed["dmabuf_frames"] != 90:
+                raise RuntimeError("Expected 90 DMA-BUF frames: " + str(observed))
+        finally:
+            pipeline.set_state(Gst.State.NULL)
+            os.close(descriptor)
+        print("PASS ScreenCast portal delivered 90 DMA-BUF frames through restricted PipeWire access", flush=True)
+        if "--kooha" in sys.argv:
+            connection.call_sync(destination, session, "org.freedesktop.portal.Session", "Close", None, None, Gio.DBusCallFlags.NONE, 2000, None)
+            session = None
+            app_id = "io.github.seadve.Kooha"
+            kooha = shutil.which("kooha")
+            if not kooha:
+                raise RuntimeError("Kooha is not installed")
+            app_env = dict(env, GSETTINGS_BACKEND="keyfile", GDK_BACKEND="wayland")
+            # Nix wraps application-local schema paths; conventional installs
+            # expose the schema through the normal GSettings search path.
+            schemas = list(Path(kooha).resolve().parent.parent.glob("share/gsettings-schemas/*/glib-2.0/schemas"))
+            schema_args = ["--schemadir", str(schemas[0])] if schemas else []
+            for key, value in [("record-desktop-audio", "false"), ("record-microphone", "false"), ("saving-location", GLib.Variant("ay", list(os.fsencode(run)) + [0]).print_(True))]:
+                subprocess.run(["gsettings", *schema_args, "set", app_id, key, value], env=app_env, check=True)
+            with (run / "kooha.log").open("w") as log:
+                children.append(subprocess.Popen([kooha], env=app_env, stdout=log, stderr=subprocess.STDOUT))
+            wait_owner(app_id)
+            with (run / "animation.log").open("w") as log:
+                children.append(subprocess.Popen(["foot", "--title=Animated capture validation", "sh", "-c", "while :; do printf '\033[41m\033[2J\033[HRED'; sleep 0.2; printf '\033[44m\033[2J\033[HBLUE'; sleep 0.2; done"], env=app_env, stdout=log, stderr=subprocess.STDOUT))
+            weldctl = str(Path(__file__).resolve().parent.parent / "target/debug/weldctl")
+            def control(*args):
+                return json.loads(subprocess.check_output([weldctl, "--session", env["WAYLAND_DISPLAY"], "window", *args, "--json"], env=app_env, text=True, timeout=5))
+            deadline = time.monotonic() + 10
+            while True:
+                windows = control("find", app_id)["windows"]
+                if windows:
+                    break
+                if time.monotonic() > deadline:
+                    raise RuntimeError("Kooha did not map its test window")
+                time.sleep(0.1)
+            control("control", windows[0]["id"], "--enabled")
+            target = control("find", app_id)["windows"][0]["control"]
+            def toggle():
+                control("input", "--params-json", json.dumps({"control": target, "actions": [["p", ["Control_L", "r"], 30]]}))
+            toggle()
+            time.sleep(4)
+            toggle()
+            deadline = time.monotonic() + 10
+            evidence = None
+            while time.monotonic() < deadline:
+                for recording in run.glob("*.webm"):
+                    result = subprocess.run(["ffprobe", "-v", "error", "-count_frames", "-show_entries", "stream=width,height,nb_read_frames", "-of", "json", str(recording)], capture_output=True, text=True, timeout=5)
+                    if result.returncode == 0:
+                        evidence = json.loads(result.stdout)
+                        if any(int(stream.get("nb_read_frames", 0)) >= 30 for stream in evidence.get("streams", [])):
+                            hashes = subprocess.check_output(["ffmpeg", "-v", "error", "-ss", "2", "-i", str(recording), "-vf", "fps=10", "-f", "framemd5", "-"], text=True, timeout=10)
+                            distinct = {line.rsplit(",", 1)[-1].strip() for line in hashes.splitlines() if line and not line.startswith("#")}
+                            (run / "kooha-motion.framemd5").write_text(hashes)
+                            if len(distinct) < 2:
+                                raise RuntimeError("Kooha recording froze despite the animated test source")
+                            (run / "kooha-recording.json").write_text(json.dumps(evidence, indent=2) + "\n")
+                            print("PASS Kooha recorded a decodable video: " + str(recording), flush=True)
+                            return
+                time.sleep(0.2)
+            raise RuntimeError("Kooha did not produce a decodable recording: " + str(evidence))
+    finally:
+        if session:
+            try:
+                connection.call_sync(destination, session, "org.freedesktop.portal.Session", "Close", None, None, Gio.DBusCallFlags.NONE, 2000, None)
+            except GLib.Error:
+                pass
+        for child in reversed(children):
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait(timeout=5)
+
+
+if __name__ == "__main__":
+    main()

@@ -412,7 +412,18 @@ impl NativeDriver<NestedEvent> for NestedDriver {
         state: &mut HostState<NestedEvent>,
         shell: &mut dyn ApplicationHost,
     ) -> PolicyFrame {
-        if state.data.server.output_capture_requested() {
+        if state.data.server.output_capture_requested()
+            && let Some(frame) = &self.completed_composition
+        {
+            state.data.server.capture_output_frame(
+                OutputId::new(1),
+                frame,
+                self.renderer.device(),
+                self.renderer.queue(),
+                &state.capture_worker,
+            );
+        }
+        if state.data.server.output_capture_needs_composition() {
             self.frame_state.request_composition();
         }
         if state.data.server.presentation_requested() {
@@ -502,6 +513,7 @@ impl NativeDriver<NestedEvent> for NestedDriver {
                     .composition_frames
                     .pop()
                     .context("nested composition returned no output frame")?;
+                tracing::trace!(target: "weld_capture", output = ?composition.output, "completed output composition");
                 debug_assert!(self.composition_frames.is_empty());
                 state.data.server.capture_output_frame(
                     composition.output,

@@ -196,9 +196,14 @@ Weld is a workspace of reusable layers and one standard distribution:
   edges. An idle-sleeping transfer worker writes offered data outside the host
   loop. See [Local file dragging](file-drag.md).
   Its output-capture host binds Smithay's image-copy-capture and output-source
-  protocols. Presenters submit ordered copies of completed composition textures;
-  a bounded worker owns GPU readback and optional PNG writing. The host validates
-  and fills client SHM before signalling capture completion. See
+  protocols. Capture writes compatible client DMA-BUFs on the GPU, waits for
+  foreign readers through calloop, and signals completion from a bounded GPU
+  worker. Imports are retained through completion and cached by buffer lifetime.
+  DRM keeps a cursor-free GPU snapshot while an output has capture sessions;
+  nested capture reuses its owned composition. Requests against unchanged output
+  content do not schedule Bevy renders. SHM capture retains asynchronous readback
+  and optional PNG writing. The external portal backend publishes captured
+  buffers through PipeWire. See
   [Screenshots](screenshots.md) for supported tools and validation.
   Its native session-lock boundary owns locker surfaces, local input isolation,
   opaque output composition and confirmation after protected DRM page flips.

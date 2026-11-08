@@ -41,6 +41,9 @@ pub(crate) struct CaptureWorker {
 }
 
 impl CaptureWorker {
+    pub(crate) fn notifier(&self) -> ClientRuntimeNotifier {
+        self.wake.clone()
+    }
     pub(crate) fn new(wake: ClientRuntimeNotifier) -> Result<Self> {
         let (jobs, receiver) = mpsc::sync_channel::<Work>(8);
         let worker_wake = wake.clone();

@@ -315,6 +315,14 @@ never update the entire lockfile casually.
 clipboard delivery in a private nested session. See [Screenshots](docs/screenshots.md)
 for the asynchronous GPU snapshot regression and manual DRM checks.
 
+`scripts/check-output-capture` validates DMA-BUF/SHM pixel equality, repeated
+capture, cursor inclusion and cancellation. It defaults to a GPU-backed headless
+Weston parent so tests do not open windows on the running Weld desktop. Set
+`WELD_TEST_WESTON` when Weston is not on PATH. A visible fallback is permitted on
+other identified desktops; `--visible` explicitly permits it on Weld. Optional
+`--portal` and `--kooha` checks use a private D-Bus session and portal services;
+their dependencies and environment are documented in [Screenshots](docs/screenshots.md).
+
 Add coverage when it validates a stable behavior, protects a contract, or
 reproduces a regression. Prefer deterministic ECS and policy tests over tests
 that require a display server or GPU. Use a nested or headless host for broader

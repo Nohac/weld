@@ -11,6 +11,18 @@ impl CompositionBlitter {
         Self::with_shader(device, target_format, include_str!("composite.wgsl"))
     }
 
+    pub(crate) fn straight_alpha(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+    ) -> Self {
+        Self::with_blend(
+            device,
+            target_format,
+            include_str!("composite.wgsl"),
+            wgpu::BlendState::ALPHA_BLENDING,
+        )
+    }
+
     #[cfg(feature = "test-support")]
     pub fn for_benchmark_client(device: &wgpu::Device, target_format: wgpu::TextureFormat) -> Self {
         Self::with_shader(
@@ -24,6 +36,20 @@ impl CompositionBlitter {
         device: &wgpu::Device,
         target_format: wgpu::TextureFormat,
         source: &str,
+    ) -> Self {
+        Self::with_blend(
+            device,
+            target_format,
+            source,
+            wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING,
+        )
+    }
+
+    fn with_blend(
+        device: &wgpu::Device,
+        target_format: wgpu::TextureFormat,
+        source: &str,
+        blend: wgpu::BlendState,
     ) -> Self {
         let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("weld composition bind group layout"),
@@ -73,7 +99,7 @@ impl CompositionBlitter {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: target_format,
-                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                    blend: Some(blend),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),

@@ -5,12 +5,8 @@ struct VertexOutput {
 
 @vertex
 fn vertex(@builtin(vertex_index) index: u32) -> VertexOutput {
-    let positions = array<vec2<f32>, 3>(
-        vec2<f32>(-1.0, -1.0),
-        vec2<f32>(3.0, -1.0),
-        vec2<f32>(-1.0, 3.0),
-    );
-    let position = positions[index];
+    let corner = vec2<f32>(f32((index << 1u) & 2u), f32(index & 2u));
+    let position = corner * 2.0 - vec2<f32>(1.0);
     return VertexOutput(
         vec4<f32>(position, 0.0, 1.0),
         position * vec2<f32>(0.5, -0.5) + vec2<f32>(0.5, 0.5),
