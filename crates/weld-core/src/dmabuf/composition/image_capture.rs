@@ -2,6 +2,7 @@
 
 use super::{FORMAT, SourceCompositor, sampling_barrier_command};
 use crate::{
+    dmabuf::sync::record_sampling_barriers,
     host::ClientRuntimeNotifier,
     renderer::{
         capture_gpu::{GpuCapture, GpuCaptureTask},
@@ -67,28 +68,35 @@ impl WindowImageCapture {
         let compositor = &mut self.compositor;
         let live = compositor.prepare(frame)?;
         let images = compositor.input_images(&live);
-        let acquire = sampling_barrier_command(
-            &compositor.device,
-            &compositor.raw_device,
-            compositor.queue_family,
-            &images,
-            true,
-        )?;
-        let release = sampling_barrier_command(
-            &compositor.device,
-            &compositor.raw_device,
-            compositor.queue_family,
-            &images,
-            false,
-        )?;
         let task = if let Some(buffer) = buffer {
             ImageCaptureTask::Gpu(self.gpu.submit_render(
                 buffer,
-                acquire,
-                release,
+                |encoder, acquire| {
+                    record_sampling_barriers(
+                        encoder,
+                        &compositor.raw_device,
+                        compositor.queue_family,
+                        &images,
+                        acquire,
+                    )
+                },
                 |_, _, target, encoder| compositor.draw(frame, target, encoder),
             )?)
         } else {
+            let acquire = sampling_barrier_command(
+                &compositor.device,
+                &compositor.raw_device,
+                compositor.queue_family,
+                &images,
+                true,
+            )?;
+            let release = sampling_barrier_command(
+                &compositor.device,
+                &compositor.raw_device,
+                compositor.queue_family,
+                &images,
+                false,
+            )?;
             let row_bytes = (u64::from(frame.extent.width) * 4).next_multiple_of(256);
             ensure!(
                 row_bytes

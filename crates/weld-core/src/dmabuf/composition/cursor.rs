@@ -96,6 +96,7 @@ impl SourceCompositor {
                 hotspot: raster.hotspot,
                 binding,
                 geometry: GeometrySlot {
+                    uploaded: None,
                     buffer,
                     binding: geometry_binding,
                 },

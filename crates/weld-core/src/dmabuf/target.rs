@@ -173,8 +173,39 @@ pub(crate) unsafe fn foreign_image_barrier_command(
             "Weld DRM scanout release"
         }),
     });
+    // SAFETY: this encoder belongs to device; the caller retains the image and
+    // upholds the documented device and queue ownership requirements.
+    unsafe {
+        record_foreign_image_barrier(
+            &mut encoder,
+            raw_device,
+            queue_family,
+            image,
+            previously_used,
+            direction,
+        )?;
+    }
+    Ok(encoder.finish())
+}
+
+/// Append a destination ownership transition to a raw Vulkan command encoder.
+///
+/// # Safety
+///
+/// The encoder and image must belong to raw_device and queue_family. The image
+/// must remain alive through completion; submit acquire, draw and release in
+/// order. This encoder must contain only raw Vulkan commands.
+pub(crate) unsafe fn record_foreign_image_barrier(
+    encoder: &mut wgpu::CommandEncoder,
+    raw_device: &ash::Device,
+    queue_family: u32,
+    image: vk::Image,
+    previously_used: bool,
+    direction: ForeignImageBarrier,
+) -> Result<()> {
+    let acquire = direction == ForeignImageBarrier::Acquire;
     // SAFETY: the caller upholds the image, device, queue-family, and lifetime
-    // invariants documented above. This encoder contains only the barrier.
+    // invariants documented above. This encoder records only raw transitions.
     let recorded = unsafe {
         encoder.as_hal_mut::<wgpu::hal::api::Vulkan, _, _>(|raw_encoder| {
             let raw_encoder = raw_encoder?;
@@ -249,7 +280,7 @@ pub(crate) unsafe fn foreign_image_barrier_command(
         })
     };
     recorded.context("wgpu did not expose a Vulkan encoder for scanout ownership")?;
-    Ok(encoder.finish())
+    Ok(())
 }
 
 pub(crate) struct ImportedRenderTarget {

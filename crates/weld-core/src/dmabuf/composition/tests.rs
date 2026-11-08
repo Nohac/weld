@@ -107,6 +107,18 @@ fn gpu_composes_alpha_and_clipping_and_keeps_leased_targets_immutable() -> Resul
     let third = compositor.compose(&frame)?;
     assert_eq!(third.export()?.extent, Extent::new(64, 64));
     assert_eq!(compositor.targets.len(), 2, "reuse released target storage");
+    drop(third);
+    frame.layers[0].placement.position = LogicalPoint::new(16.0, 0.0);
+    let moved = compositor.compose(&frame)?;
+    let moved_pixels = readback(&compositor, &moved)?;
+    assert_ne!(
+        &moved_pixels[..4],
+        &[200, 0, 0, 255],
+        "changed placement invalidates cached geometry"
+    );
+    assert_eq!(&moved_pixels[(48 * 4)..(49 * 4)], &[200, 0, 0, 255]);
+    drop(moved);
+    frame.layers[0].placement.position = LogicalPoint::ZERO;
     let (wake, _source) = crate::host::client_runtime_notifier()?;
     let mut capture = SourceCapture::new(Path::new(&path), wake)?;
     let first = capture.capture(&frame)?;

@@ -20,6 +20,22 @@ pub(crate) fn sampling_barrier_command(
             "weld DMA-BUF foreign release"
         }),
     });
+    record_sampling_barriers(&mut encoder, raw_device, queue_family, images, acquire)?;
+    Ok(Some(encoder.finish()))
+}
+
+/// Append sampling transitions to an encoder containing only raw Vulkan commands.
+/// The caller retains the imported images through the submitted work's completion.
+pub(crate) fn record_sampling_barriers(
+    encoder: &mut wgpu::CommandEncoder,
+    raw_device: &ash::Device,
+    queue_family: u32,
+    images: &[vk::Image],
+    acquire: bool,
+) -> Result<()> {
+    if images.is_empty() {
+        return Ok(());
+    }
     let recorded =
         // SAFETY: the callback records one Vulkan barrier into wgpu's
         // active command buffer without ending or submitting it. The image
@@ -91,5 +107,5 @@ pub(crate) fn sampling_barrier_command(
             })
         };
     recorded.context("wgpu command encoder is not backed by Vulkan")?;
-    Ok(Some(encoder.finish()))
+    Ok(())
 }

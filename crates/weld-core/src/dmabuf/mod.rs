@@ -15,6 +15,8 @@ pub use manager::{
     StagedImport,
 };
 pub(crate) use source::{DmabufSourceCache, ImportedDmabufSource};
+#[cfg(test)]
+pub(crate) use sync::record_sampling_barriers;
 
 use smithay::{backend::allocator::dmabuf::Dmabuf, utils::SealedFile};
 use std::{

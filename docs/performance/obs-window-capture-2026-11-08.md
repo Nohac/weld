@@ -181,3 +181,49 @@ main update and no UI preparation, stable bind groups, resize, hide/show and
 GPU-image retirement. A focused state test covers SHM → DMA-BUF promotion →
 SHM and opacity changes. All 98 existing application tests passed on the GPU;
 the additional transition test passed separately.
+
+## Capture submission changes and integration validation
+
+Window DMA-BUF capture now records source and destination acquisition in one
+raw command buffer, and their releases in another. The draw remains a separate
+wgpu command buffer: wgpu 30 explicitly separates raw HAL recording from its
+deferred draw API. This reduces five command encoders/buffers to three for
+DMA-BUF window sources while preserving acquire → draw → release ordering,
+completion ownership, cancellation, and source leases. Capture/stream composition
+also skips uniform-buffer writes when layer geometry and sampling flags match
+the last uploaded bytes. Source and destination buffer reuse remains independent
+of geometry reuse.
+
+The expanded GPU regression captures both an owned snapshot and a foreign
+DMA-BUF source into a reused foreign destination, checking red/blue/green
+pixels after each completion. It passes with Vulkan synchronization validation.
+The composition regressions verify geometry changes, alpha/clipping, immutable
+leased targets, cursor position/scale/hiding and on-demand snapshots. No
+capture-specific CPU reduction is claimed without an equivalent before/after
+capture benchmark.
+
+`scripts/check-output-capture --portal --kooha-window --xwayland` passed using
+a private headless Weston parent. Evidence is in
+`target/validation/output-capture-z3vpk9e3/` and
+`capture-opt-integration-final.log`: output and window DMA-BUF/SHM pixel equality,
+resize/close lifecycle, X11/GTK clients, cursor capture, cancellation/reuse,
+180 window frames at 60 fps with zero extra desktop compositions, 90 DMA-BUF
+portal frames, and a decodable animated hidden-window Kooha recording.
+The compositor log has no Vulkan validation errors or synchronization hazards.
+
+An initial portal test failed before consuming frames because its Python
+GObject extension and GLib introspection files loaded two different GLib
+store builds. A standalone `fakesink` reproduced that failure without Weld.
+Selecting the matching GLib typelib directory fixed the test environment;
+no portal or compositor workaround was added.
+
+Core tests passed: 170 ordinary tests, with 66 opt-in tests excluded. The
+file-transfer test requires host access for its socket timeout operation;
+the sandbox denied that operation, and the host run passed. Three focused
+opt-in GPU tests passed separately. Focused all-target checks and Clippy
+completed; Clippy warnings were checked against unchanged source at the
+baseline and are not introduced by these changes. Formatting checks passed.
+
+The installed/live compositor was not replaced. Ordinary visible DMA-BUF
+clients still execute the retained renderer lifecycle described above; these
+changes do not establish a fix for Brave's complete reported 20–30% workload.

@@ -3,8 +3,8 @@
 use super::CompositionBlitter;
 use crate::{
     dmabuf::target::{
-        ForeignImageBarrier, ImportedRenderTarget, foreign_image_barrier_command,
-        import_capture_target,
+        ForeignImageBarrier, ImportedRenderTarget, import_capture_target,
+        record_foreign_image_barrier,
     },
     host::ClientRuntimeNotifier,
 };
@@ -110,19 +110,22 @@ impl GpuCapture {
         ) -> Result<()>,
     ) -> Result<GpuCaptureTask> {
         let device = self.device.clone();
-        self.submit_render(buffer, None, None, |blitter, cursor, target, encoder| {
-            let binding = blitter.create_bind_group(&device, "capture composition", source);
-            blitter.encode(encoder, "output capture copy", target, &binding);
-            overlay(cursor, target, encoder)
-        })
+        self.submit_render(
+            buffer,
+            |_, _| Ok(()),
+            |blitter, cursor, target, encoder| {
+                let binding = blitter.create_bind_group(&device, "capture composition", source);
+                blitter.encode(encoder, "output capture copy", target, &binding);
+                overlay(cursor, target, encoder)
+            },
+        )
     }
 
     /// Sources and destination acquire/release on the same queue submission.
     pub(crate) fn submit_render(
         &mut self,
         buffer: &Dmabuf,
-        before: Option<wgpu::CommandBuffer>,
-        after: Option<wgpu::CommandBuffer>,
+        source_barriers: impl Fn(&mut wgpu::CommandEncoder, bool) -> Result<()>,
         render: impl FnOnce(
             &CompositionBlitter,
             &CompositionBlitter,
@@ -169,31 +172,39 @@ impl GpuCapture {
                 .device
                 .as_hal::<wgpu::hal::api::Vulkan>()
                 .context("capture device is not Vulkan")?;
-            (
-                foreign_image_barrier_command(
-                    &self.device,
-                    raw.raw_device(),
-                    raw.queue_family_index(),
-                    target.image,
-                    true,
-                    ForeignImageBarrier::Acquire,
-                )?,
-                foreign_image_barrier_command(
-                    &self.device,
-                    raw.raw_device(),
-                    raw.queue_family_index(),
-                    target.image,
-                    true,
-                    ForeignImageBarrier::Release,
-                )?,
-            )
+            let mut acquire = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("capture source and destination acquire"),
+                });
+            source_barriers(&mut acquire, true)?;
+            record_foreign_image_barrier(
+                &mut acquire,
+                raw.raw_device(),
+                raw.queue_family_index(),
+                target.image,
+                true,
+                ForeignImageBarrier::Acquire,
+            )?;
+            let mut release = self
+                .device
+                .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("capture destination and source release"),
+                });
+            record_foreign_image_barrier(
+                &mut release,
+                raw.raw_device(),
+                raw.queue_family_index(),
+                target.image,
+                true,
+                ForeignImageBarrier::Release,
+            )?;
+            source_barriers(&mut release, false)?;
+            (acquire.finish(), release.finish())
         };
-        let submission = self.queue.submit(
-            before
-                .into_iter()
-                .chain([acquire, encoder.finish(), release])
-                .chain(after),
-        );
+        // wgpu 30 separates raw HAL recording from its deferred draw encoding.
+        // Group transitions on each side of the draw without mixing those APIs.
+        let submission = self.queue.submit([acquire, encoder.finish(), release]);
         let (done, result) = mpsc::sync_channel(1);
         let work = Completion {
             device: self.device.clone(),
@@ -231,7 +242,10 @@ impl GpuCaptureTask {
 mod tests {
     use super::*;
     use crate::{
-        dmabuf::{request_weld_device, target::import_render_target},
+        dmabuf::{
+            DmabufSourceCache, record_sampling_barriers, request_weld_device,
+            target::{foreign_image_barrier_command, import_render_target},
+        },
         host::{CompositionFrame, CompositionTargetView, client_runtime_notifier},
         renderer::{capture_snapshot::snapshot_composition, read_owned_frame_rgba},
         surface::Extent,
@@ -281,6 +295,13 @@ mod tests {
         let destination = destination_allocation.export().expect("export destination");
         let (wake, _events) = client_runtime_notifier().expect("wake");
         let mut capture = GpuCapture::new(&device, &queue, wake).expect("capture");
+        let sources = DmabufSourceCache::new(&device);
+        let sampled = sources.import(&source_buffer).expect("sampling import");
+        // SAFETY: device owns these handles through the entire test.
+        let (raw_device, queue_family) = unsafe {
+            let raw = device.as_hal::<wgpu::hal::api::Vulkan>().expect("Vulkan");
+            (raw.raw_device().clone(), raw.queue_family_index())
+        };
         let mut snapshot = None;
         for (color, expected_bgra) in [
             (wgpu::Color::RED, [0, 0, 255, 255]),
@@ -336,34 +357,65 @@ mod tests {
             let retained =
                 snapshot_composition(&device, &queue, &frame, snapshot.take()).expect("snapshot");
             queue.submit([release]);
-            let task = capture
-                .submit(&destination, retained.target().view(), |_, _, _| Ok(()))
-                .expect("capture submission");
-            task.0
-                .recv_timeout(Duration::from_secs(5))
-                .expect("completion timeout")
-                .expect("GPU completion");
-            destination
-                .sync_plane(0, DmabufSyncFlags::START | DmabufSyncFlags::READ)
-                .expect("map sync");
-            let mapping = destination
-                .map_plane(0, DmabufMappingMode::READ)
-                .expect("map");
-            let stride = destination.strides().next().expect("stride") as usize;
-            assert!(mapping.length() >= stride * 23 + 128);
-            for row in 0..24 {
-                // SAFETY: our exclusive allocation is GPU-complete and the row
-                // bounds were checked against the live CPU mapping above.
-                let pixels = unsafe {
-                    std::slice::from_raw_parts(mapping.ptr().cast::<u8>().add(row * stride), 128)
+            for direct in [false, true] {
+                let task = if direct {
+                    capture
+                        .submit_render(
+                            &destination,
+                            |encoder, acquire| {
+                                record_sampling_barriers(
+                                    encoder,
+                                    &raw_device,
+                                    queue_family,
+                                    &[sampled.image],
+                                    acquire,
+                                )
+                            },
+                            |blitter, _, target, encoder| {
+                                let binding = blitter.create_bind_group(
+                                    &device,
+                                    "foreign source regression",
+                                    &sampled.view,
+                                );
+                                blitter.encode(encoder, "foreign source capture", target, &binding);
+                                Ok(())
+                            },
+                        )
+                        .expect("direct source capture")
+                } else {
+                    capture
+                        .submit(&destination, retained.target().view(), |_, _, _| Ok(()))
+                        .expect("capture submission")
                 };
-                for pixel in pixels.as_chunks::<4>().0 {
-                    assert_eq!(&pixel[..3], &expected_bgra[..3]);
+                task.0
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("completion timeout")
+                    .expect("GPU completion");
+                destination
+                    .sync_plane(0, DmabufSyncFlags::START | DmabufSyncFlags::READ)
+                    .expect("map sync");
+                let mapping = destination
+                    .map_plane(0, DmabufMappingMode::READ)
+                    .expect("map");
+                let stride = destination.strides().next().expect("stride") as usize;
+                assert!(mapping.length() >= stride * 23 + 128);
+                for row in 0..24 {
+                    // SAFETY: our exclusive allocation is GPU-complete and the row
+                    // bounds were checked against the live CPU mapping above.
+                    let pixels = unsafe {
+                        std::slice::from_raw_parts(
+                            mapping.ptr().cast::<u8>().add(row * stride),
+                            128,
+                        )
+                    };
+                    for pixel in pixels.as_chunks::<4>().0 {
+                        assert_eq!(&pixel[..3], &expected_bgra[..3]);
+                    }
                 }
+                destination
+                    .sync_plane(0, DmabufSyncFlags::END | DmabufSyncFlags::READ)
+                    .expect("unmap sync");
             }
-            destination
-                .sync_plane(0, DmabufSyncFlags::END | DmabufSyncFlags::READ)
-                .expect("unmap sync");
             let mut expected_rgba = expected_bgra;
             expected_rgba.swap(0, 2);
             assert_eq!(

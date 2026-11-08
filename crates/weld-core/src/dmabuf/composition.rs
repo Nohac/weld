@@ -61,6 +61,7 @@ struct InputTexture {
 struct GeometrySlot {
     buffer: wgpu::Buffer,
     binding: wgpu::BindGroup,
+    uploaded: Option<[u8; 48]>,
 }
 
 /// Created lazily for sources requesting a composed view. Imports, target storage,
@@ -333,7 +334,11 @@ impl SourceCompositor {
                         resource: buffer.as_entire_binding(),
                     }],
                 });
-                self.geometry.push(GeometrySlot { buffer, binding });
+                self.geometry.push(GeometrySlot {
+                    buffer,
+                    binding,
+                    uploaded: None,
+                });
             }
             let texture = self
                 .textures
@@ -367,8 +372,11 @@ impl SourceCompositor {
             for (value, destination) in values.iter().zip(bytes.chunks_exact_mut(4)) {
                 destination.copy_from_slice(&value.to_ne_bytes());
             }
-            self.queue
-                .write_buffer(&self.geometry[index].buffer, 0, &bytes);
+            let slot = &mut self.geometry[index];
+            if slot.uploaded.as_ref() != Some(&bytes) {
+                self.queue.write_buffer(&slot.buffer, 0, &bytes);
+                slot.uploaded = Some(bytes);
+            }
         }
         self.prepare_cursor(frame)?;
         Ok(live)
