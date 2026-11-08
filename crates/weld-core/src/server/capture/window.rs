@@ -21,17 +21,47 @@ use smithay::{
         image_capture_source::{
             ImageCaptureSource, ToplevelCaptureSourceHandler, ToplevelCaptureSourceState,
         },
-        image_copy_capture::{CaptureFailureReason, ImageCopyCaptureHandler},
+        image_copy_capture::{CaptureFailureReason, ImageCopyCaptureHandler, SessionRef},
     },
 };
 use std::{
+    cell::RefCell,
     collections::{HashMap, HashSet},
     path::PathBuf,
+    time::Instant,
 };
 use weld_client::{
-    ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceMetadata, ClientSurfaceRole,
-    ComposedBuffer, SourceViews, SurfaceBufferChange, SurfaceStreamMode,
+    ClientCursor, ClientSurfaceEvent, ClientSurfaceEventKind, ClientSurfaceMetadata,
+    ClientSurfaceRole, ComposedBuffer, CompositionCursor, LogicalPoint, SourceViews,
+    SurfaceBufferChange, SurfaceStreamMode,
 };
+
+#[derive(Clone, Debug, PartialEq)]
+pub(super) struct WindowContent {
+    revision: u64,
+    cursor: Option<CompositionCursor>,
+}
+
+#[derive(Default)]
+struct DeliveredWindowContent(RefCell<Option<WindowContent>>);
+
+impl WindowContent {
+    fn was_delivered(&self, session: &SessionRef) -> bool {
+        session
+            .user_data()
+            .get::<DeliveredWindowContent>()
+            .is_some_and(|last| last.0.borrow().as_ref() == Some(self))
+    }
+
+    pub(super) fn delivered(self, session: &SessionRef) {
+        session
+            .user_data()
+            .insert_if_missing(DeliveredWindowContent::default);
+        if let Some(last) = session.user_data().get::<DeliveredWindowContent>() {
+            *last.0.borrow_mut() = Some(self);
+        }
+    }
+}
 
 pub(super) struct WindowSources {
     list: ForeignToplevelListState,
@@ -40,6 +70,7 @@ pub(super) struct WindowSources {
     metadata: HashMap<SurfaceId, ClientSurfaceMetadata>,
     members: HashSet<SurfaceId>,
     demand: HashSet<SurfaceId>,
+    revisions: HashMap<SurfaceId, u64>,
     views: SourceViews,
     render_node: Option<PathBuf>,
     renderer: Option<WindowImageCapture>,
@@ -61,6 +92,7 @@ impl WindowSources {
             metadata: HashMap::new(),
             members: HashSet::new(),
             demand: HashSet::new(),
+            revisions: HashMap::new(),
             views: SourceViews::new(SurfaceStreamMode::Composited),
             render_node,
             renderer: None,
@@ -125,6 +157,7 @@ impl ServerState {
         }
         let windows = &mut self.capture.windows;
         let id = event.surface;
+        let previous_root = windows.views.root(id);
         match &event.kind {
             ClientSurfaceEventKind::Role(ClientSurfaceRole::Toplevel(_))
             | ClientSurfaceEventKind::Role(ClientSurfaceRole::Popup(_)) => {
@@ -150,6 +183,25 @@ impl ServerState {
         }
         if let Err(error) = windows.views.retain((), event.clone()) {
             tracing::warn!(%error, "could not retain capture scene");
+        }
+        if matches!(
+            event.kind,
+            ClientSurfaceEventKind::Commit(_)
+                | ClientSurfaceEventKind::Role(_)
+                | ClientSurfaceEventKind::Destroyed
+        ) {
+            let current_root = windows.views.root(id);
+            for root in previous_root
+                .into_iter()
+                .chain(current_root.filter(|root| Some(*root) != previous_root))
+            {
+                if root == id && matches!(event.kind, ClientSurfaceEventKind::Destroyed) {
+                    windows.revisions.remove(&root);
+                } else {
+                    let revision = windows.revisions.entry(root).or_default();
+                    *revision = revision.wrapping_add(1);
+                }
+            }
         }
         if windows.views.root(id) == Some(id) && windows.views.viewport(id).is_some() {
             let empty = ClientSurfaceMetadata::default();
@@ -270,24 +322,33 @@ impl ServerState {
                     FrameWork::Failed(CaptureFailureReason::BufferConstraints);
                 continue;
             }
+            let content = WindowContent {
+                revision: self
+                    .capture
+                    .windows
+                    .revisions
+                    .get(&id)
+                    .copied()
+                    .unwrap_or_default(),
+                cursor: self
+                    .window_capture_cursor(id, self.capture.pending[index].session.draw_cursor()),
+            };
+            if content.was_delivered(&self.capture.pending[index].session) {
+                // ext-image-copy-capture permits waiting indefinitely for source
+                // changes after the first frame. Recorder demand alone is not
+                // new content and must not drive repeated GPU copies.
+                self.capture.pending[index].waiting_for_change = true;
+                continue;
+            }
+            self.capture.pending[index].waiting_for_change = false;
             let result = (|| -> Result<ImageCaptureTask> {
                 let mut scene = self.capture.windows.scene(id)?;
-                if self.capture.pending[index].session.draw_cursor()
-                    && let Some(hit) = self.local_input.pointer_target.get()
-                    && let Some(origin) =
-                        self.capture
-                            .windows
-                            .views
-                            .input_origin(id, hit.surface, hit.layer)
-                {
-                    scene.cursor = Some(weld_client::CompositionCursor {
-                        image: self.presented_cursor.clone().unwrap_or_default(),
-                        position: weld_client::LogicalPoint::new(
-                            origin.x + hit.local_position.x as f32,
-                            origin.y + hit.local_position.y as f32,
-                        ),
-                    });
-                }
+                scene.cursor = self
+                    .window_capture_cursor(id, self.capture.pending[index].session.draw_cursor());
+                self.capture.pending[index].window_content = Some(WindowContent {
+                    revision: content.revision,
+                    cursor: scene.cursor.clone(),
+                });
                 anyhow::ensure!(
                     scene.extent == self.capture.pending[index].extent,
                     "window capture size changed"
@@ -316,17 +377,47 @@ impl ServerState {
             })();
             let pending = &mut self.capture.pending[index];
             pending.writable = None;
+            pending.deadline = Instant::now() + super::FRAME_TIMEOUT;
             pending.sampled_at = smithay::utils::Clock::<smithay::utils::Monotonic>::new()
                 .now()
                 .into();
             pending.work = match result {
-                Ok(ImageCaptureTask::Gpu(task)) => FrameWork::Gpu(task),
-                Ok(ImageCaptureTask::Readback(task)) => FrameWork::Readback(task),
+                Ok(ImageCaptureTask::Gpu(task)) => {
+                    tracing::trace!(target: "weld_capture", ?id, "submitted window capture");
+                    FrameWork::Gpu(task)
+                }
+                Ok(ImageCaptureTask::Readback(task)) => {
+                    tracing::trace!(target: "weld_capture", ?id, "submitted window capture");
+                    FrameWork::Readback(task)
+                }
                 Err(error) => {
                     tracing::warn!(%error, "could not capture window");
                     FrameWork::Failed(CaptureFailureReason::Unknown)
                 }
             };
         }
+    }
+
+    fn window_capture_cursor(&self, id: SurfaceId, draw: bool) -> Option<CompositionCursor> {
+        if !draw {
+            return None;
+        }
+        let image = self.presented_cursor.clone().unwrap_or_default();
+        if matches!(image, ClientCursor::Hidden) {
+            return None;
+        }
+        let hit = self.local_input.pointer_target.get()?;
+        let origin = self
+            .capture
+            .windows
+            .views
+            .input_origin(id, hit.surface, hit.layer)?;
+        Some(CompositionCursor {
+            image,
+            position: LogicalPoint::new(
+                origin.x + hit.local_position.x as f32,
+                origin.y + hit.local_position.y as f32,
+            ),
+        })
     }
 }

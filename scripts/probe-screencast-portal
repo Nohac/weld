@@ -92,7 +92,10 @@ def main():
             result, descriptors = connection.call_with_unix_fd_list_sync(destination, path, interface, "OpenPipeWireRemote", GLib.Variant("(oa{sv})", (session, {})), None, Gio.DBusCallFlags.NONE, 5000, None, None)
             descriptor = descriptors.get(result.unpack()[0])
             Gst.init(None)
-            pipeline = Gst.parse_launch(f"pipewiresrc fd={descriptor} path={streams[0][0]} num-buffers=90 min-buffers=8 max-buffers=8 ! video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format=XR24 ! fakesink name=sink sync=false enable-last-sample=false signal-handoffs=true")
+            # A static window stream may wait indefinitely after its first frame.
+            # The animated hidden-window recording below verifies ongoing delivery.
+            expected_frames = 1 if "--window" in sys.argv else 90
+            pipeline = Gst.parse_launch(f"pipewiresrc fd={descriptor} path={streams[0][0]} num-buffers={expected_frames} min-buffers=8 max-buffers=8 ! video/x-raw(memory:DMABuf),format=DMA_DRM,drm-format=XR24 ! fakesink name=sink sync=false enable-last-sample=false signal-handoffs=true")
             observed = {"frames": 0, "dmabuf_frames": 0, "corrupted_frames": 0}
             def handoff(_sink, buffer, _pad):
                 observed["frames"] += 1
@@ -109,12 +112,12 @@ def main():
                 if message.type == Gst.MessageType.ERROR:
                     raise RuntimeError(str(message.parse_error()))
                 (run / "portal-stream.log").write_text(str(observed) + "\n")
-                if observed["frames"] != 90 or observed["dmabuf_frames"] != 90 or observed["corrupted_frames"]:
-                    raise RuntimeError("Expected 90 complete DMA-BUF frames: " + str(observed))
+                if observed["frames"] != expected_frames or observed["dmabuf_frames"] != expected_frames or observed["corrupted_frames"]:
+                    raise RuntimeError(f"Expected {expected_frames} complete DMA-BUF frames: " + str(observed))
             finally:
                 pipeline.set_state(Gst.State.NULL)
                 os.close(descriptor)
-            print("PASS ScreenCast portal delivered 90 DMA-BUF frames through restricted PipeWire access", flush=True)
+            print(f"PASS ScreenCast portal delivered {expected_frames} DMA-BUF frames through restricted PipeWire access", flush=True)
         if "--kooha" in sys.argv:
             if session:
                 connection.call_sync(destination, session, "org.freedesktop.portal.Session", "Close", None, None, Gio.DBusCallFlags.NONE, 2000, None)

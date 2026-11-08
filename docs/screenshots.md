@@ -73,6 +73,12 @@ frame callbacks and presentation feedback; capture only supplies the missing
 demand for hidden windows. Closing, unmapping, locking the session, or
 ending capture withdraws that claim without removing another stream's claim.
 The window-source protocol requires an available DRM render node.
+
+Each window-capture session receives its first frame promptly. Subsequent frames
+wait for changed application content, popup state, or an included cursor change.
+An idle stream remains valid while waiting; repeated recorder requests do not
+cause repeated GPU copies of the same scene. New independent snapshot sessions
+retain their first-frame guarantee.
 Window resize updates buffer constraints; old source handles remain stopped
 if the application later remaps.
 

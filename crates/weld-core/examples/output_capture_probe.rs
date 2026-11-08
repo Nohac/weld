@@ -61,6 +61,15 @@ struct Options {
     /// Require a static source and compare its SHM and DMA-BUF pixels exactly.
     #[arg(long)]
     compare: bool,
+    /// Request independent snapshots, each with its own first-frame guarantee.
+    #[arg(long)]
+    fresh_sessions: bool,
+    /// Verify an unchanged window waits without failing, then optionally resume.
+    #[arg(long, requires = "window_title")]
+    idle_ms: Option<u64>,
+    /// Touch PREFIX.ready after the idle check; a fixture should then repaint.
+    #[arg(long, requires = "idle_ms")]
+    resume_marker: Option<std::path::PathBuf>,
 }
 #[derive(Default)]
 struct Probe {
@@ -239,7 +248,7 @@ fn main() -> Result<()> {
             .context("output source protocol missing")?
             .create_source(probe.output.as_ref().context("output missing")?, &qh, ())
     };
-    let session = probe
+    let mut session = probe
         .copies
         .as_ref()
         .context("capture protocol missing")?
@@ -344,6 +353,28 @@ fn main() -> Result<()> {
     invalid_buffer.destroy();
     println!("PASS undersized buffer rejected without closing the capture session");
     let mut capture = |destination: &wl_buffer::WlBuffer| -> Result<()> {
+        if options.fresh_sessions || options.compare || options.lifecycle.is_some() {
+            session.destroy();
+            probe.ready = false;
+            session = probe
+                .copies
+                .as_ref()
+                .context("capture protocol missing")?
+                .create_session(
+                    &source,
+                    if options.cursor {
+                        copies::Options::PaintCursors
+                    } else {
+                        copies::Options::empty()
+                    },
+                    &qh,
+                    (),
+                );
+            while !probe.ready {
+                queue.blocking_dispatch(&mut probe)?;
+                ensure!(probe.failure.is_none(), "{:?}", probe.failure);
+            }
+        }
         probe.done = false;
         let frame = session.create_frame(&qh, ());
         frame.attach_buffer(destination);
@@ -357,6 +388,41 @@ fn main() -> Result<()> {
         Ok(())
     };
     capture(&shm_buffer)?;
+    if let Some(idle_ms) = options.idle_ms {
+        ensure!((1..=20000).contains(&idle_ms), "invalid idle interval");
+        drop(capture);
+        probe.done = false;
+        let frame = session.create_frame(&qh, ());
+        frame.attach_buffer(&dma_buffer);
+        frame.damage_buffer(0, 0, width as i32, height as i32);
+        frame.capture();
+        let end = Instant::now() + Duration::from_millis(idle_ms);
+        while Instant::now() < end {
+            queue.roundtrip(&mut probe)?;
+            ensure!(!probe.done, "unchanged window produced another frame");
+            ensure!(
+                probe.failure.is_none(),
+                "idle capture failed: {:?}",
+                probe.failure
+            );
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        println!("PASS unchanged window kept capture pending for {idle_ms} ms");
+        if let Some(marker) = &options.resume_marker {
+            std::fs::write(marker.with_extension("ready"), b"repaint")?;
+            while !probe.done {
+                queue.blocking_dispatch(&mut probe)?;
+                ensure!(
+                    probe.failure.is_none(),
+                    "resumed capture failed: {:?}",
+                    probe.failure
+                );
+            }
+            println!("PASS pending capture resumed after source repaint");
+        }
+        frame.destroy();
+        return Ok(());
+    }
     let started = Instant::now();
     for index in 0..options.frames {
         capture(&dma_buffer)?;

@@ -99,6 +99,23 @@ struct PendingFrame {
     sampled_at: Duration,
     cursor: Option<CaptureCursor>,
     writable: Option<BufferReady>,
+    waiting_for_change: bool,
+    window_content: Option<window::WindowContent>,
+}
+
+impl PendingFrame {
+    fn success(self) {
+        if let Some(content) = self.window_content {
+            content.delivered(&self.session);
+        }
+        self.frame.success(
+            Transform::Normal,
+            Some(vec![Rectangle::from_size(
+                (self.extent.width as i32, self.extent.height as i32).into(),
+            )]),
+            self.sampled_at,
+        );
+    }
 }
 
 struct BufferReady {
@@ -302,6 +319,8 @@ impl ImageCopyCaptureHandler for ServerState {
             sampled_at: Duration::ZERO,
             cursor: None,
             writable,
+            waiting_for_change: false,
+            window_content: None,
         });
         self.refresh_capture_demand();
     }
@@ -382,6 +401,7 @@ impl ServerState {
                 // Submitted writes retain their allocations until completion;
                 // an expired CPU deadline must not turn a slow GPU into polling.
                 FrameWork::Gpu(_) => None,
+                FrameWork::Waiting if pending.waiting_for_change => None,
                 _ => Some(pending.deadline.saturating_duration_since(now)),
             })
             .min()
@@ -533,13 +553,7 @@ impl ServerState {
                 if let Some(result) = task.poll() {
                     let pending = self.capture.pending.swap_remove(index);
                     match result {
-                        Ok(()) => pending.frame.success(
-                            Transform::Normal,
-                            Some(vec![Rectangle::from_size(
-                                (pending.extent.width as i32, pending.extent.height as i32).into(),
-                            )]),
-                            pending.sampled_at,
-                        ),
+                        Ok(()) => pending.success(),
                         Err(error) => {
                             warn!(%error, "GPU capture completion failed");
                             pending.frame.fail(CaptureFailureReason::Unknown);
@@ -566,19 +580,13 @@ impl ServerState {
                     .context("capture buffer is not writable SHM")?
                 });
                 match result {
-                    Ok(()) => pending.frame.success(
-                        Transform::Normal,
-                        Some(vec![Rectangle::from_size(
-                            (pending.extent.width as i32, pending.extent.height as i32).into(),
-                        )]),
-                        pending.sampled_at,
-                    ),
+                    Ok(()) => pending.success(),
                     Err(error) => {
                         warn!(%error, "could not deliver output capture");
                         pending.frame.fail(CaptureFailureReason::Unknown);
                     }
                 }
-            } else if pending.deadline <= now {
+            } else if !pending.waiting_for_change && pending.deadline <= now {
                 self.capture
                     .pending
                     .swap_remove(index)
