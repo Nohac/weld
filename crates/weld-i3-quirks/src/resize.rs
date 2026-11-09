@@ -9,13 +9,13 @@ use bevy::{
     math::Vec2,
 };
 use weld_float::FloatingResizeRequest;
-use weld_i3_config::I3ResizeRequest;
 use weld_tile::TileRequest;
+use weld_tile_config::ResizeRequest;
 use weld_tile_config::{SplitAxis, TileOperation};
 use weld_window::{FloatingWindow, FocusedWindow, WindowGeometry};
 
 pub(crate) fn request(
-    event: On<I3ResizeRequest>,
+    event: On<ResizeRequest>,
     focus: Res<FocusedWindow>,
     floating: Query<&WindowGeometry, With<FloatingWindow>>,
     mut commands: Commands,

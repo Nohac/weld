@@ -5,7 +5,7 @@ use std::{
     sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
 };
-use weld_i3_config::WorkspaceTarget;
+use weld_window_config::WorkspaceTarget;
 
 use anyhow::{Context as ContextExt, Result, ensure};
 use bevy::prelude::*;
@@ -152,6 +152,7 @@ pub(crate) fn install(app: &mut WeldApp, native: ClientLauncher) -> Result<Launc
             .chain()
             .in_set(LaunchAdmission)
             .after(WindowSystems::AdmissionPolicy)
+            .before(weld_tile::TileSystems::Prepare)
             .before(WindowSystems::PresentationRevoke),
     );
     Ok(Launcher {

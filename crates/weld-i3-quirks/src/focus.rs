@@ -22,7 +22,7 @@ use weld_window::{
 use crate::{FocusWrapping, I3FocusRequest, tree::TreeView};
 
 pub(crate) fn hierarchy(
-    event: On<crate::I3FocusHierarchy>,
+    event: On<crate::FocusHierarchy>,
     tree: TreeView,
     focus: Res<FocusedWindow>,
     selection: Res<TileSelection>,
@@ -39,10 +39,8 @@ pub(crate) fn hierarchy(
         return;
     };
     let target = match *event.event() {
-        crate::I3FocusHierarchy::Parent => {
-            tree.parents.get(node).ok().map(|parent| parent.entity())
-        }
-        crate::I3FocusHierarchy::Child => tree.child(node),
+        crate::FocusHierarchy::Parent => tree.parents.get(node).ok().map(|parent| parent.entity()),
+        crate::FocusHierarchy::Child => tree.child(node),
     };
     if let Some(target) = target {
         commands.trigger(TileSelect(target));
@@ -123,7 +121,7 @@ impl TreeView<'_, '_> {
                         self.descend(neighbor)
                     };
                 }
-                if wrapping != FocusWrapping::No
+                if wrapping != FocusWrapping::Disabled
                     && wrap.is_none()
                     && container.children().count() > 1
                 {
@@ -133,7 +131,7 @@ impl TreeView<'_, '_> {
                         container.children().last()
                     }
                     .map(|(child, _)| child);
-                    if wrapping == FocusWrapping::Force {
+                    if wrapping == FocusWrapping::Immediate {
                         return wrap.and_then(|node| {
                             if self.containers.contains(window) {
                                 Some(node)

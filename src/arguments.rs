@@ -144,7 +144,7 @@ impl BackendKind {
     ]).multiple(false))
 )]
 pub struct AppArguments {
-    /// Required configuration file for graphical Master. Unsupported Sway features
+    /// Required configuration file for graphical weldwm. Unsupported Sway features
     /// warn and skip. Headless sessions do not use configuration.
     #[arg(long, value_name = "PATH")]
     pub(crate) config: Option<PathBuf>,

@@ -14,10 +14,7 @@ weld-tile = { path = "../weld-tile" }
 weld-ssd = { path = "../weld-ssd" }
 
 [dev-dependencies]
-weld-i3-config = { path = "../weld-i3-config", features = ["ecs"] }
-
 weld-window-config = { path = "../weld-window-config", features = ["ecs"] }
-
-weld-sway-adapter = { path = "../weld-sway-adapter" }
+weld-sway-config = { path = "../weld-sway-config" }
 weld-client = { path = "../weld-client" }
 weld-i3-quirks = { path = "../weld-i3-quirks" }

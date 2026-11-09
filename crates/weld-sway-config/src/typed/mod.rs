@@ -738,41 +738,29 @@ fn property_nodes(
             ensure!(!words.is_empty(), "output requires a property");
             let mut words = words.iter().copied().peekable();
             while let Some(property) = words.next() {
-                if property == "scale" {
-                    let factor =
-                        FiniteFloat::word(words.next().context("output scale requires a factor")?)?;
-                    document.directives.push(Located {
+                let Ok(kind) = OutputPropertyKind::word(property) else {
+                    policy.handle(
+                        unsupported(format!("unsupported output property {property}")),
+                        &origin.source,
+                        origin.line,
+                        &mut document.warnings,
+                    )?;
+                    break;
+                };
+                if !kind.is_supported() {
+                    policy.handle(
+                        unsupported(format!("unsupported output property {property}")),
+                        &origin.source,
+                        origin.line,
+                        &mut document.warnings,
+                    )?;
+                }
+                match kind.parse_next(&mut words)? {
+                    OutputProperty::Scale(factor) => document.directives.push(Located {
                         value: Directive::OutputScale(selector.clone(), factor),
                         location: origin.clone(),
-                    });
-                    continue;
-                }
-                policy.handle(
-                    unsupported(format!("unsupported output property {property}")),
-                    &origin.source,
-                    origin.line,
-                    &mut document.warnings,
-                )?;
-                let count = match property {
-                    "enable" | "disable" => 0,
-                    "adaptive_sync" | "transform" | "scale_filter" | "power" | "dpms"
-                    | "max_render_time" | "subpixel" => 1,
-                    "mode" | "resolution" => {
-                        if words.peek() == Some(&"--custom") {
-                            words.next();
-                        }
-                        1
-                    }
-                    "pos" | "position" => usize::from(
-                        !words
-                            .next()
-                            .context("output position requires coordinates")?
-                            .contains(','),
-                    ),
-                    _ => break,
-                };
-                for _ in 0..count {
-                    words.next().context("missing output property value")?;
+                    }),
+                    OutputProperty::Skipped(_) => {}
                 }
             }
             return Ok(());

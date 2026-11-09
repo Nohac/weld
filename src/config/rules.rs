@@ -1,6 +1,7 @@
 //! Source-ordered, once-per-match commands targeting each managed client.
 
-use anyhow::{Context, Result, ensure};
+use bevy::app::{App, Plugin, PreUpdate};
+use bevy::ecs::schedule::IntoScheduleConfigs;
 use bevy::ecs::{
     change_detection::{DetectChanges, Ref},
     component::Component,
@@ -8,72 +9,48 @@ use bevy::ecs::{
     event::Event,
     observer::On,
     query::{QueryData, With},
-    resource::Resource,
     system::{Commands, Local, Query, Res},
 };
 use bevy::math::Vec2;
-use regex::Regex;
 use weld_app::output::OutputPosition;
 use weld_app::surface::{ClientWindowMetadata, MappedSurface, SurfaceId};
-use weld_i3_config::{Field, RuleAction, RuleDefinition, RuleEffect};
 use weld_ssd::WindowBorderStyle;
 #[cfg(test)]
 use weld_ssd_config::BorderStyle;
 use weld_tile::TileFloatingRequest;
+use weld_tile::TileSystems;
 use weld_window::persistence::WindowPersistenceRequest;
 use weld_window::{
     FloatingWindow, ManagedBy, ManagedWindow, WindowAdmissionPreferences, WindowClientResolver,
     WindowGeometry, WindowIntent, WindowIntentKind, WindowOutput,
 };
+use weld_window::{WindowSystems, rules::WindowRuleSystems};
+use weld_window_config::RuleEffect;
+use weldwm_config::RuleAction;
 
-use crate::workspace::I3WindowWorkspaceRequest;
+use weld_i3_quirks::workspace::I3WindowWorkspaceRequest;
 
-/// Compiled configuration rules, replaced atomically on a successful reload.
-#[derive(Resource, Clone, Debug, Default)]
-pub struct WindowRules(Vec<WindowRule>);
+/// Window rules instantiated with weldwm's cross-feature action vocabulary.
+pub(super) type ConfiguredRules = weld_window::rules::WindowRules<RuleAction>;
 
-#[derive(Clone, Debug)]
-struct WindowRule {
-    criteria: Vec<(Field, Regex)>,
-    effect: RuleEffect,
-}
-
-impl WindowRules {
-    /// Validate and compile one native rule before a candidate is activated.
-    pub fn add(&mut self, rule: RuleDefinition) -> Result<()> {
-        ensure!(self.0.len() < 1024, "too many window rules");
-        let criteria = rule
-            .criteria
-            .into_iter()
-            .map(|(field, pattern)| {
-                Ok((
-                    field,
-                    Regex::new(&pattern)
-                        .context("invalid or unsupported window-rule regular expression")?,
-                ))
-            })
-            .collect::<Result<_>>()?;
-        self.0.push(WindowRule {
-            criteria,
-            effect: rule.effect,
-        });
-        Ok(())
-    }
-}
-
-impl WindowRule {
-    fn matches(&self, metadata: &ClientWindowMetadata) -> bool {
-        let metadata = &metadata.0;
-        self.criteria.iter().all(|(field, pattern)| {
-            let value = match field {
-                Field::AppId if metadata.x11_class().is_some() => "",
-                Field::AppId => metadata.app_id(),
-                Field::Class => metadata.x11_class().unwrap_or_default(),
-                Field::Instance => metadata.x11_instance().unwrap_or_default(),
-                Field::Title => metadata.title(),
-            };
-            pattern.is_match(value)
-        })
+pub(super) struct WindowRulePlugin;
+impl Plugin for WindowRulePlugin {
+    fn build(&self, app: &mut App) {
+        app.init_resource::<ConfiguredRules>()
+            .add_observer(execute)
+            .add_systems(
+                PreUpdate,
+                apply
+                    .in_set(WindowRuleSystems::Evaluate)
+                    .in_set(WindowSystems::AdmissionPolicy),
+            )
+            .add_systems(
+                PreUpdate,
+                dispatch
+                    .after(TileSystems::Prepare)
+                    .before(TileSystems::Commands)
+                    .in_set(WindowSystems::Management),
+            );
     }
 }
 
@@ -105,7 +82,7 @@ pub(crate) struct RuleTarget {
 }
 
 pub(crate) fn apply(
-    rules: Res<WindowRules>,
+    rules: Res<ConfiguredRules>,
     mut generation: Local<u64>,
     windows: Query<RuleTarget, With<ManagedWindow>>,
     clients: WindowClientResolver,
@@ -152,12 +129,11 @@ pub(crate) fn apply(
             commands.entity(window).remove::<PendingActions>();
         }
         if initial {
-            preferences.focus = !rules
-                .0
-                .iter()
-                .any(|rule| matches!(rule.effect, RuleEffect::NoFocus) && rule.matches(&metadata));
-            if let Some(target) = rules.0.iter().find_map(|rule| match &rule.effect {
-                RuleEffect::Assign(target) if rule.matches(&metadata) => Some(target),
+            preferences.focus = !rules.iter().any(|rule| {
+                matches!(rule.effect(), RuleEffect::NoFocus) && rule.matches(&metadata.0)
+            });
+            if let Some(target) = rules.iter().find_map(|rule| match rule.effect() {
+                RuleEffect::Assign(target) if rule.matches(&metadata.0) => Some(target),
                 _ => None,
             }) {
                 commands.trigger(I3WindowWorkspaceRequest {
@@ -166,11 +142,11 @@ pub(crate) fn apply(
                 });
             }
         }
-        for (index, rule) in rules.0.iter().enumerate() {
-            let RuleEffect::Commands(rule_actions) = &rule.effect else {
+        for (index, rule) in rules.iter().enumerate() {
+            let RuleEffect::Commands(rule_actions) = rule.effect() else {
                 continue;
             };
-            if matched.contains(&index) || !rule.matches(&metadata) {
+            if matched.contains(&index) || !rule.matches(&metadata.0) {
                 continue;
             }
             added.push(index);
@@ -296,9 +272,9 @@ mod tests {
     use weld_client::ClientSurfaceMetadata;
     use weld_window::{OccupiesWindow, WindowId};
 
-    fn configured(source: &str) -> WindowRules {
-        let mut rules = WindowRules::default();
-        for rule in weld_sway_adapter::parse_with_extensions::<()>("test", source, |_| {
+    fn configured(source: &str) -> ConfiguredRules {
+        let mut rules = ConfiguredRules::default();
+        for rule in weld_sway_config::lowering::parse_with_extensions::<()>("test", source, |_| {
             Err(weld_config::unsupported("command"))
         })
         .expect("config")
@@ -327,21 +303,21 @@ mod tests {
             "edit".into(),
             "Editor".into(),
         ));
-        assert!(!rules.0[0].matches(&native));
-        assert!(rules.0[0].matches(&x11));
-        assert!(rules.0[1].matches(&native));
-        assert!(!rules.0[1].matches(&x11));
-        assert!(rules.0[2].matches(&x11));
-        assert!(!rules.0[2].matches(&native));
+        assert!(!rules.iter().next().expect("rule").matches(&native.0));
+        assert!(rules.iter().next().expect("rule").matches(&x11.0));
+        assert!(rules.iter().nth(1).expect("rule").matches(&native.0));
+        assert!(!rules.iter().nth(1).expect("rule").matches(&x11.0));
+        assert!(rules.iter().nth(2).expect("rule").matches(&x11.0));
+        assert!(!rules.iter().nth(2).expect("rule").matches(&native.0));
         // Sway tests absent X11 class against an empty string, so this also
         // matches native Wayland clients.
-        assert!(rules.0[3].matches(&native));
-        assert!(rules.0[3].matches(&x11));
+        assert!(rules.iter().nth(3).expect("rule").matches(&native.0));
+        assert!(rules.iter().nth(3).expect("rule").matches(&x11.0));
     }
 
     #[test]
     fn unsupported_rule_sequences_are_skipped_whole() {
-        let config = weld_sway_adapter::parse_with_policy::<()>(
+        let config = weld_sway_config::lowering::parse_with_policy::<()>(
             "test",
             "for_window [all] border pixel 2, unsupported action\nfor_window [all] border pixel 4",
             weld_config::UnsupportedPolicy::Warn,

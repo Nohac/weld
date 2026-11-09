@@ -5,9 +5,17 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+weld-output = { path = "../weld-output" }
+pango = { version = "=0.22.9", features = ["v1_56"] }
+weld-input-config = { path = "../weld-input-config" }
+weld-tile-config = { path = "../weld-tile-config" }
+weld-window-config = { path = "../weld-window-config" }
+weld-ssd-config = { path = "../weld-ssd-config" }
+weldwm-config = { path = "../weldwm-config" }
 weld-config = { path = "../weld-config" }
 winnow = { workspace = true, features = ["ascii"] }
 anyhow.workspace = true
 
 [dev-dependencies]
+indoc.workspace = true
 insta.workspace = true

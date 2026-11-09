@@ -118,7 +118,7 @@ Regression checks:
 
 ```sh
 cargo test -p weld-i3-quirks --locked
-cargo test -p weldwm --lib master:: --locked
+cargo test -p weldwm --lib config:: --locked
 cargo test -p weldwm -p weld-core workspace_tests --locked -- --ignored --test-threads=1
 ```
 

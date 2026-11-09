@@ -4,14 +4,14 @@ use bevy::ecs::{
     observer::On,
     system::{Commands, Res, ResMut},
 };
-use weld_i3_config::I3LayoutRequest;
 use weld_tile::{TileCommands, TileSelection, TileSetLayout, TileTreeEdit};
+use weld_tile_config::LayoutRequest;
 use weld_window::{FocusedWindow, workspace::FocusedWorkspace};
 
 use crate::tree::TreeView;
 
 pub(crate) fn request(
-    event: On<I3LayoutRequest>,
+    event: On<LayoutRequest>,
     tree: TreeView,
     focus: Res<FocusedWindow>,
     selection: Res<TileSelection>,
@@ -39,7 +39,7 @@ pub(crate) fn request(
     let layout = event.resolve(state.layout(), state.last_split_axis());
     if tree.workspaces.contains(container)
         && state.children().next().is_some()
-        && !matches!(event.event(), I3LayoutRequest::Default)
+        && !matches!(event.event(), LayoutRequest::RestoreSplit)
     {
         commands.trigger(TileTreeEdit::GroupChildren { container, layout });
     } else {

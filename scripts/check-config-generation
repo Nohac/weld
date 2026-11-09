@@ -17,17 +17,19 @@ def main():
         [sys.executable, str(GENERATOR / 'test_generate.py')],
     ]:
         subprocess.run(command, cwd=ROOT, check=True)
-    for package in ['weld-sway-config', 'weld-sway-adapter', 'weld-master-config']:
+    for package in ['weld-sway-config', 'weldwm-config']:
         graph = subprocess.check_output([
             'cargo', 'tree', '--locked', '--offline', '-p', package,
             '--edges', 'normal', '--prefix', 'none', '--format', '{p}',
         ], cwd=ROOT, text=True)
         forbidden = [line for line in graph.splitlines() if line.startswith((
             'bevy', 'wgpu', 'smithay ', 'weld-app ', 'weld-core ',
-            'weld-input ', 'weld-tile ', 'weld-window ', 'weld-ssd ',
+            'weld-input ', 'weld-tile ', 'weld-window ', 'weld-ssd ', 'weld-i3-quirks ',
         ))]
         if forbidden:
             raise RuntimeError(f'{package} depends on runtime packages: {forbidden}')
+        if package == 'weldwm-config' and any(line.startswith(('weld-sway-config ', 'pango ')) for line in graph.splitlines()):
+            raise RuntimeError('native configuration depends on Sway syntax or Pango')
         print(f'PASS {package}: no compositor or rendering dependencies')
     host = subprocess.check_output([
         'cargo', 'tree', '--locked', '--offline', '-p', 'weld-core',

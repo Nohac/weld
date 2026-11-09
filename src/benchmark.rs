@@ -15,7 +15,7 @@ pub fn initialize_tracing() -> Result<()> {
     crate::telemetry::initialize()
 }
 
-/// Install Master with an explicit fixture config; startup commands are rejected
+/// Install weldwm with an explicit fixture config; startup commands are rejected
 /// by the benchmark driver so application CPU stays in the separate producer.
 pub fn configure(app: &mut App, config: &Path) -> Result<()> {
     app.init_resource::<HoistEndpointRegistry>();
@@ -28,7 +28,7 @@ pub fn configure(app: &mut App, config: &Path) -> Result<()> {
         GlobalShortcutPlugin,
         VirtualTerminalShortcutPlugin,
         crate::overlay::OutputTopologyOverlayPlugin,
-        crate::master::MasterConfigPlugin::load(config)?,
+        crate::config::ConfigPlugin::load(config)?,
         HoistPlugin,
     ));
     Ok(())

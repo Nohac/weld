@@ -1,5 +1,5 @@
 use super::*;
-use weld_i3_config::{I3LayoutRequest, LayoutChoice};
+use weld_tile_config::{LayoutChoice, LayoutRequest};
 
 #[test]
 fn typed_lowering_preserves_native_values_and_rule_origin_without_reparsing() {
@@ -75,7 +75,7 @@ fn output_moves_are_never_reinterpreted_as_workspace_names() {
     assert_eq!(config.warnings.len(), 1);
     assert_eq!(config.bindings.len(), 1);
     assert!(
-        matches!(&config.bindings[0].1, Action::Workspace(I3WorkspaceRequest::Navigate {
+        matches!(&config.bindings[0].1, Action::Workspace(WorkspaceCommand::Navigate {
         target: WorkspaceTarget::Name(name), operation: WorkspaceNavigation::MoveWindow,
         allow_auto_back_and_forth: false,
     }) if name == "2")
@@ -110,14 +110,12 @@ mod layout_tests {
                 .map(|(_, action)| action.clone())
                 .collect::<Vec<_>>(),
             [
-                Action::Layout(I3LayoutRequest::Set(TileLayout::Stacked)),
-                Action::Layout(I3LayoutRequest::Set(TileLayout::Tabbed)),
-                Action::Layout(I3LayoutRequest::Cycle(vec![LayoutChoice::Split])),
+                Action::Layout(LayoutRequest::Set(TileLayout::Stacked)),
+                Action::Layout(LayoutRequest::Set(TileLayout::Tabbed)),
+                Action::Layout(LayoutRequest::Cycle(vec![LayoutChoice::AlternateSplit])),
                 Action::Tile(TileOperation::Split(SplitAxis::Vertical)),
-                Action::Layout(I3LayoutRequest::Set(TileLayout::Split(
-                    SplitAxis::Horizontal
-                ))),
-                Action::Layout(I3LayoutRequest::Cycle(vec![
+                Action::Layout(LayoutRequest::Set(TileLayout::Split(SplitAxis::Horizontal))),
+                Action::Layout(LayoutRequest::Cycle(vec![
                     LayoutChoice::Layout(TileLayout::Tabbed),
                     LayoutChoice::Layout(TileLayout::Stacked),
                     LayoutChoice::Layout(TileLayout::Split(SplitAxis::Vertical))
@@ -228,12 +226,10 @@ mod interpretation {
 
     #[test]
     fn font_descriptions_translate_points_pixels_and_styles() {
-        use weld_ssd_config::{
-            FontFamily as FontSource, FontSlant as FontStyle, FontWeight, FontWidth,
-        };
+        use weld_ssd_config::{FontFamily, FontSlant, FontWeight, FontWidth};
         let config = parse("font", "set $face monospace\nfont pango:$face 8").expect("font");
         let font = config.decorations.title_font;
-        assert_eq!(font.family, FontSource::monospace());
+        assert_eq!(font.family, FontFamily::monospace());
         assert!((font.size - 8.0 * 96.0 / 72.0).abs() < 0.001);
         let config = parse(
             "font",
@@ -241,10 +237,10 @@ mod interpretation {
         )
         .expect("font");
         let font = config.decorations.title_font;
-        assert_eq!(font.family, FontSource::Family("DejaVu Sans Mono".into()));
+        assert_eq!(font.family, FontFamily::Family("DejaVu Sans Mono".into()));
         assert_eq!(font.size, 18.0);
         assert_eq!(font.weight, FontWeight::BOLD);
-        assert_eq!(font.style, FontStyle::Italic);
+        assert_eq!(font.style, FontSlant::Italic);
         assert_eq!(font.width, FontWidth::CONDENSED);
         assert_eq!(
             parse("font", "font \"serif 12\"")
@@ -252,7 +248,7 @@ mod interpretation {
                 .decorations
                 .title_font
                 .family,
-            FontSource::serif()
+            FontFamily::serif()
         );
         for source in [
             "font",
@@ -287,7 +283,7 @@ mod interpretation {
         assert!(mode.pango_markup);
         assert_eq!(
             mode.bindings[0].1,
-            Action::Resize(weld_i3_config::I3ResizeRequest {
+            Action::Resize(weld_tile_config::ResizeRequest {
                 axis: SplitAxis::Vertical,
                 pixels: Some(-10.0),
                 fraction: Some(-0.05),
@@ -369,7 +365,7 @@ mod interpretation {
         .expect("quoted punctuation");
         assert_eq!(
             quoted.bindings[0].1,
-            Action::Workspace(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
+            Action::Workspace(WorkspaceCommand::switch(WorkspaceTarget::Name(
                 "1: work, play; rest".to_owned()
             )))
         );
@@ -394,25 +390,25 @@ mod interpretation {
         );
         assert_eq!(
             config.bindings[0].1,
-            Action::Workspace(I3WorkspaceRequest::switch(WorkspaceTarget::Number(
+            Action::Workspace(WorkspaceCommand::switch(WorkspaceTarget::NumberedName(
                 "3: work".to_owned()
             )))
         );
         assert_eq!(
             config.bindings[1].1,
-            Action::Workspace(I3WorkspaceRequest::move_window(WorkspaceTarget::Number(
-                "3".to_owned()
-            )))
+            Action::Workspace(WorkspaceCommand::move_window(
+                WorkspaceTarget::NumberedName("3".to_owned())
+            ))
         );
         assert_eq!(
             config.bindings[2].1,
-            Action::Workspace(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
+            Action::Workspace(WorkspaceCommand::switch(WorkspaceTarget::Name(
                 "next".to_owned()
             )))
         );
         assert_eq!(
             config.bindings[3].1,
-            Action::Workspace(I3WorkspaceRequest::switch(WorkspaceTarget::NextOnOutput))
+            Action::Workspace(WorkspaceCommand::switch(WorkspaceTarget::NextOnOutput))
         );
         for source in [
             "workspace 1 output",
@@ -429,10 +425,10 @@ mod interpretation {
     #[test]
     fn focus_wrapping_is_validated_as_behavior_settings() {
         for (value, expected) in [
-            ("no", FocusWrapping::No),
-            ("yes", FocusWrapping::Yes),
-            ("force", FocusWrapping::Force),
-            ("workspace", FocusWrapping::Workspace),
+            ("no", FocusWrapping::Disabled),
+            ("yes", FocusWrapping::Fallback),
+            ("force", FocusWrapping::Immediate),
+            ("workspace", FocusWrapping::WithinWorkspace),
         ] {
             let config = parse("test", &format!("focus_wrapping {value}")).expect("wrapping");
             assert_eq!(config.focus_wrapping, expected);
@@ -528,7 +524,7 @@ mod interpretation {
         );
         assert_eq!(
             config.bindings[1].1,
-            Action::Resize(weld_i3_config::I3ResizeRequest {
+            Action::Resize(weld_tile_config::ResizeRequest {
                 axis: SplitAxis::Horizontal,
                 pixels: None,
                 fraction: Some(0.05)
@@ -607,8 +603,8 @@ mod interpretation {
             [
                 Action::FocusModeToggle,
                 Action::Sticky(None),
-                Action::FocusHierarchy(weld_i3_config::I3FocusHierarchy::Parent),
-                Action::FocusHierarchy(weld_i3_config::I3FocusHierarchy::Child)
+                Action::FocusHierarchy(weld_tile_config::FocusHierarchy::Parent),
+                Action::FocusHierarchy(weld_tile_config::FocusHierarchy::Child)
             ]
         );
         assert!(parse("bad", "bindsym Mod4+p sticky maybe").is_err());

@@ -120,7 +120,7 @@ building and `libfontconfig` at runtime. The shared Rust shell provides both;
 other environments must make Fontconfig available to `pkg-config` and the
 runtime loader.
 
-Sway font configuration uses Pango's font-description parser. Master requires
+Sway font configuration uses Pango's font-description parser. weldwm requires
 Pango 1.56 or newer development/runtime libraries and their GLib dependencies;
 the shared Rust shell already supplies them. Parsed typography is published to
 the decoration settings, and Bevy resolves the selected installed font.
@@ -213,21 +213,21 @@ The development example config provides these backend-neutral shortcuts:
 - Add `Shift` to navigate a tile structurally through neighboring splits
 - `Alt+Control+Arrow`: adjust tile proportions
 - `Alt+Control+F/J`: prepare a horizontal/vertical split
-- `Alt+Shift+R`: reload Master configuration
+- `Alt+Shift+R`: reload weldwm configuration
 - `Alt+Shift+Q`: request close of the focused client
 - `Alt+Shift+O`: toggle output-topology diagnostics
 - `Alt+Shift+Escape`: exit Weld
 
 These example bindings live in `examples/master.sway.config`, not the reusable plugins.
 That file configures Ctrl/Caps and left Alt/Windows swaps: logical Alt is the
-physical Windows key with those settings. Master reads explicit Weld input
+physical Windows key with those settings. weldwm reads explicit Weld input
 configuration in both nested and DRM modes.
 The example starts Waybar through `exec`, using the repository's example config
 and style paths. Launch from the repository root, or adjust those paths in your
 own configuration. Its workspace buttons use `ext-workspace-v1`.
-Master uses the native tiler. The [typed configuration pipeline](docs/configuration.md)
+weldwm uses the native tiler. The [typed configuration pipeline](docs/configuration.md)
 and its generator are maintained independently of runtime policy. Its Sway configuration subset and
-reload semantics are documented in [Master tiling](docs/master-tiling.md).
+reload semantics are documented in [weldwm tiling](docs/master-tiling.md).
 
 Weld options precede an explicit `--` when a client is also present. Capture a
 settled client-plus-shell composition and exit with:

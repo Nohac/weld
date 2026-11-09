@@ -1,4 +1,4 @@
-//! Master-owned approval controls and remote application selection.
+//! Distribution-owned approval controls and remote application selection.
 use anyhow::{Context as ContextExt, Result};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;

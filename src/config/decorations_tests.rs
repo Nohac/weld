@@ -1,5 +1,6 @@
 //! Configuration, frame admission and dialog placement share the initial pass.
 
+use super::rules::{ConfiguredRules, WindowRulePlugin};
 use bevy::{
     app::{App, TaskPoolPlugin},
     asset::{AssetApp, AssetPlugin, Assets},
@@ -21,7 +22,7 @@ use weld_config::unsupported;
 use weld_i3_quirks::I3QuirksPlugin;
 use weld_ssd::{SsdPlugin, WindowBorderStyle};
 use weld_ssd_config::BorderStyle;
-use weld_sway_adapter::parse_with_extensions;
+use weld_sway_config::lowering::parse_with_extensions;
 use weld_tile::TilePlugin;
 use weld_window::{
     OccupiesWindow, PresentationInsets, PrimaryWindowPresentation, WindowGeometry, WindowPlugin,
@@ -46,13 +47,14 @@ fn border_rule_precedes_first_frame_and_centering() {
         SsdPlugin,
         TilePlugin,
         I3QuirksPlugin,
+        WindowRulePlugin,
     ));
     let config =
         parse_with_extensions::<()>("test", "for_window [class=\"^.*\"] border pixel 3", |_| {
             Err(unsupported("command"))
         })
         .expect("rules");
-    let mut rules = weld_i3_quirks::window_rules::WindowRules::default();
+    let mut rules = ConfiguredRules::default();
     for rule in config.window_rules {
         rules.add(rule.value).expect("native rule");
     }

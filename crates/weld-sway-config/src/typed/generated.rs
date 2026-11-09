@@ -871,6 +871,53 @@ impl Word for Orientation {
         })
     }
 }
+/// Alternatives in the OutputPropertyKind syntax.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum OutputPropertyKind {
+    /// Accepted spellings: scale.
+    Scale,
+    /// Accepted spellings: enable.
+    Enable,
+    /// Accepted spellings: disable.
+    Disable,
+    /// Accepted spellings: adaptive_sync.
+    AdaptiveSync,
+    /// Accepted spellings: transform.
+    Transform,
+    /// Accepted spellings: scale_filter.
+    ScaleFilter,
+    /// Accepted spellings: power.
+    Power,
+    /// Accepted spellings: dpms.
+    Dpms,
+    /// Accepted spellings: max_render_time.
+    MaxRenderTime,
+    /// Accepted spellings: subpixel.
+    Subpixel,
+    /// Accepted spellings: mode, resolution.
+    Mode,
+    /// Accepted spellings: position, pos.
+    Position,
+}
+impl Word for OutputPropertyKind {
+    fn word(word: &str) -> Result<Self> {
+        Ok(match word {
+            "scale" => Self::Scale,
+            "enable" => Self::Enable,
+            "disable" => Self::Disable,
+            "adaptive_sync" => Self::AdaptiveSync,
+            "transform" => Self::Transform,
+            "scale_filter" => Self::ScaleFilter,
+            "power" => Self::Power,
+            "dpms" => Self::Dpms,
+            "max_render_time" => Self::MaxRenderTime,
+            "subpixel" => Self::Subpixel,
+            "mode" | "resolution" => Self::Mode,
+            "position" | "pos" => Self::Position,
+            _ => bail!("invalid OutputPropertyKind: {word}"),
+        })
+    }
+}
 /// Typed Border production.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Border {
@@ -1418,6 +1465,102 @@ impl Words for Setting {
                     "unsupported Setting: {}",
                     words.join(" ")
                 )));
+            }
+        })
+    }
+}
+/// Parsed OutputProperty with unsupported arguments consumed according to the grammar.
+#[derive(Clone, Debug, PartialEq)]
+pub enum OutputProperty {
+    /// The Scale property.
+    Scale(FiniteFloat),
+    /// A recognized property whose execution is not implemented.
+    Skipped(OutputPropertyKind),
+}
+impl OutputPropertyKind {
+    /// Whether the property currently produces a supported typed value.
+    pub(crate) fn is_supported(self) -> bool {
+        match self {
+            Self::Scale => true,
+            Self::Enable => false,
+            Self::Disable => false,
+            Self::AdaptiveSync => false,
+            Self::Transform => false,
+            Self::ScaleFilter => false,
+            Self::Power => false,
+            Self::Dpms => false,
+            Self::MaxRenderTime => false,
+            Self::Subpixel => false,
+            Self::Mode => false,
+            Self::Position => false,
+        }
+    }
+    /// Consume exactly one property from a chained directive.
+    pub(crate) fn parse_next<'a>(
+        self,
+        words: &mut std::iter::Peekable<impl Iterator<Item = &'a str>>,
+    ) -> Result<OutputProperty> {
+        Ok(match self {
+            Self::Scale => OutputProperty::Scale(FiniteFloat::word(
+                words.next().context("output scale requires an argument")?,
+            )?),
+            Self::Enable => OutputProperty::Skipped(self),
+            Self::Disable => OutputProperty::Skipped(self),
+            Self::AdaptiveSync => {
+                words
+                    .next()
+                    .context("output adaptive_sync requires an argument")?;
+                OutputProperty::Skipped(self)
+            }
+            Self::Transform => {
+                words
+                    .next()
+                    .context("output transform requires an argument")?;
+                OutputProperty::Skipped(self)
+            }
+            Self::ScaleFilter => {
+                words
+                    .next()
+                    .context("output scale_filter requires an argument")?;
+                OutputProperty::Skipped(self)
+            }
+            Self::Power => {
+                words.next().context("output power requires an argument")?;
+                OutputProperty::Skipped(self)
+            }
+            Self::Dpms => {
+                words.next().context("output dpms requires an argument")?;
+                OutputProperty::Skipped(self)
+            }
+            Self::MaxRenderTime => {
+                words
+                    .next()
+                    .context("output max_render_time requires an argument")?;
+                OutputProperty::Skipped(self)
+            }
+            Self::Subpixel => {
+                words
+                    .next()
+                    .context("output subpixel requires an argument")?;
+                OutputProperty::Skipped(self)
+            }
+            Self::Mode => {
+                if words.peek() == Some(&"--custom") {
+                    words.next();
+                }
+                words.next().context("output mode requires an argument")?;
+                OutputProperty::Skipped(self)
+            }
+            Self::Position => {
+                let first = words
+                    .next()
+                    .context("output position requires an argument")?;
+                if !first.contains(",") {
+                    words
+                        .next()
+                        .context("output position requires an argument")?;
+                }
+                OutputProperty::Skipped(self)
             }
         })
     }

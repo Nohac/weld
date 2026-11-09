@@ -138,15 +138,15 @@ Weld is a workspace of reusable layers and one standard distribution:
   from its control worker. Receiver reports are scoped
   to the approved source identity, and desktop grants are queried through a weak
   authority handle so archived reports cannot retain desktop/peer lifetimes.
-- Configuration uses a generated typed Sway frontend, explicit native lowering,
-  and distribution-owned preparation/publication. `weld-sway-config` owns source
-  processing and syntax; `weld-sway-adapter` lowers it into `weld-master-config`.
-  `weld-config` owns shared provenance and diagnostics. Feature contracts live in
-  `weld-input-config`, `weld-output`, `weld-tile-config`, `weld-window-config`,
-  `weld-ssd-config`, and `weld-i3-config`; the runtimes consume these directly.
+- `weld-sway-config` owns generated typed Sway syntax and its `lowering` module,
+  which produces `weldwm-config` native configuration. `weld-config` owns shared
+  provenance and diagnostics. Feature contracts live in `weld-input-config`,
+  `weld-output`, `weld-tile-config`, `weld-window-config`, and `weld-ssd-config`.
   Their normal frontend graph has no Bevy, Smithay, wgpu, or native-host dependency.
   Opt-in ECS derives adapt the same owned values to runtime resources/events.
-  Master prepares keymaps, rule matchers, and decoration resources before
+  `weld-window::rules` owns generic compiled matching; `src/config/rules.rs`
+  evaluates rules and executes the distribution's cross-feature actions.
+  `src/config` prepares keymaps, matchers, and decoration resources before
   publication and queues startup effects only after successful activation.
   See [Typed configuration](configuration.md) for generation, ownership, and scope.
 - `weld-sway-ipc` serves desktop tree/output queries and binding-mode subscriptions on a private
@@ -156,18 +156,18 @@ Weld is a workspace of reusable layers and one standard distribution:
   `weld-app` publishes outputs, `weld-window` publishes windows/workspaces, and
   `weld-tile` publishes topology/selection. Their `Last` collection systems run
   before IPC publication and retain unchanged inventories. The IPC adapter maps
-  stable domain IDs to Sway nodes and global logical rectangles. Master assembles
+  stable domain IDs to Sway nodes and global logical rectangles. weldwm assembles
   this integration and supplies binding-mode status from its config owner.
   The worker starts after native host signal masking; service teardown joins it
   and removes the socket. Host-owned child launch environments carry the endpoint.
 - `weld-output` owns validated scale factors and matching for connector names,
-  descriptive monitor identifiers and wildcard defaults. Master publishes complete
+  descriptive monitor identifiers and wildcard defaults. weldwm publishes complete
   settings through `weld-app`; the native DRM host reads EDID, resolves each output,
   and applies scale changes to protocol metrics, presentation and input topology.
-- `weld-i3-quirks` consumes native i3 policy contracts, applies prepared
-  criteria-based window rules, and supplies i3 tree-based focus, structural
-  movement and branch-local close recovery.
-  It uses the shared tree and node-focus history. Master owns file selection,
+- `weld-i3-quirks` consumes native tile/window contracts and supplies the selected
+  i3 tree-based focus, structural movement, workspace selection, and branch-local
+  close recovery. Sway layout cycles are explicit native requests by this boundary.
+  It uses the shared tree and node-focus history. weldwm owns file selection,
   atomic settings/binding publication, reload and distribution effects.
   Configuration syntax and lowering live outside the runtime behavior crate.
   Rule evaluation runs in `WindowSystems::AdmissionPolicy`: it supplies initial
@@ -450,17 +450,18 @@ Weld is a workspace of reusable layers and one standard distribution:
   the executable. It is one possible assembly of the reusable crates, not the
   owner of their implementation.
 
-The graphical distribution is now the tiling-first Weld Master target. Its
+The graphical distribution is now the tiling-first weldwm target. Its
 configuration plugin owns file selection, diagnostics and reload coordination;
-`weld-i3-quirks` owns Sway interpretation and its focus decisions.
+`weld-sway-config` owns Sway interpretation, and `weld-i3-quirks` owns the
+selected tree-navigation policy.
 Subsystems own their typed settings and application
 semantics. A validated candidate replaces the configuration plugin's shortcut
 set and tiling settings through typed resource borrows in one system invocation, without replacing
 the layout tree or client occupancy. Invalid candidates leave the working state
 alone. This is not a generic config framework or full Sway compatibility; see
-[Master tiling](master-tiling.md) for the current subset and limitations. The
+[weldwm tiling](master-tiling.md) for the current subset and limitations. The
 session-only headless host remains separate from this graphical policy assembly.
-Graphical Master requires an explicit configuration path. Its development example
+Graphical weldwm requires an explicit configuration path. Its development example
 bindings live in `examples/master.sway.config`, including
 launch, exit, hoist and output diagnostics. Shortcut support installs no key
 defaults; hoisting and the overlay accept typed requests instead. `ShellCommands`
@@ -471,9 +472,9 @@ separate from distribution bindings.
 
 Tiling management uses ordered focus recovery, preparation, buffered-command, distribution-action
 and layout sets. Queries and typed resources declare policy access; deferred
-structural edits finish at the dependent schedule boundaries. Master emits ordered
+structural edits finish at the dependent schedule boundaries. weldwm emits ordered
 shortcut events, and tiler observers publish each operation's topology, layout and
-focus effects before the next shortcut is resolved. Master never calls into an
+focus effects before the next shortcut is resolved. weldwm never calls into an
 exclusive tiler flush. Unchanged frames skip layout; layout traverses borrowed
 child edges and updates geometry only when values differ.
 
@@ -527,7 +528,7 @@ the destination's remembered selection. Vacancy and hoist ownership are unchange
 Existing workspaces retain their outputs on switch or configuration reload.
 Output removal preserves populated workspaces and rehomes them through policy;
 logical-output ECS tests do not add physical connector hotplug support. See
-[Master workspaces](master-tiling.md#workspaces) for the supported commands and limits.
+[weldwm workspaces](master-tiling.md#workspaces) for the supported commands and limits.
 
 `weld-i3-quirks` chooses movement destinations and when to regroup or flatten
 splits. `weld-tile` validates and applies `TileTreeEdit` reparent, wrap and flatten
@@ -541,10 +542,11 @@ action batch. A rejected edit terminates its continuation. Layout and client
 resize publication remain shared with native tiling.
 
 Native tile requests and behavior events deferred until workspace admission use
-one bounded Bevy command queue, preserving their original order. The i3 config
-interpreter accepts a typed distribution-command fallback; Master owns `weld`
-commands and shell effects, while `exec`, `exit` and `reload` are interpreted as
-i3 actions. There is no shared cross-backend configuration IR.
+one bounded Bevy command queue, preserving their original order. Sway lowering
+accepts a typed distribution-command extension; weldwm owns `weld` commands and
+shell effects. `exec`, `exit` and `reload` lower into native distribution actions.
+Feature-owned configuration contracts assemble into `weldwm-config` without
+depending on a configuration frontend or rendering backend.
 
 Dependencies point inward: `weld-core` implements the local Smithay adapter
 through `weld-client`; `weld-app` depends on both; `weld-window` depends on
@@ -1628,7 +1630,7 @@ owns the stdio lifecycle in `weldctl mcp`. See
 [Native window inspection](native-window-control.md) for commands and validation.
 `weld-hoist-iroh::pairing` supplies authenticated connections and enrollment /
 application control streams to `weld-hoist-core::session` drivers. Core owns
-catalogue subscriptions and command dispatch. Master translates approved
+catalogue subscriptions and command dispatch. weldwm translates approved
 requests into ordinary hoist/reclaim messages. The runtime-owned desktop relay
 forks cached source snapshots per connection, sharing upstream buffer leases and
 the existing encoded source pipeline. A separate coalesced policy wake services
@@ -1792,14 +1794,14 @@ dispatches compositor state directly, with backend notifications retained in a
 same-thread queue for native drivers. See [Rootless XWayland](xwayland.md) for
 launching, validation and remaining compatibility work.
 
-Master also installs `WorkspaceProtocolPlugin` from `weld-window`. It projects
+weldwm also installs `WorkspaceProtocolPlugin` from `weld-window`. It projects
 workspace names, session IDs, visibility and output membership into a neutral
 `weld-app` inventory, consumed by the core `ext-workspace-v1` adapter. Protocol
 activation requests wait for manager commit and cross back as stable workspace
 IDs; the WM plugin resolves entities and i3 policy performs ordinary workspace
 switching. Inventory updates follow the complete policy frame and skip unchanged
 state. Desktop clients receive one group per output and activation capability.
-Master's config plugin queues startup `exec` and reload `exec_always` commands
+weldwm's config plugin queues startup `exec` and reload `exec_always` commands
 through the existing host client launcher after validated configuration install.
 
 Validated pointer `xdg_toplevel.move` and `xdg_toplevel.resize` requests cross
@@ -1834,7 +1836,7 @@ replacement, and temporary occupant unmapping therefore cannot interrupt an
 active floating interaction. Tiled resize sessions retire when their split tree
 changes or their workspace becomes hidden.
 
-`WindowPointerPlugin` installs chords from live `WindowPointerSettings`; Master's
+`WindowPointerPlugin` installs chords from live `WindowPointerSettings`; weldwm's
 `floating_modifier` translation provides the modifier, with left-button move and
 right-button resize. No modifier chords are installed when the setting is absent. Raw
 ingress is the sole chord evaluator: it consumes a matching press and paired

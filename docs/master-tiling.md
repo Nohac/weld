@@ -1,4 +1,4 @@
-# Weld Master tiling and workspaces
+# weldwm tiling and workspaces
 
 The graphical `weldwm` distribution combines `weld-tile` workspace management
 with `weld-float` freeform interaction for selected windows. Headless session hosting rejects
@@ -93,7 +93,7 @@ title falls back to its app ID.
 Font changes apply on configuration reload. Invalid sizes reject the candidate
 and preserve the current configuration; sizes must be positive and at most 512
 logical pixels. Removing the directive restores 14px system sans-serif.
-Master warns and skips font directives requesting family fallback lists,
+weldwm warns and skips font directives requesting family fallback lists,
 variants, rotation, font variations or OpenType feature settings.
 
 Inactive tab/stack branches remain mapped and retain buffers and hoist slots.
@@ -112,11 +112,11 @@ Alt+1..9 and Alt+0 select workspaces 1..10. Add Shift to move the selected
 window without following it. These are logical Alt bindings; the example's
 keymap makes physical Windows produce that modifier.
 
-Graphical Master requires an explicit `--config` path. The repository's
+Graphical weldwm requires an explicit `--config` path. The repository's
 `examples/master.sway.config` is a development example, selected explicitly by
 the graphical hoist and profiling launchers. A supplied file may be a Sway
 config; unsupported features are skipped with source-located warnings. Malformed
-supported settings still reject the load. Master has no implicit config
+supported settings still reject the load. weldwm has no implicit config
 discovery or bundled fallback. Headless session hosting needs no config.
 
 Alt+Shift+R reloads the selected file. The file replaces, rather than overlays,
@@ -327,15 +327,15 @@ Unknown input devices, unsupported keys, SwayFX effects and other window-rule ac
 skip. Volume, mute, play/pause, next and previous media-key names are supported,
 along with `XF86MonBrightnessDown`, `XF86MonBrightnessUp` and `XF86AudioPause`.
 The pure parser preserves more syntax than
-the distribution currently interprets. Master configuration owns launcher, exit,
+the distribution currently interprets. weldwm configuration owns launcher, exit,
 output diagnostics and hoist bindings as well as tiling bindings. Reusable
 plugins expose typed actions without installing those default keys. A supplied
-empty config therefore installs no Master bindings. Reserved DRM Ctrl+Alt+Fn
+empty config therefore installs no weldwm bindings. Reserved DRM Ctrl+Alt+Fn
 console switching remains a separate backend escape mechanism.
 
 ## Keyboard mapping
 
-The example config swaps Caps/Ctrl and left Alt/Windows, and binds Master
+The example config swaps Caps/Ctrl and left Alt/Windows, and binds weldwm
 commands to logical Alt (Mod1). With those swaps, use the physical Windows key
 for the shortcuts above; logical Super remains available to the parent
 compositor. Change Mod1 to Mod4 in the config to choose logical Super instead.
@@ -432,7 +432,7 @@ Production DRM connector hotplug itself remains outside this slice.
 
 Reload publishes new creation/assignment preferences without moving existing
 workspaces or rewriting their layouts. Use a fresh workspace or restart the
-test to exercise a changed assignment. Master publishes workspace names, active
+test to exercise a changed assignment. weldwm publishes workspace names, active
 states and output membership through `ext-workspace-v1`, including click-to-switch
 activation. See [desktop layer surfaces](layer-shell.md#workspace-controls).
 Workspace-list IPC, pointer warping, blank-output pointer focus, `focus output`,
@@ -475,12 +475,12 @@ and container IDs are separate. Persistence storage is not implemented.
 
 The Sway backend's optional input module translates keyboard, pointer-device,
 cursor directives and binding chords into `weld-input` types. Winnow captures chord tokens and quoted
-values; the translation layer validates modifier names and aliases. Master
+values; the translation layer validates modifier names and aliases. weldwm
 selects the file and installs typed settings. `weld-i3-quirks` consumes the Sway
 parser/input output and translates supported settings and actions. It owns
 i3 directional navigation, structural movement and close-focus restoration over
 the shared tree.
-Master supplies the interpreter's typed command extension for the `weld`
+weldwm supplies the interpreter's typed command extension for the `weld`
 vocabulary and executes shell/distribution effects.
 Applying a valid candidate
 replaces its owner-scoped keyboard bindings and settings through a typed
@@ -489,7 +489,7 @@ key releases remain consumed across replacement.
 
 Gaps relayout existing windows. Default orientation does not rewrite existing
 containers. Commands execute in order, resolving focused-target commands at
-execution time. Master queues typed shortcut events; each observer's deferred
+execution time. weldwm queues typed shortcut events; each observer's deferred
 effects finish before the next shortcut is resolved. Focus and move actions trigger
 `I3FocusRequest` and `I3MoveRequest`; other tiling actions trigger `TileRequest`, so focus followed by
 hoist selects the updated target, while a
@@ -509,7 +509,7 @@ so startup buffering preserves their relative arrival order.
 Retained vacancies occupy real slots without fake client surfaces. The hoist
 adapter can detach/reclaim occupancy and override presentation without changing
 the leaf identity or slot. Ordinary window removal prunes the tree; explicit
-single-child splits remain available for the next admission. Master directional
+single-child splits remain available for the next admission. weldwm directional
 moves reorder adjacent leaves, enter neighboring branches, or extract the selected
 window into an ancestor. Branch entry uses the near edge on a matching axis and
 the remembered child on a perpendicular axis, recursively. A perpendicular move
@@ -523,7 +523,7 @@ Resizing transfers a share within the nearest matching-axis ancestor's adjacent
 sibling pair, bounded to 5..95 percent of that pair; this is native policy, not
 an exact Sway resize compatibility claim.
 
-Directional focus in Master follows split ancestry rather than window-center
+Directional focus in weldwm follows split ancestry rather than window-center
 distance. Entering a sibling branch restores its most recently focused window;
 closing the selected window first looks within its former branch, then climbs
 outward. All accepted window focus changes contribute to shared tree-node history, including
@@ -538,7 +538,7 @@ Floating an entire selected group and group fullscreen remain
 follow-ups; floating/fullscreen commands currently target the keyboard-focused
 window. Directional cross-output movement remains a follow-up. Native
 `TileOperation::Move` remains the geometric
-leaf swap as a native primitive; Master's Sway `move` bindings use the i3
+leaf swap as a native primitive; weldwm's Sway `move` bindings use the i3
 policy instead. Resized shares follow same-parent reordering, cross-parent arrivals
 receive the mean existing share, and flattening preserves internal proportions.
 
@@ -626,7 +626,7 @@ the active resize; a release of another mouse button leaves it active.
 
 ### Decorations
 
-Master publishes `SsdSettings` alongside the other typed settings. Geometry
+weldwm publishes `SsdSettings` alongside the other typed settings. Geometry
 changes replace affected SSD projections before presentation metrics are
 reconciled, preserving floating client-content size and allowing tiled layout
 to keep its outer rectangle. Color changes update existing roots. Popup mounts

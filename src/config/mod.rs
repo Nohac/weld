@@ -1,13 +1,19 @@
-//! Weld Master configuration and ordered distribution actions.
+//! weldwm configuration and ordered distribution actions.
 
-use weld_i3_config::FocusWrapping;
 use weld_input_config::PointerDeviceSettings;
+use weld_tile_config::FocusWrapping;
 #[cfg(test)]
 use weld_tile_config::SplitAxis;
 use weld_tile_config::TileSettings;
 use weld_window_config::{FullscreenAction, FullscreenMode};
-mod config;
+#[cfg(test)]
+mod decorations_tests;
+mod prepare;
+mod rules;
+#[cfg(test)]
+mod rules_tests;
 
+use self::rules::ConfiguredRules;
 use crate::overlay::ToggleOutputTopology;
 use crate::remote_control::LocalInteractionBindings;
 use anyhow::{Context, Result};
@@ -24,7 +30,7 @@ use bevy::{
     },
     window::RequestRedraw,
 };
-use config::{Action, Configuration, DistributionAction};
+use prepare::{Action, DistributionAction, PreparedConfiguration};
 use std::{
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
@@ -37,8 +43,6 @@ use weld_app::{
 };
 use weld_float::FloatManagement;
 use weld_hoist::HoistWindow;
-use weld_i3_config::WorkspaceSettings;
-use weld_i3_quirks::window_rules::WindowRules;
 use weld_i3_quirks::{I3FocusRequest, I3MoveRequest, I3QuirksPlugin};
 use weld_input::{
     GlobalShortcutId, GlobalShortcutMode, GlobalShortcutPlugin, GlobalShortcutPressed,
@@ -49,16 +53,17 @@ use weld_tile::{TileRequest, TileSystems};
 use weld_window::fullscreen::FullscreenRequest;
 use weld_window::{FocusedWindow, workspace_protocol::WorkspaceProtocolPlugin};
 use weld_window_config::WindowPointerSettings;
+use weld_window_config::WorkspaceSettings;
 
 /// Selects and translates the distribution's configuration file.
-pub(crate) struct MasterConfigPlugin {
+pub(crate) struct ConfigPlugin {
     path: PathBuf,
-    initial: Configuration,
+    initial: PreparedConfiguration,
 }
 
-impl MasterConfigPlugin {
+impl ConfigPlugin {
     pub(crate) fn output_settings(&self) -> OutputSettings {
-        self.initial.outputs.clone()
+        self.initial.settings.outputs.clone()
     }
 
     pub(crate) fn load(path: &Path) -> Result<Self> {
@@ -68,14 +73,15 @@ impl MasterConfigPlugin {
     }
 }
 
-fn read_configuration(path: &Path) -> Result<Configuration> {
+fn read_configuration(path: &Path) -> Result<PreparedConfiguration> {
     let source =
         std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
-    config::parse(&path.display().to_string(), &source)
+    prepare::parse(&path.display().to_string(), &source)
 }
 
 pub(crate) fn validate_configuration(path: &Path) -> Result<()> {
-    let config = read_configuration(path)?;
+    let prepared = read_configuration(path)?;
+    let config = &prepared.settings;
     report_warnings(&config.warnings);
     tracing::info!(
         bindings = config.bindings.len(),
@@ -92,7 +98,7 @@ fn report_warnings(warnings: &[weld_config::ConfigWarning]) {
     }
 }
 
-impl Plugin for MasterConfigPlugin {
+impl Plugin for ConfigPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LocalInteractionBindings>()
             .init_resource::<ShellCommands>()
@@ -105,6 +111,9 @@ impl Plugin for MasterConfigPlugin {
             .init_resource::<TileSettings>();
         if !app.is_plugin_added::<I3QuirksPlugin>() {
             app.add_plugins(I3QuirksPlugin);
+        }
+        if !app.is_plugin_added::<rules::WindowRulePlugin>() {
+            app.add_plugins(rules::WindowRulePlugin);
         }
         if !app.is_plugin_added::<WorkspaceProtocolPlugin>() {
             app.add_plugins(WorkspaceProtocolPlugin);
@@ -142,7 +151,7 @@ impl Plugin for MasterConfigPlugin {
             .map_err(|error| anyhow::anyhow!("{error}"))
             .and_then(std::convert::identity)
         {
-            tracing::error!(%error, "could not install Master configuration");
+            tracing::error!(%error, "could not install weldwm configuration");
         }
     }
 }
@@ -204,13 +213,13 @@ struct ConfigTarget<'w> {
     outputs: ResMut<'w, OutputPreferences>,
     pointer: ResMut<'w, WindowPointerSettings>,
     decorations: ResMut<'w, SsdSettings>,
-    window_rules: ResMut<'w, WindowRules>,
+    window_rules: ResMut<'w, ConfiguredRules>,
     backend: Option<Res<'w, ActiveBackend>>,
 }
 
 impl ConfigTarget<'_> {
-    fn apply(&mut self, config: Configuration) -> Result<()> {
-        let Configuration {
+    fn apply(&mut self, config: PreparedConfiguration) -> Result<()> {
+        let PreparedConfiguration {
             settings: config,
             keymap,
             window_rules,
@@ -226,7 +235,7 @@ impl ConfigTarget<'_> {
             None => self.initial_cursor.0.clone(),
         };
         let drm = self.backend.as_deref() == Some(&ActiveBackend::Drm);
-        let mut modes = vec![weld_master_config::BindingMode {
+        let mut modes = vec![weldwm_config::BindingMode {
             name: "default".into(),
             pango_markup: false,
             bindings: config.bindings,
@@ -334,7 +343,10 @@ impl bevy::ecs::world::FromWorld for InitialCursorSettings {
     }
 }
 
-fn apply_configuration(In(config): In<Configuration>, mut target: ConfigTarget) -> Result<()> {
+fn apply_configuration(
+    In(config): In<PreparedConfiguration>,
+    mut target: ConfigTarget,
+) -> Result<()> {
     target.apply(config)
 }
 
@@ -443,10 +455,10 @@ fn dispatch_action(
         Action::Reload => {
             match read_configuration(&target.state.path).and_then(|config| target.apply(config)) {
                 Ok(()) => {
-                    tracing::info!("reloaded Master configuration");
+                    tracing::info!("reloaded weldwm configuration");
                 }
                 Err(error) => {
-                    tracing::warn!(error = %format!("{error:#}"), "Master reload rejected; keeping current configuration")
+                    tracing::warn!(error = %format!("{error:#}"), "weldwm reload rejected; keeping current configuration")
                 }
             }
         }
@@ -518,9 +530,9 @@ mod tests {
                     WindowPlugin,
                     TilePlugin,
                     GlobalShortcutPlugin,
-                    MasterConfigPlugin {
+                    ConfigPlugin {
                         path: example_path(),
-                        initial: config::parse(
+                        initial: prepare::parse(
                             "test",
                             "bindsym Mod4+d focus left\nbindsym Mod4+h weld hoist",
                         )
@@ -595,7 +607,7 @@ mod tests {
                     WindowPlugin,
                     TilePlugin,
                     GlobalShortcutPlugin,
-                    MasterConfigPlugin {
+                    ConfigPlugin {
                         path: example_path(),
                         initial: read_configuration(&example_path()).expect("example config"),
                     },
@@ -666,7 +678,7 @@ mod tests {
             );
             // The command is queued, not executed by configuration handling.
             assert!(app.world().contains_resource::<ShellCommands>());
-            install(&mut app, config::parse("empty", "").expect("empty config"));
+            install(&mut app, prepare::parse("empty", "").expect("empty config"));
             assert!(app.world().resource::<ConfigState>().actions.is_empty());
         }
     }
@@ -678,9 +690,9 @@ mod tests {
             WindowPlugin,
             TilePlugin,
             GlobalShortcutPlugin,
-            MasterConfigPlugin {
+            ConfigPlugin {
                 path: example_path(),
-                initial: config::parse(
+                initial: prepare::parse(
                     "test",
                     "gaps inner 20\nbindsym Mod4+F3 reload\nbindsym Mod4+F4 splitv",
                 )
@@ -754,7 +766,7 @@ mod tests {
         let mut app = App::new();
         app.init_resource::<LocalInteractionBindings>();
         app.init_resource::<OutputPreferences>();
-        app.init_resource::<WindowRules>();
+        app.init_resource::<ConfiguredRules>();
         app.init_resource::<WorkspaceSettings>();
         app.init_resource::<WindowPointerSettings>();
         app.init_resource::<SsdSettings>();
@@ -785,7 +797,7 @@ mod tests {
             .keys()
             .copied()
             .collect();
-        let result = config::parse("test", "gaps inner 20\ndefault_orientation broken")
+        let result = prepare::parse("test", "gaps inner 20\ndefault_orientation broken")
             .map(|candidate| install(&mut app, candidate));
         assert!(result.is_err());
         assert_eq!(*app.world().resource::<TileSettings>(), before);
@@ -797,24 +809,27 @@ mod tests {
         }));
         install(
             &mut app,
-            config::parse("test", "gaps inner 20\nfocus_wrapping force").expect("valid"),
+            prepare::parse("test", "gaps inner 20\nfocus_wrapping force").expect("valid"),
         );
         assert_eq!(app.world().resource::<TileSettings>().inner_gap, 20);
         assert_eq!(
             *app.world().resource::<FocusWrapping>(),
-            FocusWrapping::Force
+            FocusWrapping::Immediate
         );
         assert!(app.world().resource::<ConfigState>().actions.is_empty());
-        let invalid = config::parse("test", "gaps inner 50\nfocus_wrapping invalid")
+        let invalid = prepare::parse("test", "gaps inner 50\nfocus_wrapping invalid")
             .map(|candidate| install(&mut app, candidate));
         assert!(invalid.is_err());
         assert_eq!(app.world().resource::<TileSettings>().inner_gap, 20);
         assert_eq!(
             *app.world().resource::<FocusWrapping>(),
-            FocusWrapping::Force
+            FocusWrapping::Immediate
         );
-        install(&mut app, config::parse("empty", "").expect("empty"));
-        assert_eq!(*app.world().resource::<FocusWrapping>(), FocusWrapping::Yes);
+        install(&mut app, prepare::parse("empty", "").expect("empty"));
+        assert_eq!(
+            *app.world().resource::<FocusWrapping>(),
+            FocusWrapping::Fallback
+        );
     }
 
     fn example_path() -> PathBuf {
@@ -826,9 +841,9 @@ mod tests {
         let mut app = App::new();
         let baseline = CursorSettings::new("baseline", 22).expect("cursor");
         app.insert_resource(baseline.clone());
-        app.add_plugins(MasterConfigPlugin {
+        app.add_plugins(ConfigPlugin {
             path: example_path(),
-            initial: config::parse(
+            initial: prepare::parse(
                 "devices",
                 "input type:touchpad tap enabled\nseat * xcursor_theme Example 30",
             )
@@ -842,7 +857,7 @@ mod tests {
         assert!(reader.take(app.world()).is_none());
         assert_eq!(app.world().resource::<CursorSettings>().size(), 30);
         assert_eq!(app.world().resource::<CursorSettings>().theme(), "Example");
-        let invalid = config::parse(
+        let invalid = prepare::parse(
             "invalid",
             "input type:touchpad tap disabled\nseat * xcursor_theme Example 0",
         )
@@ -852,7 +867,7 @@ mod tests {
         assert_eq!(app.world().resource::<CursorSettings>().size(), 30);
         install(
             &mut app,
-            config::parse(
+            prepare::parse(
                 "reload",
                 "input type:touchpad tap disabled\nseat * xcursor_theme Other",
             )
@@ -867,7 +882,7 @@ mod tests {
             Some(false)
         );
         assert_eq!(app.world().resource::<CursorSettings>().size(), 22);
-        install(&mut app, config::parse("empty", "").expect("defaults"));
+        install(&mut app, prepare::parse("empty", "").expect("defaults"));
         assert_eq!(
             reader.take(app.world()),
             Some(PointerDeviceSettings::default())
@@ -882,9 +897,9 @@ mod tests {
             filter_global_shortcut_event,
         };
         let mut app = App::new();
-        app.add_plugins(MasterConfigPlugin {
+        app.add_plugins(ConfigPlugin {
             path: example_path(),
-            initial: config::parse("keys", "bindsym XF86MonBrightnessDown exec lower\nbindsym XF86MonBrightnessUp exec raise\nbindsym XF86AudioPause exec pause").expect("bindings"),
+            initial: prepare::parse("keys", "bindsym XF86MonBrightnessDown exec lower\nbindsym XF86MonBrightnessUp exec raise\nbindsym XF86AudioPause exec pause").expect("bindings"),
         });
         for keycode in [224, 225, 201] {
             for state in [KeyboardKeyState::Pressed, KeyboardKeyState::Released] {
@@ -911,9 +926,9 @@ mod tests {
     #[test]
     fn font_reload_publishes_valid_typography_and_retains_it_on_invalid_input() {
         let mut app = App::new();
-        app.add_plugins(MasterConfigPlugin {
+        app.add_plugins(ConfigPlugin {
             path: example_path(),
-            initial: config::parse("font", "font pango:monospace 8").expect("initial font"),
+            initial: prepare::parse("font", "font pango:monospace 8").expect("initial font"),
         });
         assert!(
             (app.world().resource::<SsdSettings>().title_font.size - 8.0 * 96.0 / 72.0).abs()
@@ -921,15 +936,15 @@ mod tests {
         );
         install(
             &mut app,
-            config::parse("font", "font pango:serif Bold 20px").expect("replacement font"),
+            prepare::parse("font", "font pango:serif Bold 20px").expect("replacement font"),
         );
         let accepted = app.world().resource::<SsdSettings>().clone();
-        let result =
-            config::parse("font", "font monospace 0").map(|candidate| install(&mut app, candidate));
+        let result = prepare::parse("font", "font monospace 0")
+            .map(|candidate| install(&mut app, candidate));
         assert!(result.is_err());
         assert_eq!(*app.world().resource::<SsdSettings>(), accepted);
         assert_eq!(accepted.title_font.size, 20.0);
-        install(&mut app, config::parse("empty", "").expect("default font"));
+        install(&mut app, prepare::parse("empty", "").expect("default font"));
         assert_eq!(
             *app.world().resource::<SsdSettings>(),
             SsdSettings::default()
@@ -940,9 +955,9 @@ mod tests {
     fn startup_runs_once_and_only_exec_always_is_queued_on_reload() {
         let mut app = App::new();
         let source = "exec foot\nexec_always waybar\nexec rofi -show drun";
-        app.add_plugins(MasterConfigPlugin {
+        app.add_plugins(ConfigPlugin {
             path: example_path(),
-            initial: config::parse("startup", source).expect("config"),
+            initial: prepare::parse("startup", source).expect("config"),
         });
         assert_eq!(
             app.world().resource::<ConfigState>().pending_launches,
@@ -957,12 +972,12 @@ mod tests {
                 .pending_launches
                 .is_empty()
         );
-        install(&mut app, config::parse("reload", source).expect("reload"));
+        install(&mut app, prepare::parse("reload", source).expect("reload"));
         assert_eq!(
             app.world().resource::<ConfigState>().pending_launches,
             ["waybar"]
         );
-        let invalid = config::parse("reload", "exec_always unwanted\ndefault_orientation broken")
+        let invalid = prepare::parse("reload", "exec_always unwanted\ndefault_orientation broken")
             .map(|candidate| install(&mut app, candidate));
         assert!(invalid.is_err());
         assert_eq!(
@@ -983,7 +998,7 @@ mod tests {
         );
     }
 
-    fn install(app: &mut App, config: Configuration) {
+    fn install(app: &mut App, config: PreparedConfiguration) {
         app.world_mut()
             .run_system_once_with(apply_configuration, config)
             .expect("configuration system")
@@ -993,7 +1008,7 @@ mod tests {
     #[test]
     fn initial_settings_are_ready_before_the_first_host_publication() {
         let mut app = App::new();
-        app.add_plugins(MasterConfigPlugin {
+        app.add_plugins(ConfigPlugin {
             path: example_path(),
             initial: read_configuration(&example_path()).expect("example config"),
         });
@@ -1010,9 +1025,9 @@ mod tests {
     #[test]
     fn variable_reload_replaces_live_preferences_and_rejects_bad_assignments_atomically() {
         let mut app = App::new();
-        app.add_plugins(MasterConfigPlugin {
+        app.add_plugins(ConfigPlugin {
             path: example_path(),
-            initial: config::parse("initial", "set $mod Mod4\nfloating_modifier $mod\nfocus_follows_mouse yes\nbindsym $mod+Return exec foot").expect("initial"),
+            initial: prepare::parse("initial", "set $mod Mod4\nfloating_modifier $mod\nfocus_follows_mouse yes\nbindsym $mod+Return exec foot").expect("initial"),
         });
         let old_ids = app
             .world()
@@ -1021,8 +1036,8 @@ mod tests {
             .keys()
             .copied()
             .collect::<Vec<_>>();
-        let replacement = config::parse("replacement", "set $mod Mod1\nfloating_modifier $mod\nfocus_follows_mouse no\nblur enable\nbindsym $mod+Return exec foot").expect("warnings allow replacement");
-        assert_eq!(replacement.warnings.len(), 1);
+        let replacement = prepare::parse("replacement", "set $mod Mod1\nfloating_modifier $mod\nfocus_follows_mouse no\nblur enable\nbindsym $mod+Return exec foot").expect("warnings allow replacement");
+        assert_eq!(replacement.settings.warnings.len(), 1);
         install(&mut app, replacement);
         let pointer = *app.world().resource::<WindowPointerSettings>();
         assert!(pointer.modifier.expect("modifier").alt);
@@ -1040,7 +1055,7 @@ mod tests {
             .keys()
             .copied()
             .collect::<Vec<_>>();
-        let invalid = config::parse("invalid", "set $mod\nfloating_modifier Mod4")
+        let invalid = prepare::parse("invalid", "set $mod\nfloating_modifier Mod4")
             .map(|config| install(&mut app, config));
         assert!(invalid.is_err());
         assert_eq!(*app.world().resource::<WindowPointerSettings>(), pointer);
@@ -1054,14 +1069,14 @@ mod tests {
 
     #[test]
     fn output_scale_configuration_replaces_preferences_and_bad_reload_retains_them() {
-        let initial = config::parse(
+        let initial = prepare::parse(
             "initial",
             "set $factor 1.25\noutput * scale $factor adaptive_sync on",
         )
         .expect("initial");
-        assert_eq!(initial.warnings.len(), 1);
+        assert_eq!(initial.settings.warnings.len(), 1);
         let mut app = App::new();
-        app.add_plugins(MasterConfigPlugin {
+        app.add_plugins(ConfigPlugin {
             path: example_path(),
             initial,
         });
@@ -1071,12 +1086,12 @@ mod tests {
             Some(1.25)
         );
         let invalid =
-            config::parse("bad", "output * scale 0").map(|config| install(&mut app, config));
+            prepare::parse("bad", "output * scale 0").map(|config| install(&mut app, config));
         assert!(invalid.is_err());
         assert_eq!(app.world().resource::<OutputPreferences>().0, settings);
         install(
             &mut app,
-            config::parse("replacement", "output * scale 1.5").expect("replacement"),
+            prepare::parse("replacement", "output * scale 1.5").expect("replacement"),
         );
         assert_eq!(
             app.world()
@@ -1086,7 +1101,7 @@ mod tests {
                 .map(|scale| scale.value()),
             Some(1.5)
         );
-        install(&mut app, config::parse("empty", "").expect("empty"));
+        install(&mut app, prepare::parse("empty", "").expect("empty"));
         assert_eq!(
             app.world().resource::<OutputPreferences>().0,
             OutputSettings::default()
@@ -1097,9 +1112,9 @@ mod tests {
     fn mode_switch_and_resize_in_one_raw_batch_use_the_new_context() {
         let mut app = App::new();
         app.init_resource::<SurfaceActionQueue>().add_plugins((
-            WindowPlugin, TilePlugin, MasterConfigPlugin {
+            WindowPlugin, TilePlugin, ConfigPlugin {
                 path: example_path(),
-                initial: config::parse("modes", "bindsym r mode resize\nmode resize {\n bindsym Right resize grow width 10 px or 10 ppt\n bindsym Escape mode default\n}").expect("modes"),
+                initial: prepare::parse("modes", "bindsym r mode resize\nmode resize {\n bindsym Right resize grow width 10 px or 10 ppt\n bindsym Escape mode default\n}").expect("modes"),
             },
         ));
         app.world_mut().spawn((

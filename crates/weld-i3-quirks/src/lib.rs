@@ -4,8 +4,8 @@
 //! managed-window commands. Window identity, node history and tree mutation remain
 //! owned by `weld-window` and `weld-tile`.
 
-use weld_i3_config::{FocusWrapping, I3FocusHierarchy};
 use weld_tile_config::Direction;
+use weld_tile_config::{FocusHierarchy, FocusWrapping};
 mod focus;
 mod layout;
 mod movement;
@@ -13,7 +13,6 @@ mod resize;
 mod sticky;
 pub use sticky::I3StickyRequest;
 mod tree;
-pub mod window_rules;
 pub mod workspace;
 
 use bevy::{
@@ -40,12 +39,10 @@ pub struct I3QuirksPlugin;
 impl Plugin for I3QuirksPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FocusWrapping>()
-            .init_resource::<window_rules::WindowRules>()
-            .init_resource::<weld_i3_config::WorkspaceSettings>()
+            .init_resource::<weld_window_config::WorkspaceSettings>()
             .init_resource::<workspace::PreviousWorkspace>()
             .add_observer(workspace::request)
             .add_observer(workspace::move_explicit)
-            .add_observer(window_rules::execute)
             .add_observer(workspace::activate_existing)
             .add_observer(workspace::apply_resolved)
             .add_observer(workspace::finish_switch)
@@ -69,20 +66,9 @@ impl Plugin for I3QuirksPlugin {
             .add_systems(PreUpdate, focus::refresh_path.in_set(TileSystems::Layout));
         app.add_systems(
             PreUpdate,
-            window_rules::apply.in_set(weld_window::WindowSystems::AdmissionPolicy),
-        );
-        app.add_systems(
-            PreUpdate,
             workspace::prepare
-                .before(window_rules::apply)
+                .before(weld_window::rules::WindowRuleSystems::Evaluate)
                 .in_set(weld_window::WindowSystems::AdmissionPolicy),
-        );
-        app.add_systems(
-            PreUpdate,
-            window_rules::dispatch
-                .after(TileSystems::Prepare)
-                .before(TileSystems::Commands)
-                .in_set(weld_window::WindowSystems::Management),
         );
         app.add_systems(
             PreUpdate,

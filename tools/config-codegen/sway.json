@@ -1583,5 +1583,109 @@
     "ResizeKind": [
       "set"
     ]
+  },
+  "streams": {
+    "OutputProperty": {
+      "kind": "OutputPropertyKind",
+      "items": {
+        "Scale": {
+          "aliases": [
+            "scale"
+          ],
+          "value": "FiniteFloat"
+        },
+        "Enable": {
+          "aliases": [
+            "enable"
+          ],
+          "consume": {
+            "count": 0
+          }
+        },
+        "Disable": {
+          "aliases": [
+            "disable"
+          ],
+          "consume": {
+            "count": 0
+          }
+        },
+        "AdaptiveSync": {
+          "aliases": [
+            "adaptive_sync"
+          ],
+          "consume": {
+            "count": 1
+          }
+        },
+        "Transform": {
+          "aliases": [
+            "transform"
+          ],
+          "consume": {
+            "count": 1
+          }
+        },
+        "ScaleFilter": {
+          "aliases": [
+            "scale_filter"
+          ],
+          "consume": {
+            "count": 1
+          }
+        },
+        "Power": {
+          "aliases": [
+            "power"
+          ],
+          "consume": {
+            "count": 1
+          }
+        },
+        "Dpms": {
+          "aliases": [
+            "dpms"
+          ],
+          "consume": {
+            "count": 1
+          }
+        },
+        "MaxRenderTime": {
+          "aliases": [
+            "max_render_time"
+          ],
+          "consume": {
+            "count": 1
+          }
+        },
+        "Subpixel": {
+          "aliases": [
+            "subpixel"
+          ],
+          "consume": {
+            "count": 1
+          }
+        },
+        "Mode": {
+          "aliases": [
+            "mode",
+            "resolution"
+          ],
+          "consume": {
+            "optional_prefix": "--custom",
+            "count": 1
+          }
+        },
+        "Position": {
+          "aliases": [
+            "position",
+            "pos"
+          ],
+          "consume": {
+            "pair_separator": ","
+          }
+        }
+      }
+    }
   }
 }

@@ -1,33 +1,26 @@
-//! Distribution commands layered onto the i3 configuration interpreter.
+//! Distribution action lowering and fallible runtime resource preparation.
 
+use super::rules::ConfiguredRules;
 use anyhow::{Context, Result};
 use weld_app::input::ShellCommand;
 use weld_config::UnsupportedPolicy;
-use weld_i3_quirks::window_rules::WindowRules;
 use weld_input::KeyboardKeymap;
-use weld_master_config as model;
 use weld_ssd::SsdSettings;
-use weld_sway_adapter as i3;
+use weld_sway_config::lowering as sway;
 use weld_sway_config::typed::WeldCommand;
 #[cfg(test)]
 use weld_tile_config::{Direction, SplitAxis, TileOperation};
+use weldwm_config as model;
 
 pub(super) type Action = model::Action<DistributionAction>;
 /// Candidate with fallible native resources prepared before publication.
 #[derive(Clone, Debug)]
-pub(super) struct Configuration {
+pub(super) struct PreparedConfiguration {
     pub settings: model::Configuration<DistributionAction>,
     pub keymap: Option<KeyboardKeymap>,
-    pub window_rules: WindowRules,
+    pub window_rules: ConfiguredRules,
     pub decorations: SsdSettings,
 }
-impl std::ops::Deref for Configuration {
-    type Target = model::Configuration<DistributionAction>;
-    fn deref(&self) -> &Self::Target {
-        &self.settings
-    }
-}
-
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum DistributionAction {
     RevokeAccess,
@@ -40,8 +33,8 @@ pub(super) enum DistributionAction {
     Shell(ShellCommand),
 }
 
-pub(super) fn parse(name: &str, source: &str) -> Result<Configuration> {
-    let config = i3::parse_with_policy(name, source, UnsupportedPolicy::Warn, extension)?;
+pub(super) fn parse(name: &str, source: &str) -> Result<PreparedConfiguration> {
+    let config = sway::parse_with_policy(name, source, UnsupportedPolicy::Warn, extension)?;
     for (chord, action) in config
         .bindings
         .iter()
@@ -62,7 +55,7 @@ pub(super) fn parse(name: &str, source: &str) -> Result<Configuration> {
         .map(KeyboardKeymap::compile)
         .transpose()
         .with_context(|| format!("{name}: keyboard configuration"))?;
-    let mut window_rules = WindowRules::default();
+    let mut window_rules = ConfiguredRules::default();
     for rule in &config.window_rules {
         window_rules.add(rule.value.clone()).with_context(|| {
             format!(
@@ -72,7 +65,7 @@ pub(super) fn parse(name: &str, source: &str) -> Result<Configuration> {
         })?;
     }
     let decorations = config.decorations.clone().into();
-    Ok(Configuration {
+    Ok(PreparedConfiguration {
         settings: config,
         keymap,
         window_rules,
@@ -114,8 +107,9 @@ mod tests {
 
     #[test]
     fn default_navigation_uses_letters_without_a_launch_conflict() {
-        let config =
-            parse("default", include_str!("../../examples/master.sway.config")).expect("config");
+        let config = parse("default", include_str!("../../examples/master.sway.config"))
+            .expect("config")
+            .settings;
         for (key, direction) in [
             (KeyCode::KeyD, Direction::Left),
             (KeyCode::KeyF, Direction::Right),

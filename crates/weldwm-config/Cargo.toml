@@ -1,14 +1,13 @@
 [package]
-name = "weld-i3-config"
+name = "weldwm-config"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
 
-[features]
-ecs = ["dep:bevy_ecs"]
-
 [dependencies]
-bevy_ecs = { workspace = true, optional = true }
+weld-config = { path = "../weld-config" }
+weld-input-config = { path = "../weld-input-config" }
+weld-output = { path = "../weld-output" }
 weld-tile-config = { path = "../weld-tile-config" }
 weld-window-config = { path = "../weld-window-config" }
 weld-ssd-config = { path = "../weld-ssd-config" }

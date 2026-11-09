@@ -40,6 +40,16 @@ class GrammarValidation(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, 'exactly one physical identity'):
             generate.mappings(schema)
 
+    def test_stream_aliases_and_consumption_are_validated(self):
+        schema = copy.deepcopy(self.schema)
+        schema['streams']['OutputProperty']['items']['Mode']['aliases'].append('scale')
+        with self.assertRaisesRegex(ValueError, 'duplicate spelling'):
+            generate.generate(schema)
+        schema = copy.deepcopy(self.schema)
+        schema['streams']['OutputProperty']['items']['Mode']['consume']['count'] = -1
+        with self.assertRaisesRegex(ValueError, 'nonnegative integers'):
+            generate.generate(schema)
+
     def test_upstream_references_resolve_and_inventory_accounts_for_every_state(self):
         imported = import_i3.import_states()
         report = generate.coverage(self.schema)

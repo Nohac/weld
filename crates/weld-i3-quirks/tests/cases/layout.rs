@@ -2,13 +2,13 @@
 //! See ../../UPSTREAM.md and ../../LICENSE-i3.
 
 use super::*;
-use weld_i3_config::{I3LayoutRequest, LayoutChoice};
 use weld_tile_config::TileLayout;
+use weld_tile_config::{LayoutChoice, LayoutRequest};
 
 use weld_tile::{TileHeaders, TileSelect};
 use weld_window::{WindowVisibility, workspace::WorkspaceMember};
 
-fn layout(app: &mut App, request: I3LayoutRequest) {
+fn layout(app: &mut App, request: LayoutRequest) {
     app.world_mut().trigger(request);
     app.update();
 }
@@ -52,31 +52,67 @@ fn layout_transitions_restore_split_axis_shares_and_children() {
         .children()
         .collect();
     for (request, expected) in [
+        (LayoutRequest::Set(TileLayout::Stacked), TileLayout::Stacked),
+        (LayoutRequest::Set(TileLayout::Tabbed), TileLayout::Tabbed),
         (
-            I3LayoutRequest::Set(TileLayout::Stacked),
+            LayoutRequest::Cycle(vec![LayoutChoice::AlternateSplit]),
+            TileLayout::Split(SplitAxis::Vertical),
+        ),
+        (
+            LayoutRequest::Cycle(vec![LayoutChoice::AlternateSplit]),
+            TileLayout::Split(SplitAxis::Horizontal),
+        ),
+        (
+            LayoutRequest::Cycle(vec![
+                LayoutChoice::Layout(TileLayout::Stacked),
+                LayoutChoice::Layout(TileLayout::Tabbed),
+                LayoutChoice::RememberedSplit,
+            ]),
             TileLayout::Stacked,
         ),
-        (I3LayoutRequest::Set(TileLayout::Tabbed), TileLayout::Tabbed),
         (
-            I3LayoutRequest::Cycle(vec![LayoutChoice::Split]),
+            LayoutRequest::Cycle(vec![
+                LayoutChoice::Layout(TileLayout::Stacked),
+                LayoutChoice::Layout(TileLayout::Tabbed),
+                LayoutChoice::RememberedSplit,
+            ]),
+            TileLayout::Tabbed,
+        ),
+        (
+            LayoutRequest::Cycle(vec![
+                LayoutChoice::Layout(TileLayout::Stacked),
+                LayoutChoice::Layout(TileLayout::Tabbed),
+                LayoutChoice::RememberedSplit,
+            ]),
+            TileLayout::Split(SplitAxis::Horizontal),
+        ),
+        (
+            LayoutRequest::Cycle(vec![
+                LayoutChoice::Layout(TileLayout::Split(SplitAxis::Horizontal)),
+                LayoutChoice::Layout(TileLayout::Split(SplitAxis::Vertical)),
+                LayoutChoice::Layout(TileLayout::Stacked),
+                LayoutChoice::Layout(TileLayout::Tabbed),
+            ]),
             TileLayout::Split(SplitAxis::Vertical),
         ),
         (
-            I3LayoutRequest::Cycle(vec![LayoutChoice::Split]),
-            TileLayout::Split(SplitAxis::Horizontal),
+            LayoutRequest::Cycle(vec![
+                LayoutChoice::Layout(TileLayout::Split(SplitAxis::Horizontal)),
+                LayoutChoice::Layout(TileLayout::Split(SplitAxis::Vertical)),
+                LayoutChoice::Layout(TileLayout::Stacked),
+                LayoutChoice::Layout(TileLayout::Tabbed),
+            ]),
+            TileLayout::Stacked,
         ),
-        (I3LayoutRequest::Toggle, TileLayout::Stacked),
-        (I3LayoutRequest::Toggle, TileLayout::Tabbed),
         (
-            I3LayoutRequest::Toggle,
-            TileLayout::Split(SplitAxis::Horizontal),
+            LayoutRequest::Cycle(vec![
+                LayoutChoice::Layout(TileLayout::Split(SplitAxis::Horizontal)),
+                LayoutChoice::Layout(TileLayout::Split(SplitAxis::Vertical)),
+                LayoutChoice::Layout(TileLayout::Stacked),
+                LayoutChoice::Layout(TileLayout::Tabbed),
+            ]),
+            TileLayout::Tabbed,
         ),
-        (
-            I3LayoutRequest::ToggleAll,
-            TileLayout::Split(SplitAxis::Vertical),
-        ),
-        (I3LayoutRequest::ToggleAll, TileLayout::Stacked),
-        (I3LayoutRequest::ToggleAll, TileLayout::Tabbed),
     ] {
         layout(&mut app, request);
         assert_eq!(mode(&app, group), expected);
@@ -102,7 +138,7 @@ fn tab_focus_visibility_and_close_recovery_share_branch_history() {
         let first = window(&mut app, 1);
         let second = window(&mut app, 2);
         let third = window(&mut app, 3);
-        layout(&mut app, I3LayoutRequest::Set(mode));
+        layout(&mut app, LayoutRequest::Set(mode));
         let group = parent(&app, third);
         assert_eq!(parent(&app, first), group);
         assert_eq!(parent(&app, second), group);
@@ -142,7 +178,7 @@ fn nested_tab_hides_entire_inactive_branch_and_restores_its_focus() {
     let mut app = app();
     let first = window(&mut app, 1);
     let second = window(&mut app, 2);
-    layout(&mut app, I3LayoutRequest::Set(TileLayout::Tabbed));
+    layout(&mut app, LayoutRequest::Set(TileLayout::Tabbed));
     split(&mut app, SplitAxis::Vertical);
     let third = window(&mut app, 3);
     assert!(visible(&app, second) && visible(&app, third));
@@ -164,7 +200,7 @@ fn tab_and_stack_movement_reorders_then_extracts_at_the_edge() {
         let first = window(&mut app, 1);
         let second = window(&mut app, 2);
         let third = window(&mut app, 3);
-        layout(&mut app, I3LayoutRequest::Set(mode));
+        layout(&mut app, LayoutRequest::Set(mode));
         let group = parent(&app, third);
         let backwards = if mode == TileLayout::Tabbed {
             Direction::Left
@@ -205,7 +241,7 @@ fn layout_changes_target_the_parent_of_a_selected_group() {
     let inner = parent(&app, third);
     app.world_mut().trigger(TileSelect(inner));
     app.update();
-    layout(&mut app, I3LayoutRequest::Set(TileLayout::Tabbed));
+    layout(&mut app, LayoutRequest::Set(TileLayout::Tabbed));
     let outer = parent(&app, inner);
     assert_eq!(mode(&app, outer), TileLayout::Tabbed);
     assert_eq!(mode(&app, inner), TileLayout::Split(SplitAxis::Vertical));
@@ -218,20 +254,18 @@ fn workspace_transfer_keeps_tab_layout_and_active_child() {
     let mut app = app();
     let first = window(&mut app, 1);
     let second = window(&mut app, 2);
-    layout(&mut app, I3LayoutRequest::Set(TileLayout::Tabbed));
+    layout(&mut app, LayoutRequest::Set(TileLayout::Tabbed));
     let group = parent(&app, first);
     app.world_mut().trigger(TileSelect(group));
     app.update();
     app.world_mut()
-        .trigger(I3WorkspaceRequest::move_window(WorkspaceTarget::Name(
+        .trigger(WorkspaceCommand::move_window(WorkspaceTarget::Name(
             "2".into(),
         )));
     app.update();
     assert!(!visible(&app, first) && !visible(&app, second));
     app.world_mut()
-        .trigger(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
-            "2".into(),
-        )));
+        .trigger(WorkspaceCommand::switch(WorkspaceTarget::Name("2".into())));
     app.update();
     assert_eq!(mode(&app, group), TileLayout::Tabbed);
     assert_eq!(selected(&app), second);
@@ -247,9 +281,9 @@ fn repeated_unary_split_and_tab_commands_do_not_accumulate_containers() {
     let mut app = app();
     let only = window(&mut app, 1);
     for _ in 0..100 {
-        layout(&mut app, I3LayoutRequest::Set(TileLayout::Stacked));
+        layout(&mut app, LayoutRequest::Set(TileLayout::Stacked));
         split(&mut app, SplitAxis::Vertical);
-        layout(&mut app, I3LayoutRequest::Set(TileLayout::Tabbed));
+        layout(&mut app, LayoutRequest::Set(TileLayout::Tabbed));
         split(&mut app, SplitAxis::Horizontal);
         let mut depth = 0;
         let mut node = only;
@@ -266,7 +300,7 @@ fn closing_to_one_tab_preserves_layout_for_the_next_window() {
     let mut app = app();
     let first = window(&mut app, 1);
     let second = window(&mut app, 2);
-    layout(&mut app, I3LayoutRequest::Set(TileLayout::Tabbed));
+    layout(&mut app, LayoutRequest::Set(TileLayout::Tabbed));
     let group = parent(&app, second);
     app.world_mut().entity_mut(second).despawn();
     app.update();
@@ -283,7 +317,7 @@ fn default_layout_on_a_populated_workspace_preserves_its_children() {
     let first = window(&mut app, 1);
     let second = window(&mut app, 2);
     let root = parent(&app, second);
-    layout(&mut app, I3LayoutRequest::Default);
+    layout(&mut app, LayoutRequest::RestoreSplit);
     assert_eq!(parent(&app, first), root);
     assert_eq!(parent(&app, second), root);
     assert_eq!(
@@ -301,7 +335,7 @@ fn stacking_navigation_uses_layout_axis_after_parent_split_changes() {
     let mut app = app();
     let first = window(&mut app, 1);
     let second = window(&mut app, 2);
-    layout(&mut app, I3LayoutRequest::Set(TileLayout::Stacked));
+    layout(&mut app, LayoutRequest::Set(TileLayout::Stacked));
     navigate(&mut app, Direction::Down);
     assert_eq!(selected(&app), first);
     navigate(&mut app, Direction::Up);
@@ -311,7 +345,7 @@ fn stacking_navigation_uses_layout_axis_after_parent_split_changes() {
     app.update();
     split(&mut app, SplitAxis::Horizontal);
     app.world_mut()
-        .trigger(weld_i3_config::I3FocusHierarchy::Child);
+        .trigger(weld_tile_config::FocusHierarchy::Child);
     app.update();
     navigate(&mut app, Direction::Down);
     assert_eq!(selected(&app), first);

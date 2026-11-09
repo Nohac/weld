@@ -45,3 +45,10 @@ pub struct WindowPointerSettings {
     /// Focus a window when mouse motion enters it, preserving its stacking order.
     pub focus_follows_mouse: bool,
 }
+
+mod workspace;
+pub use workspace::{
+    WorkspaceAssignment, WorkspaceCommand, WorkspaceNavigation, WorkspaceSettings, WorkspaceTarget,
+};
+mod rules;
+pub use rules::{RuleDefinition, RuleEffect, WindowMatchField};

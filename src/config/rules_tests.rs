@@ -1,5 +1,6 @@
 //! Config rules apply to the matched occupant before layout and input publication.
 
+use super::rules::{ConfiguredRules, WindowRulePlugin};
 use bevy::{
     app::App,
     ecs::entity::Entity,
@@ -15,9 +16,7 @@ use weld_app::{
 };
 use weld_client::{ClientId, ClientSourceId, ClientSurfaceMetadata, ToplevelHints, ToplevelKind};
 use weld_float::FloatBehaviorPlugin;
-use weld_i3_config::{I3WorkspaceRequest, WorkspaceTarget};
 use weld_i3_quirks::I3QuirksPlugin;
-use weld_master_config::Configuration;
 use weld_ssd::WindowBorderStyle;
 use weld_ssd_config::BorderStyle;
 use weld_tile::{TileParent, TilePlugin};
@@ -29,6 +28,8 @@ use weld_window::{
     workspace::{FocusedWorkspace, Workspace, WorkspaceMember},
 };
 use weld_window_config::{PersistenceAction, PersistenceMatch};
+use weld_window_config::{WorkspaceCommand, WorkspaceTarget};
+use weldwm_config::Configuration;
 
 #[test]
 fn persistence_rule_retains_slot_geometry_and_workspace_then_rebinds_a_new_occupant() {
@@ -70,9 +71,7 @@ fn persistence_rule_retains_slot_geometry_and_workspace_then_rebinds_a_new_occup
     assert!(app.world().get_entity(neighbor).is_ok());
 
     app.world_mut()
-        .trigger(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
-            "2".into(),
-        )));
+        .trigger(WorkspaceCommand::switch(WorkspaceTarget::Name("2".into())));
     app.update();
     let replacement = client(
         &mut app,
@@ -431,7 +430,7 @@ fn close_requests_exit_then_removes_only_the_empty_persistent_slot() {
 }
 
 fn config(source: &str) -> Configuration {
-    weld_sway_adapter::parse_with_extensions("fixture", source, |_| {
+    weld_sway_config::lowering::parse_with_extensions("fixture", source, |_| {
         Err(weld_config::unsupported("command"))
     })
     .expect("config")
@@ -444,6 +443,7 @@ fn app(source: &str) -> App {
             WindowPlugin,
             TilePlugin,
             I3QuirksPlugin,
+            WindowRulePlugin,
             FloatBehaviorPlugin,
         ))
         .insert_resource(prepared_rules(source))
@@ -541,7 +541,7 @@ fn rule_sequence_places_background_window_before_first_publication() {
         Vec2::new(40.0, 60.0)
     );
     app.world_mut()
-        .trigger(I3WorkspaceRequest::switch(WorkspaceTarget::Number(
+        .trigger(WorkspaceCommand::switch(WorkspaceTarget::NumberedName(
             "3".into(),
         )));
     app.update();
@@ -615,7 +615,7 @@ fn assignments_use_first_match_and_preserve_numbered_workspace_identity() {
     "#});
     app.update();
     app.world_mut()
-        .trigger(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
+        .trigger(WorkspaceCommand::switch(WorkspaceTarget::Name(
             "3:tools".into(),
         )));
     app.update();
@@ -719,8 +719,8 @@ fn batch_admission_preserves_first_focus_and_reuses_assignment_destination() {
     assert_eq!(workspace(&app, window(&app, worker1)), "3");
 }
 
-fn prepared_rules(source: &str) -> weld_i3_quirks::window_rules::WindowRules {
-    let mut rules = weld_i3_quirks::window_rules::WindowRules::default();
+fn prepared_rules(source: &str) -> ConfiguredRules {
+    let mut rules = ConfiguredRules::default();
     for rule in config(source).window_rules {
         rules.add(rule.value).expect("native rule");
     }

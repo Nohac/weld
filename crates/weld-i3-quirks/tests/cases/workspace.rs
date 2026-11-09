@@ -4,8 +4,8 @@ use bevy::ecs::query::With;
 use indoc::indoc;
 use weld_app::output::OutputInfo;
 use weld_app::workspace::{DesktopWorkspaceActivation, DesktopWorkspaceId};
-use weld_i3_config::{I3WorkspaceRequest, WorkspaceTarget};
-use weld_master_config as config;
+use weld_window_config::{WorkspaceCommand, WorkspaceTarget};
+use weldwm_config as config;
 
 use weld_window::workspace::{
     FocusedWorkspace, OutputWorkspaces, Workspace, WorkspaceMember, WorkspaceOutput,
@@ -15,7 +15,7 @@ use weld_window::workspace_protocol::WorkspaceProtocolPlugin;
 use weld_window::{OccupiesWindow, WindowOutput, WindowPresentationOverride, WindowVisibility};
 
 fn parse_config(name: &str, source: &str) -> anyhow::Result<config::Configuration> {
-    weld_sway_adapter::parse_with_extensions(name, source, |_| {
+    weld_sway_config::lowering::parse_with_extensions(name, source, |_| {
         anyhow::bail!("unsupported i3 command")
     })
 }
@@ -34,7 +34,7 @@ fn automatic_back_and_forth_respects_command_overrides_moves_and_reload() {
     assert_eq!(selected(&app), first, "no previous workspace is a no-op");
     show(&mut app, "2");
     let second = window(&mut app, 2);
-    switch(&mut app, WorkspaceTarget::Number("2".into()));
+    switch(&mut app, WorkspaceTarget::NumberedName("2".into()));
     assert_eq!(current(&app), "1");
     assert_eq!(selected(&app), first);
     show(&mut app, "2");
@@ -118,7 +118,7 @@ fn rename_preserves_workspace_identity_layout_and_previous_workspace_history() {
     switch(&mut app, WorkspaceTarget::BackAndForth);
     assert_eq!(current(&app), "3: code");
     assert_eq!(selected(&app), first);
-    app.world_mut().trigger(I3WorkspaceRequest::Rename {
+    app.world_mut().trigger(WorkspaceCommand::Rename {
         source: None,
         name: "2".into(),
     });
@@ -277,7 +277,7 @@ fn current(app: &App) -> String {
 }
 
 fn switch(app: &mut App, target: WorkspaceTarget) {
-    app.world_mut().trigger(I3WorkspaceRequest::switch(target));
+    app.world_mut().trigger(WorkspaceCommand::switch(target));
     app.update();
 }
 
@@ -287,7 +287,7 @@ fn show(app: &mut App, name: &str) {
 
 fn move_to(app: &mut App, name: &str) {
     app.world_mut()
-        .trigger(I3WorkspaceRequest::move_window(WorkspaceTarget::Name(
+        .trigger(WorkspaceCommand::move_window(WorkspaceTarget::Name(
             name.to_owned(),
         )));
     app.update();
@@ -596,7 +596,7 @@ fn ordered_switch_move_and_switch_see_published_memberships() {
     let window = window(&mut app, 1);
     app.world_mut()
         .run_system_once(|mut commands: Commands| {
-        commands.trigger(I3WorkspaceRequest::move_window(WorkspaceTarget::Name(
+        commands.trigger(WorkspaceCommand::move_window(WorkspaceTarget::Name(
             "2".to_owned(),
         )));
         commands.queue(|world: &mut bevy::ecs::world::World| {
@@ -604,7 +604,7 @@ fn ordered_switch_move_and_switch_see_published_memberships() {
             assert!(query.iter(world).all(|(geometry, _)| geometry.size.min_element() > 1.0),
                 "a move into a newly created workspace publishes usable geometry before the next action");
         });
-            commands.trigger(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
+            commands.trigger(WorkspaceCommand::switch(WorkspaceTarget::Name(
                 "2".to_owned(),
             )));
             commands.trigger(TileRequest::Focused(TileOperation::Split(
@@ -640,7 +640,7 @@ fn numeric_selection_and_reload_do_not_recreate_existing_workspaces() {
             .expect("config")
             .workspaces,
     );
-    switch(&mut app, WorkspaceTarget::Number("3".to_owned()));
+    switch(&mut app, WorkspaceTarget::NumberedName("3".to_owned()));
     assert_eq!(current(&app), "3: work");
     assert_eq!(selected(&app), window);
     assert_eq!(workspace(&mut app, "3: work"), Some(original));
@@ -773,7 +773,7 @@ fn startup_workspace_switches_share_order_with_tiling_commands() {
         I3QuirksPlugin,
     ));
     app.world_mut()
-        .trigger(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
+        .trigger(WorkspaceCommand::switch(WorkspaceTarget::Name(
             "3".to_owned(),
         )));
     let window = app

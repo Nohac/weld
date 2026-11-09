@@ -9,7 +9,7 @@ use weld_access::AccessAuthority;
 use weld_control::launch::{LaunchReceipt, LaunchRequest};
 use weld_core::runtime::drag::{DragRequest, FileDragPayload};
 
-/// Shared administrative authority consumed by Master's emergency binding.
+/// Shared administrative authority consumed by weldwm's emergency binding.
 #[derive(Resource, Clone)]
 pub(crate) struct SessionAccess(pub AccessAuthority);
 

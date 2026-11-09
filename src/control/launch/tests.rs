@@ -8,12 +8,12 @@ use weld_app::{
     },
 };
 use weld_client::{ClientProvenance, ClientSurfaceMetadata};
-use weld_i3_config::I3WorkspaceRequest;
 use weld_i3_quirks::I3QuirksPlugin;
 use weld_window::{
     FocusedWindow, ManagedBy, OccupiesWindow, PrimaryWindowPresentation, WindowHeaderRequested,
     WindowOccupant, WindowOutput, WindowPlugin, workspace::WorkspaceMember,
 };
+use weld_window_config::WorkspaceCommand;
 use weld_window_config::{PersistenceAction, PersistenceMatch};
 
 fn fixture() -> (App, mpsc::SyncSender<LaunchMessage>) {
@@ -31,6 +31,7 @@ fn fixture() -> (App, mpsc::SyncSender<LaunchMessage>) {
                 .chain()
                 .in_set(LaunchAdmission)
                 .after(WindowSystems::AdmissionPolicy)
+                .before(weld_tile::TileSystems::Prepare)
                 .before(WindowSystems::PresentationRevoke),
         );
     app.world_mut().spawn((
@@ -109,7 +110,7 @@ fn launch_destination_survives_workspace_switch_and_multiple_connections() {
         },
     );
     app.world_mut()
-        .trigger(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
+        .trigger(WorkspaceCommand::switch(WorkspaceTarget::Name(
             "other".into(),
         )));
     app.update();

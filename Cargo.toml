@@ -16,11 +16,9 @@ test-support = ["weld-app/test-support"]
 
 [workspace]
 members = [
-  "crates/weld-master-config",
+  "crates/weldwm-config",
   "crates/weld-config",
-  "crates/weld-i3-config",
   "crates/weld-ssd-config",
-  "crates/weld-sway-adapter",
   "crates/weld-window-config",
   "crates/weld-input-config",
   "crates/weld-tile-config",
@@ -124,10 +122,8 @@ xcursor = "0.3.11"
 
 [dependencies]
 weld-sway-config = { path = "crates/weld-sway-config" }
-weld-master-config = { path = "crates/weld-master-config" }
+weldwm-config = { path = "crates/weldwm-config" }
 weld-config = { path = "crates/weld-config" }
-weld-i3-config = { path = "crates/weld-i3-config", features = ["ecs"] }
-weld-sway-adapter = { path = "crates/weld-sway-adapter" }
 weld-window-config = { path = "crates/weld-window-config", features = ["ecs"] }
 weld-tile-config = { path = "crates/weld-tile-config", features = ["ecs"] }
 weld-input-config = { path = "crates/weld-input-config", features = ["ecs"] }
@@ -167,6 +163,7 @@ tracing-subscriber.workspace = true
 tracing-tracy = { workspace = true, optional = true }
 
 [dev-dependencies]
+indoc.workspace = true
 weld-ssd-config = { path = "crates/weld-ssd-config" }
 tokio.workspace = true
 weld-app = { path = "crates/weld-app", features = ["test-support"] }

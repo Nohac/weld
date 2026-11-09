@@ -8,6 +8,7 @@ const PROFILE_TARGET: &str = "weld_profile";
 
 mod activity;
 pub mod attention;
+pub mod rules;
 
 pub mod fullscreen;
 pub mod inspection;

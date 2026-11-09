@@ -3,12 +3,9 @@
 use anyhow::{Context, Result, ensure};
 use pango::{FontDescription, Gravity, Stretch, Style, Variant, glib::translate::IntoGlib};
 use weld_config::unsupported;
-use weld_ssd_config::{
-    FontFamily as FontSource, FontSettings as TitleFont, FontSlant as FontStyle, FontWeight,
-    FontWidth,
-};
+use weld_ssd_config::{FontFamily, FontSettings, FontSlant, FontWeight, FontWidth};
 
-pub(super) fn parse(text: &str) -> Result<TitleFont> {
+pub(super) fn parse(text: &str) -> Result<FontSettings> {
     ensure!(!text.contains('\0'), "font description contains a NUL byte");
     let description = FontDescription::from_string(text.strip_prefix("pango:").unwrap_or(text));
     let family = description.family().context("font family is required")?;
@@ -35,16 +32,16 @@ pub(super) fn parse(text: &str) -> Result<TitleFont> {
         "font size must not exceed 512 logical pixels"
     );
     let family = match family.to_ascii_lowercase().as_str() {
-        "monospace" => FontSource::monospace(),
-        "sans" | "sans-serif" => FontSource::sans_serif(),
-        "serif" => FontSource::serif(),
-        "system-ui" => FontSource::system_ui(),
-        _ => FontSource::Family(family.as_str().into()),
+        "monospace" => FontFamily::monospace(),
+        "sans" | "sans-serif" => FontFamily::sans_serif(),
+        "serif" => FontFamily::serif(),
+        "system-ui" => FontFamily::system_ui(),
+        _ => FontFamily::Family(family.as_str().into()),
     };
     let style = match description.style() {
-        Style::Normal => FontStyle::Normal,
-        Style::Italic => FontStyle::Italic,
-        Style::Oblique => FontStyle::Oblique(None),
+        Style::Normal => FontSlant::Normal,
+        Style::Italic => FontSlant::Italic,
+        Style::Oblique => FontSlant::Oblique(None),
         _ => return Err(unsupported("unsupported font slant")),
     };
     let width = match description.stretch() {
@@ -59,7 +56,7 @@ pub(super) fn parse(text: &str) -> Result<TitleFont> {
         Stretch::UltraExpanded => FontWidth::ULTRA_EXPANDED,
         _ => return Err(unsupported("unsupported font stretch")),
     };
-    Ok(TitleFont {
+    Ok(FontSettings {
         family,
         size,
         style,

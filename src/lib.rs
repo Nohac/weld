@@ -2,11 +2,11 @@
 
 mod arguments;
 mod bitrate_budget;
+mod config;
 mod control;
 mod devices;
 mod headless;
 mod iroh_host;
-mod master;
 mod overlay;
 mod remote_control;
 mod telemetry;
@@ -44,7 +44,7 @@ pub use arguments::{AppArguments, BackendKind};
 pub fn run(arguments: AppArguments) -> Result<()> {
     telemetry::initialize()?;
     if arguments.validate_config {
-        return master::validate_configuration(
+        return config::validate_configuration(
             arguments
                 .config
                 .as_deref()
@@ -61,7 +61,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         }
     };
     validate_hoist_arguments(&arguments)?;
-    let master_config = master::MasterConfigPlugin::load(
+    let configuration = config::ConfigPlugin::load(
         arguments
             .config
             .as_deref()
@@ -142,7 +142,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         .screenshot(arguments.screenshot)
         .remote_debug(arguments.remote_debug)
         .scale(arguments.scale)
-        .output_settings(master_config.output_settings())
+        .output_settings(configuration.output_settings())
         .socket_name(arguments.wayland_socket)
         .keyboard_repeat_mode(arguments.keyboard_repeat_mode.map(Into::into))
         .build()?;
@@ -154,7 +154,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
     });
     app.insert_resource(control::SessionAccess(access.clone()));
     let ipc_service = ipc_service.start()?;
-    app.insert_resource(master::ModeStatus(ipc_service.publisher()));
+    app.insert_resource(config::ModeStatus(ipc_service.publisher()));
     app.add_plugins(weld_sway_ipc::SwayIpcPlugin(
         ipc_service.desktop_publisher(),
     ));
@@ -378,7 +378,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         GlobalShortcutPlugin,
         VirtualTerminalShortcutPlugin,
         OutputTopologyOverlayPlugin,
-        master_config,
+        configuration,
     ));
     if enable_hoist_policy {
         app.add_plugins(HoistPlugin);
@@ -435,7 +435,7 @@ fn validate_session_arguments(arguments: &AppArguments) -> Result<()> {
     }
     anyhow::ensure!(
         arguments.config.is_none(),
-        "--config configures Weld Master; the session-only headless host has no window manager"
+        "--config configures weldwm; the session-only headless host has no window manager"
     );
     anyhow::ensure!(
         arguments.screenshot.is_none() && arguments.remote_debug.is_none(),

@@ -1,15 +1,15 @@
 //! Parent/child selection over nested splits, following i3's focus vocabulary.
 use super::*;
 use bevy::ecs::{observer::On, resource::Resource, system::ResMut};
-use weld_i3_config::I3FocusHierarchy;
 use weld_i3_quirks::{I3MoveRequest, I3StickyRequest};
 use weld_tile::TileSelection;
+use weld_tile_config::FocusHierarchy;
 use weld_window::workspace::{FocusedWorkspace, WorkspaceMember};
 use weld_window::{
     StickyWindow, WindowGroupSelected, WindowPresentationOverride, WindowVisibility,
 };
 
-fn hierarchy(app: &mut App, request: I3FocusHierarchy) {
+fn hierarchy(app: &mut App, request: FocusHierarchy) {
     app.world_mut().trigger(request);
     app.world_mut().flush();
 }
@@ -35,32 +35,32 @@ fn nested() -> (App, Entity, Entity, Entity, Entity) {
 #[test]
 fn parent_child_retains_client_focus_and_highlights_only_the_selected_branch() {
     let (mut app, first, second, third, branch) = nested();
-    hierarchy(&mut app, I3FocusHierarchy::Parent);
+    hierarchy(&mut app, FocusHierarchy::Parent);
     assert_eq!(group(&app), Some(branch));
     assert_eq!(selected(&app), third);
     app.update();
     assert!(app.world().get::<WindowGroupSelected>(first).is_none());
     assert!(app.world().get::<WindowGroupSelected>(second).is_some());
     assert!(app.world().get::<WindowGroupSelected>(third).is_some());
-    hierarchy(&mut app, I3FocusHierarchy::Parent);
+    hierarchy(&mut app, FocusHierarchy::Parent);
     assert_eq!(
         group(&app),
         app.world().resource::<FocusedWorkspace>().entity()
     );
-    hierarchy(&mut app, I3FocusHierarchy::Parent);
-    hierarchy(&mut app, I3FocusHierarchy::Child);
+    hierarchy(&mut app, FocusHierarchy::Parent);
+    hierarchy(&mut app, FocusHierarchy::Child);
     assert_eq!(group(&app), Some(branch));
-    hierarchy(&mut app, I3FocusHierarchy::Child);
+    hierarchy(&mut app, FocusHierarchy::Child);
     assert_eq!(group(&app), None);
     assert_eq!(selected(&app), third);
-    hierarchy(&mut app, I3FocusHierarchy::Child);
+    hierarchy(&mut app, FocusHierarchy::Child);
     assert_eq!(selected(&app), third);
 }
 
 #[test]
 fn moving_and_resizing_a_selected_split_preserves_the_whole_subtree() {
     let (mut app, first, second, third, branch) = nested();
-    hierarchy(&mut app, I3FocusHierarchy::Parent);
+    hierarchy(&mut app, FocusHierarchy::Parent);
     app.world_mut().trigger(I3MoveRequest(Direction::Left));
     app.update();
     assert_eq!(group(&app), Some(branch));
@@ -121,12 +121,12 @@ fn moving_and_resizing_a_selected_split_preserves_the_whole_subtree() {
 #[test]
 fn group_navigation_and_pointer_activation_return_to_leaf_selection() {
     let (mut app, first, _, third, branch) = nested();
-    hierarchy(&mut app, I3FocusHierarchy::Parent);
+    hierarchy(&mut app, FocusHierarchy::Parent);
     navigate(&mut app, Direction::Left);
     assert_eq!(selected(&app), first);
     assert_eq!(group(&app), None);
     focus(&mut app, third);
-    hierarchy(&mut app, I3FocusHierarchy::Parent);
+    hierarchy(&mut app, FocusHierarchy::Parent);
     assert_eq!(group(&app), Some(branch));
     app.world_mut().trigger(WindowIntent {
         window: third,
@@ -139,7 +139,7 @@ fn group_navigation_and_pointer_activation_return_to_leaf_selection() {
 #[test]
 fn closing_a_child_recovers_focus_without_leaving_a_stale_group() {
     let (mut app, _, second, third, _) = nested();
-    hierarchy(&mut app, I3FocusHierarchy::Parent);
+    hierarchy(&mut app, FocusHierarchy::Parent);
     app.world_mut().despawn(third);
     app.update();
     assert_eq!(selected(&app), second);
@@ -156,7 +156,7 @@ fn mode_toggle_from_a_group_selects_the_floating_window_then_the_remembered_leaf
     });
     app.update();
     focus(&mut app, third);
-    hierarchy(&mut app, I3FocusHierarchy::Parent);
+    hierarchy(&mut app, FocusHierarchy::Parent);
     app.world_mut().trigger(I3FocusModeToggle);
     app.update();
     assert_eq!(selected(&app), floating);
@@ -168,9 +168,7 @@ fn mode_toggle_from_a_group_selects_the_floating_window_then_the_remembered_leaf
 
 fn show(app: &mut App, name: &str) {
     app.world_mut()
-        .trigger(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
-            name.into(),
-        )));
+        .trigger(WorkspaceCommand::switch(WorkspaceTarget::Name(name.into())));
     app.update();
 }
 
@@ -261,9 +259,9 @@ fn moving_a_selected_group_to_another_workspace_preserves_internal_structure() {
         .entity_mut(second)
         .insert(WindowPresentationOverride::new(presenter));
     let source = app.world().get::<WorkspaceMember>(first).expect("source").0;
-    hierarchy(&mut app, I3FocusHierarchy::Parent);
+    hierarchy(&mut app, FocusHierarchy::Parent);
     app.world_mut()
-        .trigger(I3WorkspaceRequest::move_window(WorkspaceTarget::Name(
+        .trigger(WorkspaceCommand::move_window(WorkspaceTarget::Name(
             "2".into(),
         )));
     app.update();
@@ -319,11 +317,11 @@ fn moving_the_workspace_selection_transfers_its_tiles_as_a_group() {
         .get::<WorkspaceMember>(first)
         .expect("workspace")
         .0;
-    hierarchy(&mut app, I3FocusHierarchy::Parent);
-    hierarchy(&mut app, I3FocusHierarchy::Parent);
+    hierarchy(&mut app, FocusHierarchy::Parent);
+    hierarchy(&mut app, FocusHierarchy::Parent);
     assert_eq!(group(&app), Some(source));
     app.world_mut()
-        .trigger(I3WorkspaceRequest::move_window(WorkspaceTarget::Name(
+        .trigger(WorkspaceCommand::move_window(WorkspaceTarget::Name(
             "2".into(),
         )));
     app.update();
@@ -387,10 +385,10 @@ fn selecting_both_windows_of_a_single_split_can_move_them_together() {
     let first = window(&mut app, 1);
     let second = window(&mut app, 2);
     let source = app.world().get::<WorkspaceMember>(first).expect("source").0;
-    hierarchy(&mut app, I3FocusHierarchy::Parent);
+    hierarchy(&mut app, FocusHierarchy::Parent);
     assert_eq!(group(&app), Some(source));
     app.world_mut()
-        .trigger(I3WorkspaceRequest::move_window(WorkspaceTarget::Name(
+        .trigger(WorkspaceCommand::move_window(WorkspaceTarget::Name(
             "2".into(),
         )));
     app.update();
@@ -434,11 +432,11 @@ fn moving_workspace_tiles_into_a_populated_workspace_leaves_floating_windows_beh
         .0;
     show(&mut app, "1");
     focus(&mut app, third);
-    hierarchy(&mut app, I3FocusHierarchy::Parent);
-    hierarchy(&mut app, I3FocusHierarchy::Parent);
+    hierarchy(&mut app, FocusHierarchy::Parent);
+    hierarchy(&mut app, FocusHierarchy::Parent);
     assert_eq!(group(&app), Some(source));
     app.world_mut()
-        .trigger(I3WorkspaceRequest::move_window(WorkspaceTarget::Name(
+        .trigger(WorkspaceCommand::move_window(WorkspaceTarget::Name(
             "2".into(),
         )));
     app.update();
@@ -506,7 +504,7 @@ fn close_targets_every_leaf_of_the_selected_group_but_not_its_neighbor() {
             closed.0.push(event.window);
         }
     });
-    hierarchy(&mut app, I3FocusHierarchy::Parent);
+    hierarchy(&mut app, FocusHierarchy::Parent);
     app.world_mut()
         .trigger(TileRequest::Focused(TileOperation::Close));
     app.world_mut().flush();
@@ -519,7 +517,7 @@ fn close_targets_every_leaf_of_the_selected_group_but_not_its_neighbor() {
 #[test]
 fn splitting_a_group_wraps_it_and_the_next_window_opens_beside_the_group() {
     let (mut app, _, second, third, branch) = nested();
-    hierarchy(&mut app, I3FocusHierarchy::Parent);
+    hierarchy(&mut app, FocusHierarchy::Parent);
     split(&mut app, SplitAxis::Horizontal);
     let wrapper = app
         .world()
@@ -572,7 +570,7 @@ fn splitting_a_group_wraps_it_and_the_next_window_opens_beside_the_group() {
 
 #[test]
 fn container_navigation_preserves_group_level_at_neighbors_and_wrap_boundaries() {
-    for wrapping in [FocusWrapping::Yes, FocusWrapping::Force] {
+    for wrapping in [FocusWrapping::Fallback, FocusWrapping::Immediate] {
         let mut app = app();
         app.insert_resource(wrapping);
         let first = window(&mut app, 1);
@@ -593,7 +591,7 @@ fn container_navigation_preserves_group_level_at_neighbors_and_wrap_boundaries()
             .get::<TileParent>(fourth)
             .expect("right split")
             .entity();
-        hierarchy(&mut app, I3FocusHierarchy::Parent);
+        hierarchy(&mut app, FocusHierarchy::Parent);
         assert_eq!(group(&app), Some(right));
         navigate(&mut app, Direction::Left);
         assert_eq!(group(&app), Some(left));

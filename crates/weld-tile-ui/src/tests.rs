@@ -21,9 +21,9 @@ use weld_app::{
     },
 };
 use weld_client::ClientSurfaceMetadata;
-use weld_i3_config::I3LayoutRequest;
 use weld_i3_quirks::I3QuirksPlugin;
 use weld_tile::{TilePlugin, TileSelect, TileSide, TileTreeEdit};
+use weld_tile_config::LayoutRequest;
 use weld_tile_config::{SplitAxis, TileLayout, TileOperation, TileSettings};
 use weld_window::persistence::WindowPersistenceRequest;
 use weld_window::{
@@ -36,7 +36,7 @@ fn attention_marks_the_inactive_tab_and_shared_frame_until_its_owner_retires() {
     use weld_window::attention::AttentionForWindow;
     for layout in [TileLayout::Tabbed, TileLayout::Stacked] {
         let (mut app, first, second) = setup();
-        app.world_mut().trigger(I3LayoutRequest::Set(layout));
+        app.world_mut().trigger(LayoutRequest::Set(layout));
         let claim = app.world_mut().spawn(AttentionForWindow(first)).id();
         app.update();
         assert_eq!(
@@ -81,7 +81,7 @@ fn header_scroll_accumulates_motion_wraps_and_resets_between_gestures() {
     };
     for layout in [TileLayout::Tabbed, TileLayout::Stacked] {
         let (mut app, first, second) = setup();
-        app.world_mut().trigger(I3LayoutRequest::Set(layout));
+        app.world_mut().trigger(LayoutRequest::Set(layout));
         app.update();
         let header = app
             .world_mut()
@@ -151,7 +151,7 @@ fn header_scroll_accumulates_motion_wraps_and_resets_between_gestures() {
 fn persistent_palette_updates_the_group_frame_and_headers_together() {
     for layout in [TileLayout::Tabbed, TileLayout::Stacked] {
         let (mut app, first, second) = setup();
-        let settings: SsdSettings = weld_sway_adapter::parse_with_extensions(
+        let settings: SsdSettings = weld_sway_config::lowering::parse_with_extensions(
             "colors",
             concat!(
                 "client.persistent_focused #112233 #223344 #334455 #445566 #556677\n",
@@ -185,7 +185,7 @@ fn persistent_palette_updates_the_group_frame_and_headers_together() {
                 alpha_mode: Default::default(),
             },
         ));
-        app.world_mut().trigger(I3LayoutRequest::Set(layout));
+        app.world_mut().trigger(LayoutRequest::Set(layout));
         app.world_mut().trigger(WindowPersistenceRequest {
             window: Some(second),
             action: PersistenceAction::Enable(PersistenceMatch::Auto),
@@ -280,7 +280,7 @@ fn setup() -> (App, Entity, Entity) {
         .id();
     app.update();
     app.world_mut()
-        .trigger(I3LayoutRequest::Set(TileLayout::Tabbed));
+        .trigger(LayoutRequest::Set(TileLayout::Tabbed));
     app.update();
     app.update();
     (app, first, second)
@@ -290,7 +290,7 @@ fn setup() -> (App, Entity, Entity) {
 fn selecting_a_group_highlights_all_its_headers_and_leaf_focus_restores_one() {
     for layout in [TileLayout::Tabbed, TileLayout::Stacked] {
         let (mut app, first, second) = setup();
-        app.world_mut().trigger(I3LayoutRequest::Set(layout));
+        app.world_mut().trigger(LayoutRequest::Set(layout));
         app.update();
         let root = app
             .world()
@@ -396,7 +396,7 @@ fn smart_outer_chrome_counts_a_tab_or_stack_group_as_one_frame() {
         app.world_mut()
             .resource_mut::<SsdSettings>()
             .hide_solo_border = true;
-        app.world_mut().trigger(I3LayoutRequest::Set(layout));
+        app.world_mut().trigger(LayoutRequest::Set(layout));
         app.world_mut().despawn(first);
         app.update();
         assert_solo_group(&mut app, 1);
@@ -520,7 +520,7 @@ fn tab_and_stack_titles_use_system_fonts_and_follow_client_metadata() {
         .spawn((OccupiesWindow(first), metadata("Terminal — one")))
         .id();
     for layout in [TileLayout::Tabbed, TileLayout::Stacked] {
-        app.world_mut().trigger(I3LayoutRequest::Set(layout));
+        app.world_mut().trigger(LayoutRequest::Set(layout));
         for (title, expected) in [
             ("Terminal — one", "Terminal — one"),
             ("Renamed terminal", "Renamed terminal"),
@@ -563,7 +563,7 @@ fn font_reload_updates_header_text_and_reserved_height_together() {
         .world()
         .resource::<weld_tile::TilePresentationMetrics>()
         .header_height;
-    let config = weld_sway_adapter::parse_with_extensions(
+    let config = weld_sway_config::lowering::parse_with_extensions(
         "font",
         "font pango:serif Bold Italic 24px",
         |_| Ok(()),
@@ -654,7 +654,7 @@ fn headers_select_hidden_windows_keep_identity_and_retire_on_split() {
     for (entity, target) in &rows {
         assert_eq!(app.world().get::<HeaderTarget>(*entity), Some(target));
     }
-    app.world_mut().trigger(I3LayoutRequest::Default);
+    app.world_mut().trigger(LayoutRequest::RestoreSplit);
     app.update();
     assert_eq!(
         app.world_mut()
@@ -838,7 +838,7 @@ fn group_frame_clips_headers_to_its_shared_inner_radius() {
     assert_eq!(first_header.border_radius, BorderRadius::ZERO);
     assert_eq!(last_header.border_radius, BorderRadius::ZERO);
     app.world_mut()
-        .trigger(I3LayoutRequest::Set(TileLayout::Stacked));
+        .trigger(LayoutRequest::Set(TileLayout::Stacked));
     app.update();
     let rows: Vec<_> = app
         .world_mut()
@@ -901,7 +901,7 @@ fn nested_tab_and_stack_combinations_share_one_frame_and_keep_independent_header
     for outer_layout in [TileLayout::Tabbed, TileLayout::Stacked] {
         for inner_layout in [TileLayout::Tabbed, TileLayout::Stacked] {
             let (mut app, first, second) = setup();
-            app.world_mut().trigger(I3LayoutRequest::Set(outer_layout));
+            app.world_mut().trigger(LayoutRequest::Set(outer_layout));
             app.update();
             let outer = app
                 .world()
@@ -928,7 +928,7 @@ fn nested_tab_and_stack_combinations_share_one_frame_and_keep_independent_header
                 .get::<TileParent>(third)
                 .expect("inner")
                 .entity();
-            app.world_mut().trigger(I3LayoutRequest::Set(inner_layout));
+            app.world_mut().trigger(LayoutRequest::Set(inner_layout));
             app.update();
             app.update();
             assert_eq!(

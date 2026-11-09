@@ -235,7 +235,7 @@ impl Grants<'_, '_> {
                     self.commands
                         .trigger(weld_i3_quirks::workspace::I3WindowWorkspaceRequest {
                             window,
-                            target: weld_i3_config::WorkspaceTarget::Current,
+                            target: weld_window_config::WorkspaceTarget::Current,
                         });
                 }
                 return Ok(());

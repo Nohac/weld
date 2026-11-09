@@ -15,18 +15,19 @@ use weld_app::{
     surface::{SurfaceAction, SurfaceActionQueue, take_surface_actions},
 };
 use weld_float::{FloatBehaviorPlugin, FloatManagement};
-use weld_i3_config::{FocusWrapping, I3WorkspaceRequest, WorkspaceTarget};
 use weld_i3_quirks::{I3FocusModeToggle, I3FocusRequest, I3QuirksPlugin};
 use weld_tile::{
     TileCommand, TileContainer, TileFloatingRequest, TileFocusHistory, TileParent, TilePlugin,
     TileRequest, TileSystems, TileWorkspace,
 };
+use weld_tile_config::FocusWrapping;
 use weld_tile_config::{Direction, SplitAxis, TileOperation, TileSettings};
 use weld_window::{
     FloatingWindow, FocusedWindow, ManagedBy, ManagedWindow, WindowCommand, WindowCommandKind,
     WindowGeometry, WindowId, WindowIntent, WindowIntentKind, WindowInteractionKind,
     WindowInteractionSession, WindowPlugin, WindowVacancy, WindowZOrder,
 };
+use weld_window_config::{WorkspaceCommand, WorkspaceTarget};
 
 #[path = "cases/layout.rs"]
 mod layout;
@@ -54,14 +55,10 @@ fn floating_plane_focus_and_workspace_roundtrip_preserve_selection() {
     app.update();
     assert_eq!(selected(&app), floating);
     app.world_mut()
-        .trigger(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
-            "2".into(),
-        )));
+        .trigger(WorkspaceCommand::switch(WorkspaceTarget::Name("2".into())));
     app.update();
     app.world_mut()
-        .trigger(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
-            "1".into(),
-        )));
+        .trigger(WorkspaceCommand::switch(WorkspaceTarget::Name("1".into())));
     app.update();
     assert_eq!(selected(&app), floating);
     app.world_mut().entity_mut(floating).despawn();
@@ -80,7 +77,7 @@ fn floating_window_transfer_updates_workspace_without_adding_a_tile() {
     });
     app.update();
     app.world_mut()
-        .trigger(I3WorkspaceRequest::move_window(WorkspaceTarget::Name(
+        .trigger(WorkspaceCommand::move_window(WorkspaceTarget::Name(
             "2".into(),
         )));
     app.update();
@@ -90,9 +87,7 @@ fn floating_window_transfer_updates_workspace_without_adding_a_tile() {
         Some(&weld_window::WindowVisibility::Hidden)
     );
     app.world_mut()
-        .trigger(I3WorkspaceRequest::switch(WorkspaceTarget::Name(
-            "2".into(),
-        )));
+        .trigger(WorkspaceCommand::switch(WorkspaceTarget::Name("2".into())));
     app.update();
     assert_eq!(selected(&app), floating);
     assert!(app.world().get::<TileParent>(floating).is_none());
@@ -212,7 +207,7 @@ fn resize_amounts_select_percent_for_tiles_and_pixels_for_floating() {
         .get::<WindowGeometry>(second)
         .expect("geometry")
         .size;
-    let request = weld_i3_config::I3ResizeRequest {
+    let request = weld_tile_config::ResizeRequest {
         axis: SplitAxis::Horizontal,
         pixels: Some(10.0),
         fraction: Some(0.1),
@@ -248,7 +243,7 @@ fn resize_amounts_select_percent_for_tiles_and_pixels_for_floating() {
         .get::<WindowGeometry>(second)
         .expect("tile")
         .size;
-    app.world_mut().trigger(weld_i3_config::I3ResizeRequest {
+    app.world_mut().trigger(weld_tile_config::ResizeRequest {
         fraction: None,
         ..request
     });
@@ -316,10 +311,10 @@ fn single_window_navigation_is_a_noop() {
     let mut app = app();
     let only = window(&mut app, 1);
     for mode in [
-        FocusWrapping::No,
-        FocusWrapping::Yes,
-        FocusWrapping::Force,
-        FocusWrapping::Workspace,
+        FocusWrapping::Disabled,
+        FocusWrapping::Fallback,
+        FocusWrapping::Immediate,
+        FocusWrapping::WithinWorkspace,
     ] {
         app.insert_resource(mode);
         for direction in [
@@ -348,7 +343,7 @@ fn siblings_navigate_and_wrap_in_layout_order() {
         navigate(&mut app, Direction::Left);
         assert_eq!(selected(&app), expected);
     }
-    app.insert_resource(FocusWrapping::No);
+    app.insert_resource(FocusWrapping::Disabled);
     navigate(&mut app, Direction::Right);
     assert_eq!(selected(&app), right);
 }
@@ -381,10 +376,10 @@ fn ancestor_neighbor_wins_over_wrapping_unless_forced() {
         (SplitAxis::Vertical, Direction::Down),
     ] {
         for mode in [
-            FocusWrapping::No,
-            FocusWrapping::Yes,
-            FocusWrapping::Force,
-            FocusWrapping::Workspace,
+            FocusWrapping::Disabled,
+            FocusWrapping::Fallback,
+            FocusWrapping::Immediate,
+            FocusWrapping::WithinWorkspace,
         ] {
             let mut app = app();
             app.insert_resource(mode);
@@ -397,7 +392,7 @@ fn ancestor_neighbor_wins_over_wrapping_unless_forced() {
             navigate(&mut app, direction);
             assert_eq!(
                 selected(&app),
-                if mode == FocusWrapping::Force {
+                if mode == FocusWrapping::Immediate {
                     first
                 } else {
                     outside

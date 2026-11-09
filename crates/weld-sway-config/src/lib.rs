@@ -2,7 +2,7 @@
 //!
 //! [`parse`] expands ordered variables and produces typed declarations. Parsing
 //! performs no command execution, keymap compilation or compositor mutation.
-//! Feature-owned configuration lowering lives in `weld-sway-adapter`.
+//! [`lowering`] converts typed syntax into feature-owned native contracts.
 //! The internal spelling tree retains lexical distinctions needed by expansion.
 //!
 //! # Syntax boundary
@@ -45,6 +45,7 @@ mod parser;
 mod syntax;
 mod value;
 
+pub mod lowering;
 pub mod typed;
 
 pub use typed::parse;

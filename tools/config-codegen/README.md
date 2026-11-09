@@ -22,14 +22,21 @@ changes, generated output, native lowering, and tests in the same commit.
 - `productions` maps complete argument patterns to typed constructors. Captures
   name their type; a final `*` capture invokes that type's variable-length parser.
   Constructor expressions are Rust expressions checked by the ordinary build.
+- `streams` defines chained output properties. It generates canonical kind enums,
+  aliases, supported typed payloads, and exact consumption of unsupported settings,
+  including optional prefixes and coordinate pairs. Execution support remains
+  explicit; consuming arguments does not implement a setting.
 - `physical_keys` is an exhaustive mapping for the supported key vocabulary.
   Symbolic XKB binding behavior remains a separate feature; generation preserves
   the currently supported physical-position semantics.
 - `references` associates adapted definitions with the pinned i3 parser states.
 
+The `lowering` module owns native conversion. Font descriptions use Pango once;
+key-to-physical-code conversion is generated from the same definitions.
+
 The hand-written frontend owns source/block assembly and compound lexical forms
 such as shell text, workspace names, chords, colors, and resize alternatives.
-These helpers construct typed syntax. Neither the lowering adapter nor Master
+These helpers construct typed syntax. Neither the lowering adapter nor weldwm
 accepts raw argument arrays.
 
 ## Initial i3 import

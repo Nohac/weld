@@ -82,7 +82,7 @@ Source: https://github.com/i3/i3/tree/903bcd518df32b0e055b17f5da3f988a0187fd3d/t
 
 ## Structural movement coverage
 
-Master routes directional movement through `I3MoveRequest`. The native geometric
+weldwm routes directional movement through `I3MoveRequest`. The native geometric
 swap remains available separately. `tests/behavior.rs` includes `cases/movement.rs`
 and exercises the following adaptations at the pinned revision:
 

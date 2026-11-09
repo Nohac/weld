@@ -1,6 +1,48 @@
 use super::*;
 
 #[test]
+fn generated_output_consumption_preserves_following_supported_properties() {
+    for (properties, warnings) in [
+        ("enable disable", 2),
+        (
+            "adaptive_sync on transform normal scale_filter linear power on dpms off max_render_time 2 subpixel rgb",
+            7,
+        ),
+        ("mode --custom 800x600", 1),
+        ("resolution 800x600", 1),
+        ("position 0 0", 1),
+        ("pos 0,0", 1),
+    ] {
+        let source = format!("output * {properties} scale 1.25");
+        let document = parse("outputs", &source, UnsupportedPolicy::Warn).expect("properties");
+        assert_eq!(document.warnings.len(), warnings, "{properties}");
+        assert_eq!(document.directives.len(), 1, "{properties}");
+        assert!(matches!(
+            document.directives[0].value,
+            Directive::OutputScale(_, FiniteFloat(1.25))
+        ));
+    }
+    let unknown = parse(
+        "outputs",
+        "output * unknown_property value scale 2",
+        UnsupportedPolicy::Warn,
+    )
+    .expect("unknown property");
+    assert!(unknown.directives.is_empty());
+    assert_eq!(unknown.warnings.len(), 1);
+    for source in [
+        "output * mode --custom",
+        "output * position 0",
+        "output * scale",
+    ] {
+        assert!(
+            parse("outputs", source, UnsupportedPolicy::Warn).is_err(),
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn generated_values_enforce_constraints_before_reaching_consumers() {
     assert!(ModeName::new(String::new()).is_err());
     assert!(BorderWidth::new(65).is_err());

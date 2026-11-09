@@ -1,33 +1,38 @@
-//! Native configuration assembly for the Master distribution.
+//! Native configuration assembly for the weldwm distribution.
 //!
 //! Feature crates own settings and operations. This assembly owns cross-feature
 //! actions, modes and startup effects; no frontend or runtime resource is required.
 
 use weld_config::{ConfigWarning, Located};
-use weld_i3_config::{FocusWrapping, I3WorkspaceRequest, RuleDefinition, WorkspaceSettings};
 use weld_input_config::{CursorThemeSettings, KeymapConfig, PointerDeviceSettings, Shortcut};
 use weld_output::OutputSettings;
 use weld_ssd_config::{BorderStyle, DecorationSettings};
-use weld_tile_config::{Direction, TileOperation, TileSettings};
-use weld_window_config::{FullscreenAction, PersistenceAction, WindowPointerSettings};
+use weld_tile_config::{
+    Direction, FocusHierarchy, FocusWrapping, LayoutRequest, ResizeRequest, TileOperation,
+    TileSettings,
+};
+use weld_window_config::{
+    FullscreenAction, PersistenceAction, RuleDefinition, WindowPointerSettings, WorkspaceCommand,
+    WorkspaceSettings, WorkspaceTarget,
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Action<Extension = ()> {
     Focus(Direction),
     Move(Direction),
-    Workspace(I3WorkspaceRequest),
+    Workspace(WorkspaceCommand),
     Tile(TileOperation),
-    Layout(weld_i3_config::I3LayoutRequest),
+    Layout(LayoutRequest),
     Floating(Option<bool>),
     FocusModeToggle,
-    FocusHierarchy(weld_i3_config::I3FocusHierarchy),
+    FocusHierarchy(FocusHierarchy),
     Sticky(Option<bool>),
     Border(Option<BorderStyle>),
     Persistent(PersistenceAction),
     Fullscreen(FullscreenAction),
     Reload,
     Mode(String),
-    Resize(weld_i3_config::I3ResizeRequest),
+    Resize(ResizeRequest),
     Exec(String),
     Exit,
     Extension(Extension),
@@ -47,7 +52,7 @@ pub struct Configuration<Extension = ()> {
     pub startup: Vec<StartupCommand>,
     pub pointer: WindowPointerSettings,
     pub decorations: DecorationSettings,
-    pub window_rules: Vec<Located<RuleDefinition>>,
+    pub window_rules: Vec<Located<RuleDefinition<RuleAction>>>,
     pub warnings: Vec<ConfigWarning>,
 }
 
@@ -87,4 +92,14 @@ impl<Extension> Default for Configuration<Extension> {
             warnings: Vec::new(),
         }
     }
+}
+
+/// Supported cross-feature actions for weldwm window rules.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RuleAction {
+    Persistent(PersistenceAction),
+    Border(BorderStyle),
+    Floating(bool),
+    Workspace(WorkspaceTarget),
+    Position([f32; 2]),
 }

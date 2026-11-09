@@ -1,23 +1,25 @@
-//! Sway compatibility lowering and preparation for Weld's desktop assembly.
+//! Lower typed Sway syntax into native weldwm configuration.
 //!
 //! Parsing owns spelling and local argument validation. This adapter consumes
 //! typed syntax, applies compatibility policy, and prepares a complete candidate
-//! before Master publishes any settings or queues startup effects.
+//! before weldwm publishes any settings or queues startup effects.
 
-use weld_i3_config::{
-    Field, FocusWrapping, I3FocusHierarchy, I3LayoutRequest, I3ResizeRequest, I3WorkspaceRequest,
-    LayoutChoice, RuleAction, RuleDefinition, RuleEffect, WorkspaceAssignment, WorkspaceNavigation,
-    WorkspaceTarget,
-};
 use weld_ssd_config::BorderStyle;
+use weld_tile_config::{FocusHierarchy, FocusWrapping, LayoutChoice, LayoutRequest, ResizeRequest};
+use weld_window_config::{
+    RuleDefinition, RuleEffect, WindowMatchField, WorkspaceAssignment, WorkspaceCommand,
+    WorkspaceNavigation, WorkspaceTarget,
+};
+use weldwm_config::RuleAction;
 mod font;
+use crate::typed::WeldCommand;
 use weld_config::{Located, UnsupportedPolicy, unsupported};
-use weld_master_config::{Action, BindingMode, Configuration, StartupCommand};
-use weld_sway_config::typed::WeldCommand;
+use weldwm_config::{Action, BindingMode, Configuration, StartupCommand};
 
 use anyhow::{Result, bail, ensure};
 use std::collections::HashSet;
 
+use crate::typed as syntax;
 use weld_input_config::{
     CursorThemeSettings, FingerButtonMap, InputDeviceSelector, KeymapConfig, PointerDeviceRule,
     PointerDeviceSettings, PointerShortcutModifiers, Shortcut, TouchpadClickMethod,
@@ -25,7 +27,6 @@ use weld_input_config::{
 };
 use weld_output::{OutputScaleRule, OutputSelector};
 use weld_ssd_config::{FrameColors, Rgba};
-use weld_sway_config::typed as syntax;
 use weld_tile_config::{Direction, SplitAxis, TileLayout, TileOperation};
 use weld_window_config::{FullscreenAction, FullscreenMode, PersistenceAction, PersistenceMatch};
 
@@ -164,8 +165,8 @@ pub fn lower<E>(
         }
     }
     for (_, action) in &config.bindings {
-        if let Action::Workspace(I3WorkspaceRequest::Navigate {
-            target: WorkspaceTarget::Name(name) | WorkspaceTarget::Number(name),
+        if let Action::Workspace(WorkspaceCommand::Navigate {
+            target: WorkspaceTarget::Name(name) | WorkspaceTarget::NumberedName(name),
             operation: WorkspaceNavigation::Switch,
             ..
         }) = action
@@ -245,7 +246,7 @@ fn border(value: syntax::Border) -> BorderStyle {
 fn workspace(value: syntax::WorkspaceTarget) -> WorkspaceTarget {
     match value {
         syntax::WorkspaceTarget::Name(name) => WorkspaceTarget::Name(name.into_string()),
-        syntax::WorkspaceTarget::Number(name) => WorkspaceTarget::Number(name.into_string()),
+        syntax::WorkspaceTarget::Number(name) => WorkspaceTarget::NumberedName(name.into_string()),
         syntax::WorkspaceTarget::Next => WorkspaceTarget::Next,
         syntax::WorkspaceTarget::Previous => WorkspaceTarget::Previous,
         syntax::WorkspaceTarget::NextOnOutput => WorkspaceTarget::NextOnOutput,
@@ -259,7 +260,7 @@ fn named_workspace(value: syntax::WorkspaceTarget) -> Result<WorkspaceTarget> {
     ensure!(
         matches!(
             target,
-            WorkspaceTarget::Name(_) | WorkspaceTarget::Number(_)
+            WorkspaceTarget::Name(_) | WorkspaceTarget::NumberedName(_)
         ),
         "window rules require a workspace name or number"
     );
@@ -289,7 +290,7 @@ fn layout_choice(value: syntax::LayoutChoice) -> LayoutChoice {
         }
         syntax::LayoutChoice::Tabbed => LayoutChoice::Layout(TileLayout::Tabbed),
         syntax::LayoutChoice::Stacked => LayoutChoice::Layout(TileLayout::Stacked),
-        syntax::LayoutChoice::Split => LayoutChoice::Split,
+        syntax::LayoutChoice::Split => LayoutChoice::AlternateSplit,
     }
 }
 
@@ -302,18 +303,18 @@ fn action<E>(
             return Err(unsupported("moving workspaces to outputs is not supported"));
         }
         syntax::Command::Workspace(target) => {
-            Action::Workspace(I3WorkspaceRequest::switch(workspace(target)))
+            Action::Workspace(WorkspaceCommand::switch(workspace(target)))
         }
         syntax::Command::WorkspaceNoBack(target) => Action::Workspace(
-            I3WorkspaceRequest::switch(workspace(target)).without_auto_back_and_forth(),
+            WorkspaceCommand::switch(workspace(target)).without_auto_back_and_forth(),
         ),
         syntax::Command::MoveWorkspace(target) => {
-            Action::Workspace(I3WorkspaceRequest::move_window(workspace(target)))
+            Action::Workspace(WorkspaceCommand::move_window(workspace(target)))
         }
         syntax::Command::MoveWorkspaceNoBack(target) => Action::Workspace(
-            I3WorkspaceRequest::move_window(workspace(target)).without_auto_back_and_forth(),
+            WorkspaceCommand::move_window(workspace(target)).without_auto_back_and_forth(),
         ),
-        syntax::Command::Rename(rename) => Action::Workspace(I3WorkspaceRequest::Rename {
+        syntax::Command::Rename(rename) => Action::Workspace(WorkspaceCommand::Rename {
             source: rename.source.map(|name| name.into_string()),
             name: rename.name.into_string(),
         }),
@@ -321,17 +322,26 @@ fn action<E>(
         syntax::Command::Exit => Action::Exit,
         syntax::Command::Mode(name) => Action::Mode(name.into_string()),
         syntax::Command::Layout(layout) => Action::Layout(match layout {
-            syntax::Layout::Default => I3LayoutRequest::Default,
-            syntax::Layout::Toggle => I3LayoutRequest::Toggle,
-            syntax::Layout::ToggleAll => I3LayoutRequest::ToggleAll,
+            syntax::Layout::Default => LayoutRequest::RestoreSplit,
+            syntax::Layout::Toggle => LayoutRequest::Cycle(vec![
+                LayoutChoice::Layout(TileLayout::Stacked),
+                LayoutChoice::Layout(TileLayout::Tabbed),
+                LayoutChoice::RememberedSplit,
+            ]),
+            syntax::Layout::ToggleAll => LayoutRequest::Cycle(vec![
+                LayoutChoice::Layout(TileLayout::Split(SplitAxis::Horizontal)),
+                LayoutChoice::Layout(TileLayout::Split(SplitAxis::Vertical)),
+                LayoutChoice::Layout(TileLayout::Stacked),
+                LayoutChoice::Layout(TileLayout::Tabbed),
+            ]),
             syntax::Layout::Cycle(choices) => {
-                I3LayoutRequest::Cycle(choices.into_iter().map(layout_choice).collect())
+                LayoutRequest::Cycle(choices.into_iter().map(layout_choice).collect())
             }
             syntax::Layout::Set(choice) => {
                 let LayoutChoice::Layout(layout) = layout_choice(choice) else {
                     bail!("split restoration requires a layout cycle")
                 };
-                I3LayoutRequest::Set(layout)
+                LayoutRequest::Set(layout)
             }
         }),
         syntax::Command::Split(value) => Action::Tile(TileOperation::Split(axis(value))),
@@ -344,14 +354,14 @@ fn action<E>(
             syntax::Toggle::Toggle => FullscreenAction::Toggle(FullscreenMode::Normal),
         }),
         syntax::Command::FocusModeToggle => Action::FocusModeToggle,
-        syntax::Command::FocusParent => Action::FocusHierarchy(I3FocusHierarchy::Parent),
-        syntax::Command::FocusChild => Action::FocusHierarchy(I3FocusHierarchy::Child),
+        syntax::Command::FocusParent => Action::FocusHierarchy(FocusHierarchy::Parent),
+        syntax::Command::FocusChild => Action::FocusHierarchy(FocusHierarchy::Child),
         syntax::Command::Focus(value) => Action::Focus(direction(value)),
         syntax::Command::Move(value) => Action::Move(direction(value)),
         syntax::Command::Sticky(value) => Action::Sticky(toggle(value)),
         syntax::Command::Floating(value) => Action::Floating(toggle(value)),
         syntax::Command::Resize(value) => {
-            let mut resize = I3ResizeRequest {
+            let mut resize = ResizeRequest {
                 axis: match value.dimension {
                     syntax::Dimension::Width => SplitAxis::Horizontal,
                     syntax::Dimension::Height => SplitAxis::Vertical,
@@ -437,10 +447,10 @@ fn apply<E>(config: &mut Configuration<E>, setting: syntax::Setting) -> Result<(
         }
         syntax::Setting::FocusWrapping(value) => {
             config.focus_wrapping = match value {
-                syntax::FocusWrapping::No => FocusWrapping::No,
-                syntax::FocusWrapping::Yes => FocusWrapping::Yes,
-                syntax::FocusWrapping::Force => FocusWrapping::Force,
-                syntax::FocusWrapping::Workspace => FocusWrapping::Workspace,
+                syntax::FocusWrapping::No => FocusWrapping::Disabled,
+                syntax::FocusWrapping::Yes => FocusWrapping::Fallback,
+                syntax::FocusWrapping::Force => FocusWrapping::Immediate,
+                syntax::FocusWrapping::Workspace => FocusWrapping::WithinWorkspace,
             }
         }
         syntax::Setting::AutoBack(value) => {
@@ -531,16 +541,16 @@ fn input(
     Ok(false)
 }
 
-fn lower_rule(rule: syntax::WindowRule) -> Result<RuleDefinition> {
+fn lower_rule(rule: syntax::WindowRule) -> Result<RuleDefinition<RuleAction>> {
     let criteria = rule
         .criteria
         .into_iter()
         .map(|criterion| {
             let field = match criterion.field {
-                syntax::CriterionField::AppId => Field::AppId,
-                syntax::CriterionField::Class => Field::Class,
-                syntax::CriterionField::Instance => Field::Instance,
-                syntax::CriterionField::Title => Field::Title,
+                syntax::CriterionField::AppId => WindowMatchField::AppId,
+                syntax::CriterionField::Class => WindowMatchField::Class,
+                syntax::CriterionField::Instance => WindowMatchField::Instance,
+                syntax::CriterionField::Title => WindowMatchField::Title,
                 syntax::CriterionField::All => bail!("all does not accept a pattern"),
             };
             Ok((field, criterion.pattern))

@@ -9,10 +9,6 @@ use bevy::ecs::{
     system::{Commands, Query, Res, ResMut, SystemParam},
 };
 use weld_app::output::{OutputInfo, PrimaryOutput, WeldOutput};
-use weld_i3_config::{
-    I3WorkspaceRequest, WorkspaceAssignment, WorkspaceNavigation, WorkspaceSettings,
-    WorkspaceTarget,
-};
 use weld_tile::{TileCommands, TileWorkspaceMove};
 use weld_window::workspace::{
     FocusedWorkspace, Workspace, WorkspaceCreation, WorkspaceFocused, WorkspaceMember,
@@ -20,6 +16,9 @@ use weld_window::workspace::{
 };
 use weld_window::workspace_protocol::ActivateWorkspace;
 use weld_window::{FocusedWindow, ManagedBy, ManagedWindow};
+use weld_window_config::{
+    WorkspaceAssignment, WorkspaceCommand, WorkspaceNavigation, WorkspaceSettings, WorkspaceTarget,
+};
 
 /// Assign or transfer one explicit window without following it to the target.
 #[derive(Event, Clone, Debug)]
@@ -161,7 +160,7 @@ impl WorkspaceView<'_, '_> {
                 .filter(|(_, workspace, _)| workspace.name().eq_ignore_ascii_case(name))
                 .min_by_key(|(_, workspace, _)| workspace.id())
                 .map(|(entity, _, _)| entity),
-            WorkspaceTarget::Number(name) => self
+            WorkspaceTarget::NumberedName(name) => self
                 .workspaces
                 .iter()
                 .filter(|(_, workspace, _)| number(workspace.name()) == number(name))
@@ -218,7 +217,7 @@ impl WorkspaceView<'_, '_> {
 
     fn creation_name(&self, target: &WorkspaceTarget) -> Option<String> {
         match target {
-            WorkspaceTarget::Name(name) | WorkspaceTarget::Number(name) => Some(name.clone()),
+            WorkspaceTarget::Name(name) | WorkspaceTarget::NumberedName(name) => Some(name.clone()),
             WorkspaceTarget::BackAndForth => self.previous.0.clone(),
             _ => None,
         }
@@ -230,7 +229,7 @@ pub(crate) fn activate_existing(event: On<ActivateWorkspace>, mut commands: Comm
 }
 
 pub(crate) fn request(
-    event: On<I3WorkspaceRequest>,
+    event: On<WorkspaceCommand>,
     view: WorkspaceView,
     focus: Res<FocusedWindow>,
     selection: Res<weld_tile::TileSelection>,
@@ -243,12 +242,12 @@ pub(crate) fn request(
         return;
     }
     let (target, operation, allow_auto) = match event.event() {
-        I3WorkspaceRequest::Navigate {
+        WorkspaceCommand::Navigate {
             target,
             operation,
             allow_auto_back_and_forth,
         } => (target, *operation, *allow_auto_back_and_forth),
-        I3WorkspaceRequest::Rename { source, name } => {
+        WorkspaceCommand::Rename { source, name } => {
             let workspace = source.as_ref().map_or(view.selected.entity(), |source| {
                 view.find(&WorkspaceTarget::Name(source.clone()))
             });
@@ -272,7 +271,7 @@ pub(crate) fn request(
         && view.settings.auto_back_and_forth
         && matches!(
             target,
-            WorkspaceTarget::Name(_) | WorkspaceTarget::Number(_)
+            WorkspaceTarget::Name(_) | WorkspaceTarget::NumberedName(_)
         )
         && view.selected.entity().is_some()
         && view.find(target) == view.selected.entity();
