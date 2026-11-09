@@ -1,76 +1,14 @@
 //! i3 layout-command targeting and remembered split orientation.
 
 use bevy::ecs::{
-    event::Event,
     observer::On,
     system::{Commands, Res, ResMut},
 };
-use weld_tile::{SplitAxis, TileCommands, TileLayout, TileSelection, TileSetLayout, TileTreeEdit};
+use weld_i3_config::I3LayoutRequest;
+use weld_tile::{TileCommands, TileSelection, TileSetLayout, TileTreeEdit};
 use weld_window::{FocusedWindow, workspace::FocusedWorkspace};
 
 use crate::tree::TreeView;
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum LayoutChoice {
-    Layout(TileLayout),
-    /// Restore the last split, or alternate the current split orientation.
-    Split,
-}
-
-/// Layout vocabulary and cycling belong to the i3 command interpreter.
-#[derive(Event, Clone, Debug, PartialEq)]
-pub enum I3LayoutRequest {
-    Set(TileLayout),
-    Default,
-    Toggle,
-    ToggleAll,
-    Cycle(Vec<LayoutChoice>),
-}
-
-fn opposite(axis: SplitAxis) -> SplitAxis {
-    match axis {
-        SplitAxis::Horizontal => SplitAxis::Vertical,
-        SplitAxis::Vertical => SplitAxis::Horizontal,
-    }
-}
-
-impl I3LayoutRequest {
-    fn resolve(&self, current: TileLayout, last_split: SplitAxis) -> TileLayout {
-        match self {
-            Self::Set(layout) => *layout,
-            Self::Default => TileLayout::Split(last_split),
-            Self::Toggle => match current {
-                TileLayout::Split(_) => TileLayout::Stacked,
-                TileLayout::Stacked => TileLayout::Tabbed,
-                TileLayout::Tabbed => TileLayout::Split(last_split),
-            },
-            Self::ToggleAll => match current {
-                TileLayout::Split(SplitAxis::Horizontal) => TileLayout::Split(SplitAxis::Vertical),
-                TileLayout::Split(SplitAxis::Vertical) => TileLayout::Stacked,
-                TileLayout::Stacked => TileLayout::Tabbed,
-                TileLayout::Tabbed => TileLayout::Split(SplitAxis::Horizontal),
-            },
-            Self::Cycle(choices) => {
-                let index = choices.iter().position(|choice| match choice {
-                    LayoutChoice::Layout(layout) => *layout == current,
-                    LayoutChoice::Split => current.is_split(),
-                });
-                let next = index
-                    .and_then(|index| choices.get(index + 1))
-                    .or_else(|| choices.first());
-                match next {
-                    Some(LayoutChoice::Layout(layout)) => *layout,
-                    Some(LayoutChoice::Split) => TileLayout::Split(if current.is_split() {
-                        opposite(last_split)
-                    } else {
-                        last_split
-                    }),
-                    None => current,
-                }
-            }
-        }
-    }
-}
 
 pub(crate) fn request(
     event: On<I3LayoutRequest>,

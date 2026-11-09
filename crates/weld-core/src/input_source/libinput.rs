@@ -54,7 +54,7 @@ impl LibinputAdapter {
         }
     }
 
-    pub fn configure_devices(&mut self, settings: weld_input::PointerDeviceSettings) {
+    pub fn configure_devices(&mut self, settings: weld_input_config::PointerDeviceSettings) {
         self.devices.configure(settings);
     }
 

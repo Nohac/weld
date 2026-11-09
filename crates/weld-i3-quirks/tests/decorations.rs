@@ -2,10 +2,11 @@
 
 use bevy::{
     app::{App, TaskPoolPlugin},
-    asset::{AssetPlugin, Assets},
+    asset::{AssetApp, AssetPlugin, Assets},
     image::Image,
     math::{UVec2, Vec2},
     scene::ScenePlugin,
+    shader::Shader,
     ui::UiScale,
 };
 use weld_app::{
@@ -16,11 +17,11 @@ use weld_app::{
     },
 };
 use weld_client::{ToplevelHints, ToplevelKind};
-use weld_i3_quirks::{
-    I3QuirksPlugin,
-    config::{parse_with_extensions, unsupported},
-};
-use weld_ssd::{BorderStyle, SsdPlugin, WindowBorderStyle};
+use weld_config::unsupported;
+use weld_i3_quirks::I3QuirksPlugin;
+use weld_ssd::{SsdPlugin, WindowBorderStyle};
+use weld_ssd_config::BorderStyle;
+use weld_sway_adapter::parse_with_extensions;
 use weld_tile::TilePlugin;
 use weld_window::{
     OccupiesWindow, PresentationInsets, PrimaryWindowPresentation, WindowGeometry, WindowPlugin,
@@ -35,6 +36,7 @@ fn border_rule_precedes_first_frame_and_centering() {
         AssetPlugin::default(),
         ScenePlugin,
     ))
+    .init_asset::<Shader>()
     .insert_resource(Assets::<Image>::default())
     .insert_resource(UiScale(1.0))
     .init_resource::<SurfaceActionQueue>()
@@ -45,13 +47,16 @@ fn border_rule_precedes_first_frame_and_centering() {
         TilePlugin,
         I3QuirksPlugin,
     ));
-    app.insert_resource(
+    let config =
         parse_with_extensions::<()>("test", "for_window [class=\"^.*\"] border pixel 3", |_| {
             Err(unsupported("command"))
         })
-        .expect("rules")
-        .window_rules,
-    );
+        .expect("rules");
+    let mut rules = weld_i3_quirks::window_rules::WindowRules::default();
+    for rule in config.window_rules {
+        rules.add(rule.value).expect("native rule");
+    }
+    app.insert_resource(rules);
     app.world_mut().spawn((
         WeldOutput {
             id: OutputId::new(1),

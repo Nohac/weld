@@ -1,12 +1,32 @@
 //! Distribution commands layered onto the i3 configuration interpreter.
 
-use anyhow::{Result, bail};
-use i3::{UnsupportedPolicy, unsupported};
+use anyhow::{Context, Result};
 use weld_app::input::ShellCommand;
-use weld_i3_quirks::config as i3;
+use weld_config::UnsupportedPolicy;
+use weld_i3_quirks::window_rules::WindowRules;
+use weld_input::KeyboardKeymap;
+use weld_master_config as model;
+use weld_ssd::SsdSettings;
+use weld_sway_adapter as i3;
+use weld_sway_config::typed::WeldCommand;
+#[cfg(test)]
+use weld_tile_config::{Direction, SplitAxis, TileOperation};
 
-pub(super) type Action = i3::Action<DistributionAction>;
-pub(super) type Configuration = i3::Configuration<DistributionAction>;
+pub(super) type Action = model::Action<DistributionAction>;
+/// Candidate with fallible native resources prepared before publication.
+#[derive(Clone, Debug)]
+pub(super) struct Configuration {
+    pub settings: model::Configuration<DistributionAction>,
+    pub keymap: Option<KeyboardKeymap>,
+    pub window_rules: WindowRules,
+    pub decorations: SsdSettings,
+}
+impl std::ops::Deref for Configuration {
+    type Target = model::Configuration<DistributionAction>;
+    fn deref(&self) -> &Self::Target {
+        &self.settings
+    }
+}
 
 #[derive(Clone, Debug, PartialEq)]
 pub(super) enum DistributionAction {
@@ -36,29 +56,44 @@ pub(super) fn parse(name: &str, source: &str) -> Result<Configuration> {
             "modifier-only chords require weld control interact hold"
         );
     }
-    Ok(config)
+    let keymap = config
+        .keymap
+        .as_ref()
+        .map(KeyboardKeymap::compile)
+        .transpose()
+        .with_context(|| format!("{name}: keyboard configuration"))?;
+    let mut window_rules = WindowRules::default();
+    for rule in &config.window_rules {
+        window_rules.add(rule.value.clone()).with_context(|| {
+            format!(
+                "{}:{}: window rule",
+                rule.location.source, rule.location.line
+            )
+        })?;
+    }
+    let decorations = config.decorations.clone().into();
+    Ok(Configuration {
+        settings: config,
+        keymap,
+        window_rules,
+        decorations,
+    })
 }
 
-fn extension(words: &[&str]) -> Result<DistributionAction> {
-    Ok(match words {
-        ["weld", "access", "revoke", "all"] => DistributionAction::RevokeAccess,
-        ["weld", "control", "toggle"] => DistributionAction::ToggleRemoteControl,
-        ["weld", "control", "interact", "hold"] => DistributionAction::HoldLocalInteraction,
-        ["weld", "control", "interact", "toggle"] => DistributionAction::ToggleLocalInteraction,
-        ["weld", "hoist"] => DistributionAction::Hoist,
-        ["weld", "fullscreen", "exclusive"] => DistributionAction::ExclusiveFullscreen,
-        ["weld", "output-debug"] => DistributionAction::OutputTopology,
-        ["weld", "scale", "increase"] => {
-            DistributionAction::Shell(ShellCommand::IncreaseOutputScale)
-        }
-        ["weld", "scale", "decrease"] => {
-            DistributionAction::Shell(ShellCommand::DecreaseOutputScale)
-        }
-        ["weld", "scale", "physical"] => {
+fn extension(command: &WeldCommand) -> Result<DistributionAction> {
+    Ok(match command {
+        WeldCommand::RevokeAccess => DistributionAction::RevokeAccess,
+        WeldCommand::ToggleRemoteControl => DistributionAction::ToggleRemoteControl,
+        WeldCommand::HoldLocalInteraction => DistributionAction::HoldLocalInteraction,
+        WeldCommand::ToggleLocalInteraction => DistributionAction::ToggleLocalInteraction,
+        WeldCommand::Hoist => DistributionAction::Hoist,
+        WeldCommand::OutputTopology => DistributionAction::OutputTopology,
+        WeldCommand::ExclusiveFullscreen => DistributionAction::ExclusiveFullscreen,
+        WeldCommand::IncreaseScale => DistributionAction::Shell(ShellCommand::IncreaseOutputScale),
+        WeldCommand::DecreaseScale => DistributionAction::Shell(ShellCommand::DecreaseOutputScale),
+        WeldCommand::PhysicalScale => {
             DistributionAction::Shell(ShellCommand::MatchOutputPhysicalScale)
         }
-        ["weld", ..] => bail!("unsupported Master command"),
-        _ => return Err(unsupported("unsupported command")),
     })
 }
 
@@ -66,7 +101,16 @@ fn extension(words: &[&str]) -> Result<DistributionAction> {
 mod tests {
     use super::*;
     use weld_input::{GlobalShortcut, GlobalShortcutModifiers, KeyCode};
-    use weld_tile::{Direction, SplitAxis, TileOperation};
+
+    #[test]
+    fn native_preparation_rejects_invalid_keymaps_and_rule_patterns() {
+        for source in [
+            "input type:keyboard xkb_layout nonexistent_weld_layout",
+            "for_window [title=\"(?=unsupported)\"] border pixel 2",
+        ] {
+            assert!(parse("candidate.conf", source).is_err(), "{source}");
+        }
+    }
 
     #[test]
     fn default_navigation_uses_letters_without_a_launch_conflict() {
@@ -98,7 +142,9 @@ mod tests {
                 let binding = config
                     .bindings
                     .iter()
-                    .find(|(chord, _)| *chord == GlobalShortcut::new(key, modifiers))
+                    .find(|(chord, _)| {
+                        GlobalShortcut::from(*chord) == GlobalShortcut::new(key, modifiers)
+                    })
                     .expect("navigation");
                 assert_eq!(binding.1, operation);
             }
@@ -112,24 +158,38 @@ mod tests {
             (KeyCode::KeyF, SplitAxis::Horizontal),
             (KeyCode::KeyJ, SplitAxis::Vertical),
         ] {
-            assert!(config.bindings.contains(&(
-                GlobalShortcut::new(key, modifier),
-                Action::Tile(TileOperation::Split(axis))
-            )));
+            assert!(
+                config
+                    .bindings
+                    .iter()
+                    .map(|(chord, action)| (GlobalShortcut::from(*chord), action.clone()))
+                    .collect::<Vec<_>>()
+                    .contains(&(
+                        GlobalShortcut::new(key, modifier),
+                        Action::Tile(TileOperation::Split(axis))
+                    ))
+            );
         }
-        assert!(config.bindings.contains(&(
-            GlobalShortcut::new(
-                KeyCode::KeyQ,
-                GlobalShortcutModifiers {
-                    alt: true,
-                    shift: true,
-                    ..Default::default()
-                }
-            ),
-            Action::Tile(TileOperation::Close)
-        )));
+        assert!(
+            config
+                .bindings
+                .iter()
+                .map(|(chord, action)| (GlobalShortcut::from(*chord), action.clone()))
+                .collect::<Vec<_>>()
+                .contains(&(
+                    GlobalShortcut::new(
+                        KeyCode::KeyQ,
+                        GlobalShortcutModifiers {
+                            alt: true,
+                            shift: true,
+                            ..Default::default()
+                        }
+                    ),
+                    Action::Tile(TileOperation::Close)
+                ))
+        );
         assert!(!config.bindings.iter().any(|(chord, _)| matches!(
-            chord.trigger,
+            GlobalShortcut::from(*chord).trigger,
             Some(
                 KeyCode::F1
                     | KeyCode::F2
@@ -146,9 +206,9 @@ mod tests {
             )
         )));
         assert_eq!(
-            extension(&["weld", "hoist"]).expect("extension"),
+            extension(&WeldCommand::Hoist).expect("extension"),
             DistributionAction::Hoist
         );
-        assert!(extension(&["weld", "persistent", "toggle"]).is_err());
+        assert!(parse("invalid", "bindsym h weld unknown").is_err());
     }
 }

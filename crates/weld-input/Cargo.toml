@@ -5,9 +5,10 @@ edition.workspace = true
 publish.workspace = true
 
 [features]
-bevy = ["dep:bevy", "dep:bevy_winit"]
+bevy = ["dep:bevy", "dep:bevy_winit", "weld-input-config/ecs"]
 
 [dependencies]
+weld-input-config = { path = "../weld-input-config" }
 anyhow.workspace = true
 bevy = { workspace = true, optional = true }
 bevy_winit = { workspace = true, optional = true }

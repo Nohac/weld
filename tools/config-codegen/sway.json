@@ -1,0 +1,1587 @@
+{
+  "enums": {
+    "Direction": {
+      "Left": [
+        "left"
+      ],
+      "Right": [
+        "right"
+      ],
+      "Up": [
+        "up"
+      ],
+      "Down": [
+        "down"
+      ]
+    },
+    "Axis": {
+      "Horizontal": [
+        "h",
+        "horizontal"
+      ],
+      "Vertical": [
+        "v",
+        "vertical"
+      ]
+    },
+    "Dimension": {
+      "Width": [
+        "width"
+      ],
+      "Height": [
+        "height"
+      ]
+    },
+    "ResizeKind": {
+      "Grow": [
+        "grow"
+      ],
+      "Shrink": [
+        "shrink"
+      ]
+    },
+    "Unit": {
+      "Pixels": [
+        "px"
+      ],
+      "Percentage": [
+        "ppt"
+      ]
+    },
+    "Toggle": {
+      "Enable": [
+        "enable"
+      ],
+      "Disable": [
+        "disable"
+      ],
+      "Toggle": [
+        "toggle"
+      ]
+    },
+    "OnOff": {
+      "On": [
+        "on"
+      ],
+      "Off": [
+        "off"
+      ]
+    },
+    "YesNo": {
+      "Yes": [
+        "yes"
+      ],
+      "No": [
+        "no"
+      ]
+    },
+    "Enabled": {
+      "Enabled": [
+        "enabled"
+      ],
+      "Disabled": [
+        "disabled"
+      ]
+    },
+    "FocusWrapping": {
+      "No": [
+        "no"
+      ],
+      "Yes": [
+        "yes"
+      ],
+      "Force": [
+        "force"
+      ],
+      "Workspace": [
+        "workspace"
+      ]
+    },
+    "PersistenceField": {
+      "Auto": [
+        "auto"
+      ],
+      "AppId": [
+        "app_id"
+      ],
+      "Class": [
+        "class"
+      ],
+      "Instance": [
+        "instance"
+      ],
+      "Title": [
+        "title"
+      ]
+    },
+    "Palette": {
+      "Focused": [
+        "client.focused"
+      ],
+      "Unfocused": [
+        "client.unfocused"
+      ],
+      "FocusedInactive": [
+        "client.focused_inactive"
+      ],
+      "Urgent": [
+        "client.urgent"
+      ],
+      "Placeholder": [
+        "client.placeholder"
+      ],
+      "PersistentFocused": [
+        "client.persistent_focused"
+      ],
+      "PersistentUnfocused": [
+        "client.persistent_unfocused"
+      ]
+    },
+    "TapMap": {
+      "Lrm": [
+        "lrm"
+      ],
+      "Lmr": [
+        "lmr"
+      ]
+    },
+    "ClickMethod": {
+      "None": [
+        "none"
+      ],
+      "ButtonAreas": [
+        "button_areas"
+      ],
+      "Clickfinger": [
+        "clickfinger"
+      ]
+    },
+    "XkbField": {
+      "Rules": [
+        "xkb_rules"
+      ],
+      "Model": [
+        "xkb_model"
+      ],
+      "Layout": [
+        "xkb_layout"
+      ],
+      "Variant": [
+        "xkb_variant"
+      ],
+      "Options": [
+        "xkb_options"
+      ]
+    },
+    "CriterionField": {
+      "All": [
+        "all"
+      ],
+      "AppId": [
+        "app_id"
+      ],
+      "Class": [
+        "class"
+      ],
+      "Instance": [
+        "instance"
+      ],
+      "Title": [
+        "title"
+      ]
+    },
+    "Modifier": {
+      "Control": [
+        "Control",
+        "Ctrl"
+      ],
+      "Alt": [
+        "Mod1"
+      ],
+      "Shift": [
+        "Shift"
+      ],
+      "Super": [
+        "Mod4"
+      ]
+    },
+    "Key": {
+      "KeyA": [
+        "a"
+      ],
+      "KeyB": [
+        "b"
+      ],
+      "KeyC": [
+        "c"
+      ],
+      "KeyD": [
+        "d"
+      ],
+      "KeyE": [
+        "e"
+      ],
+      "KeyF": [
+        "f"
+      ],
+      "KeyG": [
+        "g"
+      ],
+      "KeyH": [
+        "h"
+      ],
+      "KeyI": [
+        "i"
+      ],
+      "KeyJ": [
+        "j"
+      ],
+      "KeyK": [
+        "k"
+      ],
+      "KeyL": [
+        "l"
+      ],
+      "KeyM": [
+        "m"
+      ],
+      "KeyN": [
+        "n"
+      ],
+      "KeyO": [
+        "o"
+      ],
+      "KeyP": [
+        "p"
+      ],
+      "KeyQ": [
+        "q"
+      ],
+      "KeyR": [
+        "r"
+      ],
+      "KeyS": [
+        "s"
+      ],
+      "KeyT": [
+        "t"
+      ],
+      "KeyU": [
+        "u"
+      ],
+      "KeyV": [
+        "v"
+      ],
+      "KeyW": [
+        "w"
+      ],
+      "KeyX": [
+        "x"
+      ],
+      "KeyY": [
+        "y"
+      ],
+      "KeyZ": [
+        "z"
+      ],
+      "Key0": [
+        "0"
+      ],
+      "Key1": [
+        "1"
+      ],
+      "Key2": [
+        "2"
+      ],
+      "Key3": [
+        "3"
+      ],
+      "Key4": [
+        "4"
+      ],
+      "Key5": [
+        "5"
+      ],
+      "Key6": [
+        "6"
+      ],
+      "Key7": [
+        "7"
+      ],
+      "Key8": [
+        "8"
+      ],
+      "Key9": [
+        "9"
+      ],
+      "Return": [
+        "Return"
+      ],
+      "Space": [
+        "space"
+      ],
+      "Escape": [
+        "Escape"
+      ],
+      "Tab": [
+        "Tab"
+      ],
+      "Pause": [
+        "Pause"
+      ],
+      "Print": [
+        "Print"
+      ],
+      "XF86AudioRaiseVolume": [
+        "XF86AudioRaiseVolume"
+      ],
+      "XF86AudioLowerVolume": [
+        "XF86AudioLowerVolume"
+      ],
+      "XF86AudioMute": [
+        "XF86AudioMute"
+      ],
+      "XF86AudioPlay": [
+        "XF86AudioPlay"
+      ],
+      "XF86AudioPause": [
+        "XF86AudioPause"
+      ],
+      "XF86MonBrightnessDown": [
+        "XF86MonBrightnessDown"
+      ],
+      "XF86MonBrightnessUp": [
+        "XF86MonBrightnessUp"
+      ],
+      "XF86AudioNext": [
+        "XF86AudioNext"
+      ],
+      "XF86AudioPrev": [
+        "XF86AudioPrev"
+      ],
+      "Equal": [
+        "equal"
+      ],
+      "Minus": [
+        "minus"
+      ],
+      "Left": [
+        "Left"
+      ],
+      "Right": [
+        "Right"
+      ],
+      "Up": [
+        "Up"
+      ],
+      "Down": [
+        "Down"
+      ],
+      "F1": [
+        "F1"
+      ],
+      "F2": [
+        "F2"
+      ],
+      "F3": [
+        "F3"
+      ],
+      "F4": [
+        "F4"
+      ],
+      "F5": [
+        "F5"
+      ],
+      "F6": [
+        "F6"
+      ],
+      "F7": [
+        "F7"
+      ],
+      "F8": [
+        "F8"
+      ],
+      "F9": [
+        "F9"
+      ],
+      "F10": [
+        "F10"
+      ],
+      "F11": [
+        "F11"
+      ],
+      "F12": [
+        "F12"
+      ]
+    },
+    "Header": {
+      "Binding": [
+        "bindsym"
+      ],
+      "Mode": [
+        "mode"
+      ],
+      "Input": [
+        "input"
+      ],
+      "Seat": [
+        "seat"
+      ],
+      "Output": [
+        "output"
+      ],
+      "Bar": [
+        "bar"
+      ],
+      "Exec": [
+        "exec"
+      ],
+      "ExecAlways": [
+        "exec_always"
+      ],
+      "ForWindow": [
+        "for_window"
+      ],
+      "Assign": [
+        "assign"
+      ],
+      "NoFocus": [
+        "no_focus"
+      ],
+      "Include": [
+        "include"
+      ],
+      "BarCommand": [
+        "swaybar_command"
+      ]
+    },
+    "Orientation": {
+      "Horizontal": [
+        "horizontal"
+      ],
+      "Vertical": [
+        "vertical"
+      ]
+    }
+  },
+  "scalars": {
+    "ModeName": {
+      "kind": "string",
+      "nonempty": true
+    },
+    "WorkspaceName": {
+      "kind": "string",
+      "nonempty": true
+    },
+    "Gap": {
+      "kind": "u16",
+      "min": 0,
+      "max": 65535
+    },
+    "BorderWidth": {
+      "kind": "u16",
+      "min": 0,
+      "max": 64
+    },
+    "Radius": {
+      "kind": "u16",
+      "min": 0,
+      "max": 64
+    }
+  },
+  "productions": {
+    "Border": {
+      "variants": {
+        "Normal": "BorderWidth",
+        "Pixel": "BorderWidth",
+        "None": null
+      },
+      "rules": [
+        {
+          "pattern": [
+            "normal"
+          ],
+          "value": "Self::Normal(BorderWidth::new(3)?)"
+        },
+        {
+          "pattern": [
+            "normal",
+            "$width:BorderWidth"
+          ],
+          "value": "Self::Normal(width)"
+        },
+        {
+          "pattern": [
+            "pixel"
+          ],
+          "value": "Self::Pixel(BorderWidth::new(3)?)"
+        },
+        {
+          "pattern": [
+            "pixel",
+            "$width:BorderWidth"
+          ],
+          "value": "Self::Pixel(width)"
+        },
+        {
+          "pattern": [
+            "none"
+          ],
+          "value": "Self::None"
+        }
+      ],
+      "fallback": "invalid"
+    },
+    "ModeHeader": {
+      "variants": {
+        "Plain": "ModeName",
+        "Markup": "ModeName"
+      },
+      "rules": [
+        {
+          "pattern": [
+            "$name:ModeName"
+          ],
+          "value": "Self::Plain(name)"
+        },
+        {
+          "pattern": [
+            "--pango_markup",
+            "$name:ModeName"
+          ],
+          "value": "Self::Markup(name)"
+        }
+      ],
+      "fallback": "invalid"
+    },
+    "WeldCommand": {
+      "variants": {
+        "RevokeAccess": null,
+        "ToggleRemoteControl": null,
+        "HoldLocalInteraction": null,
+        "ToggleLocalInteraction": null,
+        "Hoist": null,
+        "OutputTopology": null,
+        "ExclusiveFullscreen": null,
+        "IncreaseScale": null,
+        "DecreaseScale": null,
+        "PhysicalScale": null
+      },
+      "rules": [
+        {
+          "pattern": [
+            "access",
+            "revoke",
+            "all"
+          ],
+          "value": "Self::RevokeAccess"
+        },
+        {
+          "pattern": [
+            "control",
+            "toggle"
+          ],
+          "value": "Self::ToggleRemoteControl"
+        },
+        {
+          "pattern": [
+            "control",
+            "interact",
+            "hold"
+          ],
+          "value": "Self::HoldLocalInteraction"
+        },
+        {
+          "pattern": [
+            "control",
+            "interact",
+            "toggle"
+          ],
+          "value": "Self::ToggleLocalInteraction"
+        },
+        {
+          "pattern": [
+            "hoist"
+          ],
+          "value": "Self::Hoist"
+        },
+        {
+          "pattern": [
+            "output-debug"
+          ],
+          "value": "Self::OutputTopology"
+        },
+        {
+          "pattern": [
+            "fullscreen",
+            "exclusive"
+          ],
+          "value": "Self::ExclusiveFullscreen"
+        },
+        {
+          "pattern": [
+            "scale",
+            "increase"
+          ],
+          "value": "Self::IncreaseScale"
+        },
+        {
+          "pattern": [
+            "scale",
+            "decrease"
+          ],
+          "value": "Self::DecreaseScale"
+        },
+        {
+          "pattern": [
+            "scale",
+            "physical"
+          ],
+          "value": "Self::PhysicalScale"
+        }
+      ],
+      "fallback": "invalid"
+    },
+    "Command": {
+      "variants": {
+        "Workspace": "WorkspaceTarget",
+        "WorkspaceNoBack": "WorkspaceTarget",
+        "MoveWorkspace": "WorkspaceTarget",
+        "MoveWorkspaceNoBack": "WorkspaceTarget",
+        "Rename": "RenameWorkspace",
+        "Exec": "ShellCommand",
+        "Exit": null,
+        "Mode": "ModeName",
+        "Layout": "Layout",
+        "Split": "Axis",
+        "BorderToggle": null,
+        "Border": "Border",
+        "Persistent": "Persistence",
+        "Fullscreen": "Toggle",
+        "FocusModeToggle": null,
+        "FocusParent": null,
+        "FocusChild": null,
+        "Focus": "Direction",
+        "Move": "Direction",
+        "Sticky": "Toggle",
+        "Floating": "Toggle",
+        "Resize": "Resize",
+        "Kill": null,
+        "Reload": null,
+        "Position": "Position",
+        "Weld": "WeldCommand",
+        "MoveWorkspaceToOutput": "Vec<Literal>"
+      },
+      "rules": [
+        {
+          "pattern": [
+            "move",
+            "--no-auto-back-and-forth",
+            "container",
+            "workspace",
+            "$target:WorkspaceTarget*"
+          ],
+          "value": "Self::MoveWorkspaceNoBack(target)"
+        },
+        {
+          "pattern": [
+            "move",
+            "--no-auto-back-and-forth",
+            "window",
+            "workspace",
+            "$target:WorkspaceTarget*"
+          ],
+          "value": "Self::MoveWorkspaceNoBack(target)"
+        },
+        {
+          "pattern": [
+            "move",
+            "workspace",
+            "to",
+            "output",
+            "$outputs:Literals*"
+          ],
+          "value": "Self::MoveWorkspaceToOutput(outputs.0)"
+        },
+        {
+          "pattern": [
+            "workspace",
+            "--no-auto-back-and-forth",
+            "$target:WorkspaceTarget*"
+          ],
+          "value": "Self::WorkspaceNoBack(target)"
+        },
+        {
+          "pattern": [
+            "workspace",
+            "$target:WorkspaceTarget*"
+          ],
+          "value": "Self::Workspace(target)"
+        },
+        {
+          "pattern": [
+            "rename",
+            "workspace",
+            "$rename:RenameWorkspace*"
+          ],
+          "value": "Self::Rename(rename)"
+        },
+        {
+          "pattern": [
+            "move",
+            "--no-auto-back-and-forth",
+            "workspace",
+            "$target:WorkspaceTarget*"
+          ],
+          "value": "Self::MoveWorkspaceNoBack(target)"
+        },
+        {
+          "pattern": [
+            "move",
+            "workspace",
+            "$target:WorkspaceTarget*"
+          ],
+          "value": "Self::MoveWorkspace(target)"
+        },
+        {
+          "pattern": [
+            "move",
+            "--no-auto-back-and-forth",
+            "to",
+            "workspace",
+            "$target:WorkspaceTarget*"
+          ],
+          "value": "Self::MoveWorkspaceNoBack(target)"
+        },
+        {
+          "pattern": [
+            "move",
+            "to",
+            "workspace",
+            "$target:WorkspaceTarget*"
+          ],
+          "value": "Self::MoveWorkspace(target)"
+        },
+        {
+          "pattern": [
+            "move",
+            "--no-auto-back-and-forth",
+            "container",
+            "to",
+            "workspace",
+            "$target:WorkspaceTarget*"
+          ],
+          "value": "Self::MoveWorkspaceNoBack(target)"
+        },
+        {
+          "pattern": [
+            "move",
+            "container",
+            "to",
+            "workspace",
+            "$target:WorkspaceTarget*"
+          ],
+          "value": "Self::MoveWorkspace(target)"
+        },
+        {
+          "pattern": [
+            "move",
+            "--no-auto-back-and-forth",
+            "window",
+            "to",
+            "workspace",
+            "$target:WorkspaceTarget*"
+          ],
+          "value": "Self::MoveWorkspaceNoBack(target)"
+        },
+        {
+          "pattern": [
+            "move",
+            "window",
+            "to",
+            "workspace",
+            "$target:WorkspaceTarget*"
+          ],
+          "value": "Self::MoveWorkspace(target)"
+        },
+        {
+          "pattern": [
+            "exec",
+            "$command:ShellCommand*"
+          ],
+          "value": "Self::Exec(command)"
+        },
+        {
+          "pattern": [
+            "exec_always",
+            "$command:ShellCommand*"
+          ],
+          "value": "Self::Exec(command)"
+        },
+        {
+          "pattern": [
+            "mode",
+            "$name:ModeName"
+          ],
+          "value": "Self::Mode(name)"
+        },
+        {
+          "pattern": [
+            "layout",
+            "$layout:Layout*"
+          ],
+          "value": "Self::Layout(layout)"
+        },
+        {
+          "pattern": [
+            "splith"
+          ],
+          "value": "Self::Split(Axis::Horizontal)"
+        },
+        {
+          "pattern": [
+            "splitv"
+          ],
+          "value": "Self::Split(Axis::Vertical)"
+        },
+        {
+          "pattern": [
+            "split",
+            "$axis:Axis"
+          ],
+          "value": "Self::Split(axis)"
+        },
+        {
+          "pattern": [
+            "border",
+            "toggle"
+          ],
+          "value": "Self::BorderToggle"
+        },
+        {
+          "pattern": [
+            "border",
+            "$border:Border*"
+          ],
+          "value": "Self::Border(border)"
+        },
+        {
+          "pattern": [
+            "weld",
+            "persistent",
+            "$persistence:Persistence*"
+          ],
+          "value": "Self::Persistent(persistence)"
+        },
+        {
+          "pattern": [
+            "fullscreen"
+          ],
+          "value": "Self::Fullscreen(Toggle::Toggle)"
+        },
+        {
+          "pattern": [
+            "fullscreen",
+            "$toggle:Toggle"
+          ],
+          "value": "Self::Fullscreen(toggle)"
+        },
+        {
+          "pattern": [
+            "focus",
+            "mode_toggle"
+          ],
+          "value": "Self::FocusModeToggle"
+        },
+        {
+          "pattern": [
+            "focus",
+            "parent"
+          ],
+          "value": "Self::FocusParent"
+        },
+        {
+          "pattern": [
+            "focus",
+            "child"
+          ],
+          "value": "Self::FocusChild"
+        },
+        {
+          "pattern": [
+            "focus",
+            "$direction:Direction"
+          ],
+          "value": "Self::Focus(direction)"
+        },
+        {
+          "pattern": [
+            "move",
+            "$direction:Direction"
+          ],
+          "value": "Self::Move(direction)"
+        },
+        {
+          "pattern": [
+            "sticky",
+            "$toggle:Toggle"
+          ],
+          "value": "Self::Sticky(toggle)"
+        },
+        {
+          "pattern": [
+            "floating",
+            "$toggle:Toggle"
+          ],
+          "value": "Self::Floating(toggle)"
+        },
+        {
+          "pattern": [
+            "resize",
+            "$resize:Resize*"
+          ],
+          "value": "Self::Resize(resize)"
+        },
+        {
+          "pattern": [
+            "move",
+            "absolute",
+            "position",
+            "$x:FiniteFloat",
+            "$y:FiniteFloat"
+          ],
+          "value": "Self::Position(Position { x: x.0, y: y.0 })"
+        },
+        {
+          "pattern": [
+            "weld",
+            "$command:WeldCommand*"
+          ],
+          "value": "Self::Weld(command)"
+        },
+        {
+          "pattern": [
+            "exit"
+          ],
+          "value": "Self::Exit"
+        },
+        {
+          "pattern": [
+            "kill"
+          ],
+          "value": "Self::Kill"
+        },
+        {
+          "pattern": [
+            "reload"
+          ],
+          "value": "Self::Reload"
+        }
+      ]
+    },
+    "InputProperty": {
+      "variants": {
+        "Xkb": "XkbField, XkbValue",
+        "Tap": "Enabled",
+        "TapMap": "TapMap",
+        "ClickMethod": "ClickMethod"
+      },
+      "rules": [
+        {
+          "pattern": [
+            "tap",
+            "$value:Enabled"
+          ],
+          "value": "Self::Tap(value)"
+        },
+        {
+          "pattern": [
+            "tap_button_map",
+            "$value:TapMap"
+          ],
+          "value": "Self::TapMap(value)"
+        },
+        {
+          "pattern": [
+            "click_method",
+            "$value:ClickMethod"
+          ],
+          "value": "Self::ClickMethod(value)"
+        },
+        {
+          "pattern": [
+            "xkb_rules",
+            "$value:XkbValue"
+          ],
+          "value": "Self::Xkb(XkbField::Rules, value)"
+        },
+        {
+          "pattern": [
+            "xkb_model",
+            "$value:XkbValue"
+          ],
+          "value": "Self::Xkb(XkbField::Model, value)"
+        },
+        {
+          "pattern": [
+            "xkb_layout",
+            "$value:XkbValue"
+          ],
+          "value": "Self::Xkb(XkbField::Layout, value)"
+        },
+        {
+          "pattern": [
+            "xkb_variant",
+            "$value:XkbValue"
+          ],
+          "value": "Self::Xkb(XkbField::Variant, value)"
+        },
+        {
+          "pattern": [
+            "xkb_options",
+            "$value:XkbValue"
+          ],
+          "value": "Self::Xkb(XkbField::Options, value)"
+        }
+      ]
+    },
+    "SeatProperty": {
+      "variants": {
+        "Cursor": "Literal, Option<PositiveInteger>"
+      },
+      "rules": [
+        {
+          "pattern": [
+            "xcursor_theme",
+            "$theme:Literal"
+          ],
+          "value": "Self::Cursor(theme, None)"
+        },
+        {
+          "pattern": [
+            "xcursor_theme",
+            "$theme:Literal",
+            "$size:PositiveInteger"
+          ],
+          "value": "Self::Cursor(theme, Some(size))"
+        }
+      ],
+      "invalid_heads": [
+        "xcursor_theme"
+      ]
+    },
+    "Setting": {
+      "variants": {
+        "GapInner": "Gap",
+        "GapOuter": "Gap",
+        "DefaultAxis": "Orientation",
+        "SmartGaps": "OnOff",
+        "SmartBorders": "OnOff",
+        "TiledBorder": "Border",
+        "FloatingBorder": "Border",
+        "Font": "FontDescription",
+        "Radius": "Radius",
+        "Colors": "Palette, Colors",
+        "FloatingModifier": "Modifiers",
+        "FocusFollowsMouse": "YesNo",
+        "FocusWrapping": "FocusWrapping",
+        "AutoBack": "YesNo",
+        "WorkspaceOutput": "WorkspaceAssignment"
+      },
+      "rules": [
+        {
+          "pattern": [
+            "gaps",
+            "inner",
+            "$value:Gap"
+          ],
+          "value": "Self::GapInner(value)"
+        },
+        {
+          "pattern": [
+            "gaps",
+            "outer",
+            "$value:Gap"
+          ],
+          "value": "Self::GapOuter(value)"
+        },
+        {
+          "pattern": [
+            "default_orientation",
+            "$value:Orientation"
+          ],
+          "value": "Self::DefaultAxis(value)"
+        },
+        {
+          "pattern": [
+            "smart_gaps",
+            "$value:OnOff"
+          ],
+          "value": "Self::SmartGaps(value)"
+        },
+        {
+          "pattern": [
+            "smart_borders",
+            "$value:OnOff"
+          ],
+          "value": "Self::SmartBorders(value)"
+        },
+        {
+          "pattern": [
+            "font",
+            "$font:FontDescription*"
+          ],
+          "value": "Self::Font(font)"
+        },
+        {
+          "pattern": [
+            "corner_radius",
+            "$value:Radius"
+          ],
+          "value": "Self::Radius(value)"
+        },
+        {
+          "pattern": [
+            "floating_modifier",
+            "$value:Modifiers"
+          ],
+          "value": "Self::FloatingModifier(value)"
+        },
+        {
+          "pattern": [
+            "floating_modifier",
+            "$value:Modifiers",
+            "normal"
+          ],
+          "value": "Self::FloatingModifier(value)"
+        },
+        {
+          "pattern": [
+            "focus_follows_mouse",
+            "$value:YesNo"
+          ],
+          "value": "Self::FocusFollowsMouse(value)"
+        },
+        {
+          "pattern": [
+            "focus_wrapping",
+            "$value:FocusWrapping"
+          ],
+          "value": "Self::FocusWrapping(value)"
+        },
+        {
+          "pattern": [
+            "workspace_auto_back_and_forth",
+            "$value:YesNo"
+          ],
+          "value": "Self::AutoBack(value)"
+        },
+        {
+          "pattern": [
+            "workspace",
+            "$name:WorkspaceName",
+            "output",
+            "$outputs:Literals*"
+          ],
+          "value": "Self::WorkspaceOutput(WorkspaceAssignment { name, outputs: outputs.0 })"
+        },
+        {
+          "pattern": [
+            "default_border",
+            "$border:Border*"
+          ],
+          "value": "Self::TiledBorder(border)"
+        },
+        {
+          "pattern": [
+            "new_window",
+            "$border:Border*"
+          ],
+          "value": "Self::TiledBorder(border)"
+        },
+        {
+          "pattern": [
+            "default_floating_border",
+            "$border:Border*"
+          ],
+          "value": "Self::FloatingBorder(border)"
+        },
+        {
+          "pattern": [
+            "new_float",
+            "$border:Border*"
+          ],
+          "value": "Self::FloatingBorder(border)"
+        },
+        {
+          "pattern": [
+            "client.focused",
+            "$colors:Colors*"
+          ],
+          "value": "Self::Colors(Palette::Focused, colors)"
+        },
+        {
+          "pattern": [
+            "client.unfocused",
+            "$colors:Colors*"
+          ],
+          "value": "Self::Colors(Palette::Unfocused, colors)"
+        },
+        {
+          "pattern": [
+            "client.focused_inactive",
+            "$colors:Colors*"
+          ],
+          "value": "Self::Colors(Palette::FocusedInactive, colors)"
+        },
+        {
+          "pattern": [
+            "client.urgent",
+            "$colors:Colors*"
+          ],
+          "value": "Self::Colors(Palette::Urgent, colors)"
+        },
+        {
+          "pattern": [
+            "client.placeholder",
+            "$colors:Colors*"
+          ],
+          "value": "Self::Colors(Palette::Placeholder, colors)"
+        },
+        {
+          "pattern": [
+            "client.persistent_focused",
+            "$colors:Colors*"
+          ],
+          "value": "Self::Colors(Palette::PersistentFocused, colors)"
+        },
+        {
+          "pattern": [
+            "client.persistent_unfocused",
+            "$colors:Colors*"
+          ],
+          "value": "Self::Colors(Palette::PersistentUnfocused, colors)"
+        }
+      ]
+    }
+  },
+  "references": {
+    "Direction": [
+      "commands.spec:FOCUS"
+    ],
+    "Border": [
+      "commands.spec:BORDER",
+      "commands.spec:BORDER_WIDTH"
+    ],
+    "ModeHeader": [
+      "config.spec:MODENAME",
+      "config.spec:MODEBRACE"
+    ],
+    "Binding": [
+      "config.spec:BINDING",
+      "config.spec:BINDCOMMAND",
+      "config.spec:MODE",
+      "config.spec:MODE_BINDING",
+      "config.spec:MODE_BINDCOMMAND"
+    ],
+    "WorkspaceTarget": [
+      "commands.spec:WORKSPACE",
+      "commands.spec:WORKSPACE_NUMBER"
+    ],
+    "Setting": [
+      "config.spec:GAPS",
+      "config.spec:SMART_GAPS",
+      "config.spec:SMART_BORDERS",
+      "config.spec:DEFAULT_BORDER",
+      "config.spec:FOCUS_FOLLOWS_MOUSE",
+      "config.spec:FOCUS_WRAPPING",
+      "config.spec:WORKSPACE"
+    ],
+    "Command": [
+      "commands.spec:INITIAL",
+      "commands.spec:EXEC",
+      "commands.spec:SPLIT",
+      "commands.spec:FLOATING"
+    ]
+  },
+  "physical_keys": {
+    "KeyQ": 16,
+    "KeyW": 17,
+    "KeyE": 18,
+    "KeyR": 19,
+    "KeyT": 20,
+    "KeyY": 21,
+    "KeyU": 22,
+    "KeyI": 23,
+    "KeyO": 24,
+    "KeyP": 25,
+    "KeyA": 30,
+    "KeyS": 31,
+    "KeyD": 32,
+    "KeyF": 33,
+    "KeyG": 34,
+    "KeyH": 35,
+    "KeyJ": 36,
+    "KeyK": 37,
+    "KeyL": 38,
+    "KeyZ": 44,
+    "KeyX": 45,
+    "KeyC": 46,
+    "KeyV": 47,
+    "KeyB": 48,
+    "KeyN": 49,
+    "KeyM": 50,
+    "Key1": 2,
+    "Key2": 3,
+    "Key3": 4,
+    "Key4": 5,
+    "Key5": 6,
+    "Key6": 7,
+    "Key7": 8,
+    "Key8": 9,
+    "Key9": 10,
+    "Key0": 11,
+    "Return": 28,
+    "Space": 57,
+    "Escape": 1,
+    "Tab": 15,
+    "Pause": 119,
+    "Print": 99,
+    "XF86AudioRaiseVolume": 115,
+    "XF86AudioLowerVolume": 114,
+    "XF86AudioMute": 113,
+    "XF86AudioPlay": 164,
+    "XF86AudioPause": 201,
+    "XF86MonBrightnessDown": 224,
+    "XF86MonBrightnessUp": 225,
+    "XF86AudioNext": 163,
+    "XF86AudioPrev": 165,
+    "Equal": 13,
+    "Minus": 12,
+    "Left": 105,
+    "Right": 106,
+    "Up": 103,
+    "Down": 108,
+    "F1": 59,
+    "F2": 60,
+    "F3": 61,
+    "F4": 62,
+    "F5": 63,
+    "F6": 64,
+    "F7": 65,
+    "F8": 66,
+    "F9": 67,
+    "F10": 68,
+    "F11": 87,
+    "F12": 88
+  },
+  "structs": {
+    "ModeDefinition": {
+      "description": "A mode definition owns its parsed bindings, independently of mode switching.",
+      "fields": {
+        "header": {
+          "type": "ModeHeader",
+          "description": "Validated mode name and label format."
+        },
+        "bindings": {
+          "type": "Vec<Located<Binding>>",
+          "description": "Bindings declared in this mode."
+        }
+      }
+    },
+    "Binding": {
+      "description": "A physical-position shortcut in the currently supported binding subset.",
+      "fields": {
+        "chord": {
+          "type": "Chord",
+          "description": "Parsed key and modifier requirements."
+        },
+        "command": {
+          "type": "Command",
+          "description": "Typed command or preserved shell payload."
+        }
+      }
+    },
+    "Chord": {
+      "description": "Parsed shortcut modifiers and optional trigger.",
+      "fields": {
+        "modifiers": {
+          "type": "Modifiers",
+          "description": "Required modifiers in declaration order."
+        },
+        "key": {
+          "type": "Option<Key>",
+          "description": "Trigger key; absence denotes a held modifier chord."
+        }
+      }
+    },
+    "WorkspaceAssignment": {
+      "description": "Ordered output preferences for a workspace.",
+      "fields": {
+        "name": {
+          "type": "WorkspaceName",
+          "description": "Decoded destination name."
+        },
+        "outputs": {
+          "type": "Vec<Literal>",
+          "description": "Ordered output selector preferences."
+        }
+      }
+    },
+    "RenameWorkspace": {
+      "description": "Source and destination names for workspace renaming.",
+      "fields": {
+        "source": {
+          "type": "Option<WorkspaceName>",
+          "description": "Source filename or diagnostic label."
+        },
+        "name": {
+          "type": "WorkspaceName",
+          "description": "Decoded destination name."
+        }
+      }
+    },
+    "Persistence": {
+      "description": "Persistence operation with its optional identity selector normalized.",
+      "fields": {
+        "operation": {
+          "type": "Toggle",
+          "description": "The operation form."
+        },
+        "field": {
+          "type": "PersistenceField",
+          "description": "Metadata property to match."
+        }
+      }
+    },
+    "Resize": {
+      "description": "A resize retains its units until native layout-plane selection.",
+      "fields": {
+        "kind": {
+          "type": "ResizeKind",
+          "description": "Operation applied to the supplied amounts."
+        },
+        "dimension": {
+          "type": "Dimension",
+          "description": "Dimension adjusted by the operation."
+        },
+        "amounts": {
+          "type": "Vec<ResizeAmount>",
+          "description": "Explicit pixel and percentage alternatives."
+        }
+      }
+    },
+    "ResizeAmount": {
+      "description": "A positive amount and its explicitly supplied unit.",
+      "fields": {
+        "value": {
+          "type": "u16",
+          "description": "Typed node value."
+        },
+        "unit": {
+          "type": "Unit",
+          "description": "Unit supplied with the amount."
+        }
+      }
+    },
+    "Position": {
+      "description": "Absolute logical position for a floating-window rule.",
+      "fields": {
+        "x": {
+          "type": "f64",
+          "description": "Horizontal logical coordinate."
+        },
+        "y": {
+          "type": "f64",
+          "description": "Vertical logical coordinate."
+        }
+      }
+    },
+    "Colors": {
+      "description": "Complete frame palette with Sway's omitted-color defaults applied.",
+      "fields": {
+        "border": {
+          "type": "Color",
+          "description": "The border form."
+        },
+        "background": {
+          "type": "Color",
+          "description": "The background form."
+        },
+        "text": {
+          "type": "Color",
+          "description": "The text form."
+        },
+        "indicator": {
+          "type": "Color",
+          "description": "The indicator form."
+        },
+        "child_border": {
+          "type": "Color",
+          "description": "The child_border form."
+        }
+      }
+    },
+    "WindowRule": {
+      "description": "Window-rule criteria and source-ordered action semantics.",
+      "fields": {
+        "criteria": {
+          "type": "Vec<Criterion>",
+          "description": "Metadata predicates combined with logical AND."
+        },
+        "effect": {
+          "type": "RuleEffect",
+          "description": "Rule timing and requested actions."
+        }
+      }
+    },
+    "Criterion": {
+      "description": "A typed metadata match; regex compilation belongs to preparation.",
+      "fields": {
+        "field": {
+          "type": "CriterionField",
+          "description": "Metadata property to match."
+        },
+        "pattern": {
+          "type": "String",
+          "description": "Regular-expression spelling, compiled during preparation."
+        }
+      }
+    }
+  },
+  "unsupported_enums": [
+    "Key",
+    "Modifier",
+    "Header",
+    "CriterionField"
+  ],
+  "unsupported_values": {
+    "Axis": [
+      "auto",
+      "toggle",
+      "t",
+      "none",
+      "n"
+    ],
+    "Orientation": [
+      "auto"
+    ],
+    "OnOff": [
+      "no_gaps",
+      "inverse_outer"
+    ],
+    "YesNo": [
+      "always"
+    ],
+    "Direction": [
+      "scratchpad",
+      "tiling",
+      "floating",
+      "next",
+      "prev"
+    ],
+    "ResizeKind": [
+      "set"
+    ]
+  }
+}

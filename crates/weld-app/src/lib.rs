@@ -72,8 +72,8 @@ pub mod prelude {
         cursor::{CursorIcon, CursorRequest, CursorSettings, CursorSystems, SystemCursorIcon},
         input::{
             InputDelta, PointerGesture, PointerGestureKind, PointerShortcut, PointerShortcutAppExt,
-            PointerShortcutId, PointerShortcutModifiers, PointerShortcutPressed, TouchpadGesture,
-            TouchpadHold, TouchpadPinch, TouchpadSwipe,
+            PointerShortcutId, PointerShortcutPressed, TouchpadGesture, TouchpadHold,
+            TouchpadPinch, TouchpadSwipe,
         },
         output::{
             OutputCompositionCamera, OutputFootprintProvenance, OutputGeometry, OutputId,

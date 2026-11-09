@@ -9,6 +9,10 @@ use bevy::ecs::{
     system::{Commands, Query, Res, ResMut, SystemParam},
 };
 use weld_app::output::{OutputInfo, PrimaryOutput, WeldOutput};
+use weld_i3_config::{
+    I3WorkspaceRequest, WorkspaceAssignment, WorkspaceNavigation, WorkspaceSettings,
+    WorkspaceTarget,
+};
 use weld_tile::{TileCommands, TileWorkspaceMove};
 use weld_window::workspace::{
     FocusedWorkspace, Workspace, WorkspaceCreation, WorkspaceFocused, WorkspaceMember,
@@ -16,81 +20,6 @@ use weld_window::workspace::{
 };
 use weld_window::workspace_protocol::ActivateWorkspace;
 use weld_window::{FocusedWindow, ManagedBy, ManagedWindow};
-
-/// Workspace selector in i3 command vocabulary.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum WorkspaceTarget {
-    Name(String),
-    Number(String),
-    Next,
-    Previous,
-    NextOnOutput,
-    PreviousOnOutput,
-    BackAndForth,
-    Current,
-}
-
-/// Ordered connector preferences for workspace creation.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct WorkspaceAssignment {
-    pub workspace: String,
-    pub outputs: Vec<String>,
-}
-
-#[derive(Resource, Clone, Debug, Default, Eq, PartialEq)]
-pub struct WorkspaceSettings {
-    pub assignments: Vec<WorkspaceAssignment>,
-    /// Workspace names from switch bindings, in configuration order.
-    pub initial_names: Vec<String>,
-    /// A named switch/move targeting the selected workspace goes to the previous one.
-    pub auto_back_and_forth: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum WorkspaceNavigation {
-    Switch,
-    MoveWindow,
-}
-
-#[derive(Event, Clone, Debug, Eq, PartialEq)]
-pub enum I3WorkspaceRequest {
-    Navigate {
-        target: WorkspaceTarget,
-        operation: WorkspaceNavigation,
-        allow_auto_back_and_forth: bool,
-    },
-    Rename {
-        source: Option<String>,
-        name: String,
-    },
-}
-
-impl I3WorkspaceRequest {
-    pub fn switch(target: WorkspaceTarget) -> Self {
-        Self::Navigate {
-            target,
-            operation: WorkspaceNavigation::Switch,
-            allow_auto_back_and_forth: true,
-        }
-    }
-    pub fn move_window(target: WorkspaceTarget) -> Self {
-        Self::Navigate {
-            target,
-            operation: WorkspaceNavigation::MoveWindow,
-            allow_auto_back_and_forth: true,
-        }
-    }
-    pub fn without_auto_back_and_forth(mut self) -> Self {
-        if let Self::Navigate {
-            allow_auto_back_and_forth,
-            ..
-        } = &mut self
-        {
-            *allow_auto_back_and_forth = false;
-        }
-        self
-    }
-}
 
 /// Assign or transfer one explicit window without following it to the target.
 #[derive(Event, Clone, Debug)]

@@ -2,7 +2,6 @@
 
 use bevy::{
     ecs::{
-        event::Event,
         observer::On,
         query::With,
         system::{Commands, Query, Res},
@@ -10,15 +9,10 @@ use bevy::{
     math::Vec2,
 };
 use weld_float::FloatingResizeRequest;
-use weld_tile::{SplitAxis, TileOperation, TileRequest};
+use weld_i3_config::I3ResizeRequest;
+use weld_tile::TileRequest;
+use weld_tile_config::{SplitAxis, TileOperation};
 use weld_window::{FloatingWindow, FocusedWindow, WindowGeometry};
-
-#[derive(Event, Clone, Copy, Debug, PartialEq)]
-pub struct I3ResizeRequest {
-    pub axis: SplitAxis,
-    pub pixels: Option<f32>,
-    pub fraction: Option<f32>,
-}
 
 pub(crate) fn request(
     event: On<I3ResizeRequest>,

@@ -8,10 +8,10 @@ pub mod source;
 pub(crate) use keyboard::KeyboardRepeatTracker;
 pub use weld_input::{
     ButtonState, InputDelta, InputPosition, KeyboardKeyState, KeyboardKeymap, KeyboardMapper,
-    KeyboardRepeatMode, KeyboardSettings, KeymapConfig, LegacyKeyRepeat, LinuxButtonCode,
-    LinuxKeycode, PointerGesture, PointerGestureKind, RawScrollFrame, RawScrollPhase,
-    RawScrollSource, RawSeatEvent, RawSeatEventKind, RelativeMotion, SeatModifiers, TouchpadHold,
-    TouchpadPinch, TouchpadSwipe,
+    KeyboardRepeatMode, KeyboardSettings, LegacyKeyRepeat, LinuxButtonCode, LinuxKeycode,
+    PointerGesture, PointerGestureKind, RawScrollFrame, RawScrollPhase, RawScrollSource,
+    RawSeatEvent, RawSeatEventKind, RelativeMotion, SeatModifiers, TouchpadHold, TouchpadPinch,
+    TouchpadSwipe,
 };
 
 use crate::surface::{SurfaceId, SurfaceLayerId};

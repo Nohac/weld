@@ -24,7 +24,8 @@ use weld_core::{
     benchmark::{Options, SurfaceOnly, prepare},
     surface::Extent,
 };
-use weld_tile::{TileContainer, TileLayout};
+use weld_tile::TileContainer;
+use weld_tile_config::TileLayout;
 use weld_window::FocusedWindow;
 
 #[derive(Clone, Copy, Debug, ValueEnum)]

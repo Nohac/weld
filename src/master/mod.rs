@@ -1,5 +1,11 @@
 //! Weld Master configuration and ordered distribution actions.
 
+use weld_i3_config::FocusWrapping;
+use weld_input_config::PointerDeviceSettings;
+#[cfg(test)]
+use weld_tile_config::SplitAxis;
+use weld_tile_config::TileSettings;
+use weld_window_config::{FullscreenAction, FullscreenMode};
 mod config;
 
 use crate::overlay::ToggleOutputTopology;
@@ -31,18 +37,18 @@ use weld_app::{
 };
 use weld_float::FloatManagement;
 use weld_hoist::HoistWindow;
+use weld_i3_config::WorkspaceSettings;
 use weld_i3_quirks::window_rules::WindowRules;
-use weld_i3_quirks::workspace::WorkspaceSettings;
-use weld_i3_quirks::{FocusWrapping, I3FocusRequest, I3MoveRequest, I3QuirksPlugin};
+use weld_i3_quirks::{I3FocusRequest, I3MoveRequest, I3QuirksPlugin};
 use weld_input::{
     GlobalShortcutId, GlobalShortcutMode, GlobalShortcutPlugin, GlobalShortcutPressed,
-    GlobalShortcutRegistry, GlobalShortcutSet, KeyboardSettings, PointerDeviceSettings,
+    GlobalShortcutRegistry, GlobalShortcutSet, KeyboardSettings,
 };
 use weld_ssd::{BorderRequest, SsdSettings};
-use weld_tile::{TileRequest, TileSettings, TileSystems};
-use weld_window::fullscreen::{FullscreenAction, FullscreenMode, FullscreenRequest};
-use weld_window::pointer::WindowPointerSettings;
+use weld_tile::{TileRequest, TileSystems};
+use weld_window::fullscreen::FullscreenRequest;
 use weld_window::{FocusedWindow, workspace_protocol::WorkspaceProtocolPlugin};
+use weld_window_config::WindowPointerSettings;
 
 /// Selects and translates the distribution's configuration file.
 pub(crate) struct MasterConfigPlugin {
@@ -80,7 +86,7 @@ pub(crate) fn validate_configuration(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn report_warnings(warnings: &[weld_i3_quirks::config::ConfigWarning]) {
+fn report_warnings(warnings: &[weld_config::ConfigWarning]) {
     for warning in warnings {
         tracing::warn!(source = %warning.source, line = warning.line, reason = %warning.message, "skipped unsupported configuration feature");
     }
@@ -204,6 +210,12 @@ struct ConfigTarget<'w> {
 
 impl ConfigTarget<'_> {
     fn apply(&mut self, config: Configuration) -> Result<()> {
+        let Configuration {
+            settings: config,
+            keymap,
+            window_rules,
+            decorations,
+        } = config;
         let cursor = match &config.cursor {
             Some(cursor) => CursorSettings::new(
                 &cursor.theme,
@@ -214,7 +226,7 @@ impl ConfigTarget<'_> {
             None => self.initial_cursor.0.clone(),
         };
         let drm = self.backend.as_deref() == Some(&ActiveBackend::Drm);
-        let mut modes = vec![weld_i3_quirks::config::BindingMode {
+        let mut modes = vec![weld_master_config::BindingMode {
             name: "default".into(),
             pango_markup: false,
             bindings: config.bindings,
@@ -234,7 +246,7 @@ impl ConfigTarget<'_> {
                     .iter()
                     .map(|(chord, action)| {
                         (
-                            *chord,
+                            weld_input::GlobalShortcut::from(*chord),
                             match action {
                                 Action::Mode(target) => Some(target.clone()),
                                 _ => None,
@@ -275,7 +287,7 @@ impl ConfigTarget<'_> {
             .collect();
         report_warnings(&config.warnings);
         self.outputs.0 = config.outputs;
-        *self.window_rules = config.window_rules;
+        *self.window_rules = window_rules;
         let startup = !self.state.initialized;
         self.state.pending_launches.extend(
             config
@@ -294,8 +306,8 @@ impl ConfigTarget<'_> {
         if *self.workspaces != config.workspaces {
             *self.workspaces = config.workspaces;
         }
-        if self.keyboard.keymap != config.keymap {
-            self.keyboard.keymap = config.keymap;
+        if self.keyboard.keymap != keymap {
+            self.keyboard.keymap = keymap;
         }
         if *self.pointer_devices != config.pointer_devices {
             *self.pointer_devices = config.pointer_devices;
@@ -306,8 +318,8 @@ impl ConfigTarget<'_> {
         if *self.pointer != config.pointer {
             *self.pointer = config.pointer;
         }
-        if *self.decorations != config.decorations {
-            *self.decorations = config.decorations;
+        if *self.decorations != decorations {
+            *self.decorations = decorations;
         }
         Ok(())
     }
@@ -494,7 +506,7 @@ mod tests {
         surface::SurfaceActionQueue,
     };
     use weld_input::KeyboardSettingsReader;
-    use weld_tile::{SplitAxis, TileContainer, TileParent, TilePlugin, TileSettings};
+    use weld_tile::{TileContainer, TileParent, TilePlugin};
     use weld_window::{ManagedWindow, WindowId, WindowPlugin, WindowVacancy};
 
     #[test]

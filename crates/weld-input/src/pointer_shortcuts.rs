@@ -1,6 +1,7 @@
 //! Declarative shell-owned pointer shortcuts.
 
 use std::collections::HashSet;
+use weld_input_config::PointerShortcutModifiers;
 
 use bevy::{
     app::App,
@@ -18,27 +19,6 @@ use crate::{
     ButtonState, GlobalShortcutRegistry, InputPosition, LinuxButtonCode, LinuxKeycode,
     RawSeatEvent, RawSeatEventKind, SeatModifiers,
 };
-
-/// Modifier requirements for a shell-owned pointer shortcut.
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
-pub struct PointerShortcutModifiers {
-    pub control: bool,
-    pub alt: bool,
-    pub shift: bool,
-    pub super_key: bool,
-}
-
-impl PointerShortcutModifiers {
-    /// Require the compositor Super modifier.
-    pub const fn super_key() -> Self {
-        Self {
-            super_key: true,
-            control: false,
-            alt: false,
-            shift: false,
-        }
-    }
-}
 
 /// A pointer chord consumed by the shell before client delivery.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

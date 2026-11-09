@@ -3,73 +3,13 @@
 //! Expansion uses the parser's logical headers and reparses the resulting source.
 //! Physical line counts survive continuation removal for downstream diagnostics.
 
-use std::{cmp::Reverse, error::Error, fmt};
+use std::cmp::Reverse;
 
 use anyhow::{Context, Result, ensure};
 
-use crate::{Statement, parse};
+use crate::Statement;
 
 const MAX_EXPANDED_BYTES: usize = 8 * 1024 * 1024;
-
-/// Handling of recognized-but-unimplemented configuration features.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum UnsupportedPolicy {
-    /// Stop compilation on unsupported features.
-    #[default]
-    Reject,
-    /// Skip unsupported features with a source-located warning.
-    Warn,
-}
-
-/// A feature skipped during configuration compilation.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConfigWarning {
-    /// Source filename or caller-provided label.
-    pub source: String,
-    /// One-based physical line.
-    pub line: usize,
-    /// Explanation of the skipped feature.
-    pub message: String,
-}
-
-/// Marks an unsupported feature, distinct from malformed supported settings.
-#[derive(Debug)]
-struct Unsupported(String);
-
-impl fmt::Display for Unsupported {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str(&self.0)
-    }
-}
-impl Error for Unsupported {}
-
-/// Construct an error eligible for an explicit compatibility warning.
-pub fn unsupported(message: impl Into<String>) -> anyhow::Error {
-    Unsupported(message.into()).into()
-}
-
-impl UnsupportedPolicy {
-    /// Retain unsupported-feature errors as warnings, or return the error.
-    /// Malformed supported settings always remain errors.
-    pub fn handle(
-        self,
-        error: anyhow::Error,
-        source: &str,
-        line: usize,
-        warnings: &mut Vec<ConfigWarning>,
-    ) -> Result<()> {
-        if self == Self::Warn && error.downcast_ref::<Unsupported>().is_some() {
-            warnings.push(ConfigWarning {
-                source: source.into(),
-                line,
-                message: format!("{error:#}"),
-            });
-            Ok(())
-        } else {
-            Err(error).with_context(|| format!("{source}:{line}"))
-        }
-    }
-}
 
 /// Physical line containing the beginning of a parsed statement.
 /// Returns an error if the statement's source offset is outside this source.
@@ -103,7 +43,7 @@ pub fn expand_variables(name: &str, source: &str) -> Result<String> {
         source.len() <= MAX_EXPANDED_BYTES,
         "{name}: configuration exceeds expansion size limit"
     );
-    let syntax = parse(name, source)?;
+    let syntax = crate::parse_source(name, source)?;
     let mut expansion = Expansion {
         source,
         output: String::new(),
@@ -242,7 +182,7 @@ mod tests {
     fn continued_header_at_eof_reparses_without_a_spurious_backslash() {
         let text =
             expand_variables("eof", "set $mod Mod4\nbindsym $mod+x exec a \\\nb").expect("expand");
-        let syntax = parse("eof", &text).expect("syntax");
+        let syntax = crate::parse_source("eof", &text).expect("syntax");
         assert_eq!(
             syntax.statements()[0].header().text(),
             "bindsym Mod4+x exec a b"
@@ -252,7 +192,7 @@ mod tests {
 
     #[test]
     fn source_mismatch_is_an_error_and_replaced_prefix_controls_dollar_escaping() {
-        let syntax = parse("long", "\n\n\nfont value").expect("syntax");
+        let syntax = crate::parse_source("long", "\n\n\nfont value").expect("syntax");
         assert!(line_of("x", &syntax.statements()[0]).is_err());
         let variables = vec![
             ("$slash".into(), "\\".into()),
@@ -271,7 +211,7 @@ mod tests {
     #[test]
     fn definitions_retokenize_in_order_and_longest_names_win() {
         let text = expand_variables("test", "set $mod Mod4\nset $modshift $mod+Shift\nset $launch exec foot\nbindsym $modshift+Return $launch\nset $mod Mod1\nfloating_modifier $mod\n").expect("expansion");
-        let syntax = parse("test", &text).expect("expanded syntax");
+        let syntax = crate::parse_source("test", &text).expect("expanded syntax");
         assert_eq!(
             syntax.statements()[0].header().text(),
             "bindsym Mod4+Shift+Return exec foot"
@@ -287,7 +227,7 @@ mod tests {
     fn quotes_dollars_and_continued_lines_keep_their_meaning() {
         let source = "set $name a\\\nb\nset $layout us\ninput type:keyboard {\n xkb_layout $layout\n}\nexec echo '$name' $$name \\$name $HOME\nset $forward $later\nset $later resolved\nexec echo $forward\n";
         let text = expand_variables("test", source).expect("expand");
-        let syntax = parse("test", &text).expect("syntax");
+        let syntax = crate::parse_source("test", &text).expect("syntax");
         assert_eq!(
             syntax.statements()[0].block().expect("block").statements()[0]
                 .header()

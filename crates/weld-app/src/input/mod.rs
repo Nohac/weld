@@ -6,6 +6,8 @@
 //! retains that target and forwards unconsumed raw events to Smithay at input
 //! pace. Smithay resources never enter the application world.
 
+#[cfg(test)]
+use weld_input_config::PointerShortcutModifiers;
 mod ingress;
 mod projection;
 mod routing;
@@ -59,8 +61,7 @@ pub use weld_input::{
 };
 pub use weld_input::{KeyboardRepeatMode, KeyboardSettings, LegacyKeyRepeat};
 pub use weld_input::{
-    PointerShortcut, PointerShortcutAppExt, PointerShortcutId, PointerShortcutModifiers,
-    PointerShortcutPressed,
+    PointerShortcut, PointerShortcutAppExt, PointerShortcutId, PointerShortcutPressed,
 };
 
 /// Collect configured shell effects.
@@ -92,7 +93,7 @@ impl Plugin for InputBridgePlugin {
     fn build(&self, app: &mut App) {
         state::register(app);
         weld_input::register_keyboard_settings(app);
-        app.init_resource::<weld_input::PointerDeviceSettings>();
+        app.init_resource::<weld_input_config::PointerDeviceSettings>();
         projection::register(app, self.targets.clone());
         routing::register(app);
     }

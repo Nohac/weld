@@ -1,15 +1,20 @@
 //! Opinionated server-side decorations built from Weld window primitives.
 
 use std::collections::HashSet;
+#[cfg(test)]
+use style::BorderGeometry;
+use weld_ssd_config::BorderStyle;
+#[cfg(test)]
+use weld_tile_config::{SplitAxis, TileOperation};
+#[cfg(test)]
+use weld_window_config::{FullscreenAction, FullscreenMode, PersistenceAction, PersistenceMatch};
 
 mod content_background;
 mod persistence_notice;
 mod style;
 mod vacant;
 use style::FrameGeometry;
-pub use style::{
-    BorderRequest, BorderStyle, FrameColors, SsdSettings, TitleFont, WindowBorderStyle,
-};
+pub use style::{BorderRequest, FrameColors, SsdSettings, TitleFont, WindowBorderStyle};
 
 const PROFILE_TARGET: &str = "weld_profile";
 
@@ -57,9 +62,10 @@ use weld_window_ui::{WindowFramePolicy, surface_content_with_node};
 const INNER_BORDER_RADIUS: f32 = 6.0;
 const HEADER_HEIGHT: f32 = 30.0;
 const RESIZE_GRAB_EXTENT: f32 = 12.0;
-const FOCUSED_BORDER: Color = Color::srgb(0.35, 0.58, 0.88);
 const UNFOCUSED_BORDER: Color = Color::srgb(0.28, 0.34, 0.42);
+#[cfg(test)]
 const RELOCATED_FOCUSED_BORDER: Color = Color::srgb(0.92, 0.18, 0.16);
+#[cfg(test)]
 const RELOCATED_UNFOCUSED_BORDER: Color = Color::srgb(0.58, 0.12, 0.12);
 
 #[derive(Component, Clone, Copy, Debug)]
@@ -1184,9 +1190,7 @@ mod tests {
 
     #[test]
     fn fullscreen_configures_content_and_restores_floating_frame_without_size_drift() {
-        use weld_window::fullscreen::{
-            FullscreenAction, FullscreenMode, FullscreenPlugin, FullscreenRequest,
-        };
+        use weld_window::fullscreen::{FullscreenPlugin, FullscreenRequest};
         let mut app = test_app();
         app.add_plugins(FullscreenPlugin);
         let surface = SurfaceId::for_test(108);
@@ -1277,18 +1281,15 @@ mod tests {
     #[test]
     fn persistent_placeholder_fullscreens_and_restores_without_an_occupant() {
         use weld_window::fullscreen::{
-            FullscreenAction, FullscreenMode, FullscreenOccluded, FullscreenOutput,
-            FullscreenPlugin, FullscreenRequest,
+            FullscreenOccluded, FullscreenOutput, FullscreenPlugin, FullscreenRequest,
         };
-        use weld_window::persistence::{
-            PersistenceAction, PersistenceMatch, WindowPersistenceRequest,
-        };
+        use weld_window::persistence::WindowPersistenceRequest;
 
         for (layout, floating) in [
             (None, false),
             (None, true),
-            (Some(weld_tile::TileLayout::Tabbed), false),
-            (Some(weld_tile::TileLayout::Stacked), false),
+            (Some(weld_tile_config::TileLayout::Tabbed), false),
+            (Some(weld_tile_config::TileLayout::Stacked), false),
         ] {
             let mut app = if floating {
                 test_app()
@@ -1472,8 +1473,8 @@ mod tests {
         app.world_mut()
             .trigger(weld_window::persistence::WindowPersistenceRequest {
                 window: Some(window),
-                action: weld_window::persistence::PersistenceAction::Enable(
-                    weld_window::persistence::PersistenceMatch::Auto,
+                action: weld_window_config::PersistenceAction::Enable(
+                    weld_window_config::PersistenceMatch::Auto,
                 ),
             });
         app.update();
@@ -1666,7 +1667,7 @@ mod tests {
         app.world_mut()
             .trigger(weld_window::persistence::WindowPersistenceRequest {
                 window: Some(window),
-                action: weld_window::persistence::PersistenceAction::Disable,
+                action: weld_window_config::PersistenceAction::Disable,
             });
         app.update();
         assert!(app.world().get_entity(window).is_err());
@@ -1675,9 +1676,7 @@ mod tests {
 
     #[test]
     fn persistence_toggle_notice_shows_the_rule_without_changing_focus_and_expires() {
-        use weld_window::persistence::{
-            PersistenceAction, PersistenceMatch, WindowPersistenceRequest,
-        };
+        use weld_window::persistence::WindowPersistenceRequest;
         let mut app = tiled_test_app();
         app.world_mut().resource_mut::<SsdSettings>().corner_radius = 14;
         let surface = SurfaceId::for_test(717);
@@ -1768,8 +1767,8 @@ mod tests {
     #[test]
     fn new_group_members_have_their_final_frame_on_the_first_update() {
         for layout in [
-            weld_tile::TileLayout::Tabbed,
-            weld_tile::TileLayout::Stacked,
+            weld_tile_config::TileLayout::Tabbed,
+            weld_tile_config::TileLayout::Stacked,
         ] {
             for decoration in [WindowDecoration::ServerSide, WindowDecoration::ClientSide] {
                 let mut app = tiled_test_app();
@@ -1852,7 +1851,7 @@ mod tests {
             .entity();
         app.world_mut().trigger(weld_tile::TileSetLayout {
             container,
-            layout: weld_tile::TileLayout::Tabbed,
+            layout: weld_tile_config::TileLayout::Tabbed,
         });
         app.update();
         app.update();
@@ -1881,7 +1880,7 @@ mod tests {
         );
         app.world_mut().trigger(weld_tile::TileSetLayout {
             container,
-            layout: weld_tile::TileLayout::Split(weld_tile::SplitAxis::Horizontal),
+            layout: weld_tile_config::TileLayout::Split(weld_tile_config::SplitAxis::Horizontal),
         });
         app.update();
         app.update();
@@ -1926,7 +1925,7 @@ mod tests {
                     .entity();
                 app.world_mut().trigger(weld_tile::TileSetLayout {
                     container,
-                    layout: weld_tile::TileLayout::Tabbed,
+                    layout: weld_tile_config::TileLayout::Tabbed,
                 });
             }
             app.update();
@@ -2007,7 +2006,7 @@ mod tests {
             .entity();
         app.world_mut().trigger(weld_tile::TileSetLayout {
             container,
-            layout: weld_tile::TileLayout::Tabbed,
+            layout: weld_tile_config::TileLayout::Tabbed,
         });
         app.update();
         app.update();
@@ -2024,7 +2023,7 @@ mod tests {
         );
         app.world_mut().trigger(weld_tile::TileSetLayout {
             container,
-            layout: weld_tile::TileLayout::Split(weld_tile::SplitAxis::Horizontal),
+            layout: weld_tile_config::TileLayout::Split(weld_tile_config::SplitAxis::Horizontal),
         });
         app.update();
         app.update();
@@ -2038,7 +2037,7 @@ mod tests {
 
     #[test]
     fn focused_split_edge_updates_in_place_and_leaves_other_borders_alone() {
-        use weld_tile::{SplitAxis, TileOperation, TileRequest};
+        use weld_tile::TileRequest;
         let mut app = tiled_test_app();
         {
             let mut settings = app.world_mut().resource_mut::<SsdSettings>();
@@ -2392,7 +2391,7 @@ mod tests {
             settings.tiled = BorderStyle::Pixel(4);
         }
         app.world_mut()
-            .resource_mut::<weld_tile::TileSettings>()
+            .resource_mut::<weld_tile_config::TileSettings>()
             .hide_solo_gaps = true;
         let lookup = |app: &mut App, surface| {
             app.world_mut()
@@ -3675,8 +3674,8 @@ mod tests {
         app.world_mut()
             .trigger(weld_window::fullscreen::FullscreenRequest {
                 window: Some(owner),
-                action: weld_window::fullscreen::FullscreenAction::Enable(
-                    weld_window::fullscreen::FullscreenMode::Normal,
+                action: weld_window_config::FullscreenAction::Enable(
+                    weld_window_config::FullscreenMode::Normal,
                 ),
             });
         app.update();

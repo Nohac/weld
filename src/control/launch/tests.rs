@@ -8,11 +8,13 @@ use weld_app::{
     },
 };
 use weld_client::{ClientProvenance, ClientSurfaceMetadata};
-use weld_i3_quirks::{I3QuirksPlugin, workspace::I3WorkspaceRequest};
+use weld_i3_config::I3WorkspaceRequest;
+use weld_i3_quirks::I3QuirksPlugin;
 use weld_window::{
     FocusedWindow, ManagedBy, OccupiesWindow, PrimaryWindowPresentation, WindowHeaderRequested,
     WindowOccupant, WindowOutput, WindowPlugin, workspace::WorkspaceMember,
 };
+use weld_window_config::{PersistenceAction, PersistenceMatch};
 
 fn fixture() -> (App, mpsc::SyncSender<LaunchMessage>) {
     let (sender, receiver) = mpsc::sync_channel(32);
@@ -342,10 +344,7 @@ fn rejected_launch_retires_its_policy_and_expired_preparation_never_grants() {
 
 #[test]
 fn persistent_match_keeps_its_frame_and_unrelated_replacement_clears_launch_identity() {
-    use weld_window::{
-        WindowOccupant,
-        persistence::{PersistenceAction, PersistenceMatch, WindowPersistenceRequest},
-    };
+    use weld_window::{WindowOccupant, persistence::WindowPersistenceRequest};
     let (mut app, sender) = fixture();
     let slot = map(&mut app, 1, None);
     let workspace = app

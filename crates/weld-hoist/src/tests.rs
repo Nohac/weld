@@ -5,6 +5,8 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use weld_ssd_config::BorderStyle;
+use weld_window_config::{FullscreenAction, FullscreenMode};
 
 use bevy::{
     app::App,
@@ -34,10 +36,8 @@ use weld_client::{
     ClientSurfaceMetadata, ClientSurfaceRole, ToplevelLayout, ToplevelState,
 };
 use weld_float::FloatPlugin;
-use weld_ssd::{BorderStyle, SsdPlugin, SsdSettings, WindowShellContent};
-use weld_window::fullscreen::{
-    FullscreenAction, FullscreenMode, FullscreenPlugin, FullscreenRequest,
-};
+use weld_ssd::{SsdPlugin, SsdSettings, WindowShellContent};
+use weld_window::fullscreen::{FullscreenPlugin, FullscreenRequest};
 use weld_window::{
     ClientResizeState, OccupiesWindow, PrimaryWindowPresentation, TiledWindow, WindowAdmissionHold,
     WindowCommand, WindowCommandKind, WindowGeometry, WindowInteractionKind,
@@ -1678,8 +1678,8 @@ fn persistent_source_returns_to_a_matchable_slot_after_remote_close() {
     app.world_mut()
         .trigger(weld_window::persistence::WindowPersistenceRequest {
             window: Some(source_window),
-            action: weld_window::persistence::PersistenceAction::Enable(
-                weld_window::persistence::PersistenceMatch::Auto,
+            action: weld_window_config::PersistenceAction::Enable(
+                weld_window_config::PersistenceMatch::Auto,
             ),
         });
     let (session, _) = begin_hoist(

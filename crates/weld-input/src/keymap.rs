@@ -3,30 +3,9 @@
 use crate::{KeyboardKeyState, LinuxKeycode, RawSeatEvent, RawSeatEventKind, SeatModifiers};
 use anyhow::{Context, Result, ensure};
 use std::{collections::HashSet, fmt, sync::Arc};
+use weld_input_config::KeymapConfig;
 use winit::keyboard::{Key, NamedKey, NativeKey};
 use xkbcommon::xkb::{self, keysyms};
-
-/// XKB rules, model, layout, variant and options selected by configuration.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct KeymapConfig {
-    pub rules: String,
-    pub model: String,
-    pub layout: String,
-    pub variant: String,
-    pub options: String,
-}
-
-impl Default for KeymapConfig {
-    fn default() -> Self {
-        Self {
-            rules: String::new(),
-            model: String::new(),
-            layout: "us".into(),
-            variant: String::new(),
-            options: String::new(),
-        }
-    }
-}
 
 /// Validated, owned XKB text shared by the shell interpreter and native clients.
 #[derive(Clone, Eq, PartialEq)]

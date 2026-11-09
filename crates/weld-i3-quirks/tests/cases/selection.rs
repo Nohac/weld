@@ -1,7 +1,8 @@
 //! Parent/child selection over nested splits, following i3's focus vocabulary.
 use super::*;
 use bevy::ecs::{observer::On, resource::Resource, system::ResMut};
-use weld_i3_quirks::{I3FocusHierarchy, I3MoveRequest, I3StickyRequest};
+use weld_i3_config::I3FocusHierarchy;
+use weld_i3_quirks::{I3MoveRequest, I3StickyRequest};
 use weld_tile::TileSelection;
 use weld_window::workspace::{FocusedWorkspace, WorkspaceMember};
 use weld_window::{

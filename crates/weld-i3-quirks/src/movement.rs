@@ -10,10 +10,8 @@ use bevy::ecs::{
     observer::On,
     system::{Commands, Query, Res, ResMut},
 };
-use weld_tile::{
-    Direction, SplitAxis, TileCommands, TileContainer, TileParent, TileSelection, TileSide,
-    TileTreeEdit,
-};
+use weld_tile::{TileCommands, TileContainer, TileParent, TileSelection, TileSide, TileTreeEdit};
+use weld_tile_config::{Direction, SplitAxis};
 use weld_window::FocusedWindow;
 
 use crate::{I3MoveRequest, tree::TreeView};

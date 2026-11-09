@@ -1,6 +1,7 @@
 //! Persistent window slots matched to replacement clients within a session.
 
 use std::collections::HashSet;
+use weld_window_config::{PersistenceAction, PersistenceMatch};
 
 use bevy::{
     ecs::{
@@ -20,26 +21,6 @@ use weld_client::{ClientSourceId, ClientSurfaceMetadata, ToplevelKind};
 use crate::{
     FocusedWindow, ManagedWindow, WindowClientResolver, WindowOccupant, WindowPresentationOverride,
 };
-
-/// Identifier captured from the current occupant for exact replacement matching.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum PersistenceMatch {
-    /// Native app ID, or X11 class and instance; title is the final fallback.
-    #[default]
-    Auto,
-    AppId,
-    Class,
-    Instance,
-    Title,
-}
-
-/// Enable captures the occupant identity once; toggle enables or disables retention.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PersistenceAction {
-    Enable(PersistenceMatch),
-    Disable,
-    Toggle(PersistenceMatch),
-}
 
 /// Change an explicit window's persistence, or the focused window when omitted.
 #[derive(Event, Clone, Copy, Debug)]

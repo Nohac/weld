@@ -1204,7 +1204,7 @@ impl HostPolicy for AppShell {
     fn take_keyboard_settings(&mut self) -> Option<weld_input::KeyboardSettings> {
         self.keyboard_settings.take(self.app.world())
     }
-    fn take_pointer_device_settings(&mut self) -> Option<weld_input::PointerDeviceSettings> {
+    fn take_pointer_device_settings(&mut self) -> Option<weld_input_config::PointerDeviceSettings> {
         self.pointer_device_settings.take(self.app.world())
     }
 

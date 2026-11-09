@@ -21,7 +21,8 @@ use bevy::{
 };
 use std::collections::HashMap;
 use weld_ssd::WindowFrameColors;
-use weld_tile::{SplitAxis, TileGeometry, TileLayout};
+use weld_tile::TileGeometry;
+use weld_tile_config::{SplitAxis, TileLayout};
 use weld_window::WindowGeometry;
 
 #[derive(Component, Clone, PartialEq)]

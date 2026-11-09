@@ -6,43 +6,24 @@ use bevy::{
     text::{FontSource, FontStyle, FontWeight, FontWidth, TextFont},
     ui::BorderRadius,
 };
+use weld_ssd_config::{BorderStyle, FontFamily, FontSlant};
 use weld_window::{PresentationInsets, ServerFrameRequested};
 
-/// The shell-owned frame surrounding client content.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum BorderStyle {
-    Normal(u16),
-    Pixel(u16),
-    None,
+pub(crate) trait BorderGeometry {
+    fn header(self) -> f32;
+    fn insets(self) -> PresentationInsets;
 }
-
-impl BorderStyle {
-    pub fn width(self) -> f32 {
-        match self {
-            Self::Normal(width) | Self::Pixel(width) => f32::from(width.min(64)),
-            Self::None => 0.0,
-        }
-    }
-    pub(crate) fn header(self) -> f32 {
+impl BorderGeometry for BorderStyle {
+    fn header(self) -> f32 {
         if matches!(self, Self::Normal(_)) {
             super::HEADER_HEIGHT
         } else {
             0.0
         }
     }
-    pub(crate) fn insets(self) -> PresentationInsets {
+    fn insets(self) -> PresentationInsets {
         let border = self.width();
         PresentationInsets::new(border, border + self.header(), border, border)
-    }
-    pub(crate) fn toggle(self, default: Self) -> Self {
-        match self {
-            Self::Normal(width) => Self::Pixel(width),
-            Self::Pixel(_) => Self::None,
-            Self::None => match default {
-                Self::Normal(width) | Self::Pixel(width) => Self::Normal(width),
-                Self::None => Self::Normal(3),
-            },
-        }
     }
 }
 
@@ -100,24 +81,41 @@ pub struct SsdSettings {
 
 impl Default for SsdSettings {
     fn default() -> Self {
+        weld_ssd_config::DecorationSettings::default().into()
+    }
+}
+impl From<weld_ssd_config::DecorationSettings> for SsdSettings {
+    fn from(value: weld_ssd_config::DecorationSettings) -> Self {
         Self {
-            title_font: TitleFont::default(),
-            tiled: BorderStyle::Normal(3),
-            floating: BorderStyle::Normal(3),
-            hide_solo_border: false,
-            corner_radius: 9,
-            focused: FrameColors::from_border(super::FOCUSED_BORDER),
-            focused_inactive: FrameColors::from_border(super::UNFOCUSED_BORDER),
-            unfocused: FrameColors::from_border(super::UNFOCUSED_BORDER),
-            urgent: FrameColors::from_border(Color::srgb(0.94, 0.27, 0.27)),
-            placeholder: FrameColors::from_border(super::UNFOCUSED_BORDER),
-            persistent_focused: FrameColors {
-                indicator: Color::srgb(0.8, 1.0, 0.95),
-                ..FrameColors::from_border(Color::srgb(0.18, 0.83, 0.75))
-            },
-            persistent_unfocused: FrameColors::from_border(Color::srgb(0.08, 0.48, 0.43)),
-            relocated_focused: FrameColors::from_border(super::RELOCATED_FOCUSED_BORDER),
-            relocated_unfocused: FrameColors::from_border(super::RELOCATED_UNFOCUSED_BORDER),
+            title_font: value.title_font.clone().into(),
+            tiled: value.tiled,
+            floating: value.floating,
+            hide_solo_border: value.hide_solo_border,
+            corner_radius: value.corner_radius,
+            focused: value.focused.into(),
+            focused_inactive: value.focused_inactive.into(),
+            unfocused: value.unfocused.into(),
+            urgent: value.urgent.into(),
+            placeholder: value.placeholder.into(),
+            persistent_focused: value.persistent_focused.into(),
+            persistent_unfocused: value.persistent_unfocused.into(),
+            relocated_focused: value.relocated_focused.into(),
+            relocated_unfocused: value.relocated_unfocused.into(),
+        }
+    }
+}
+impl From<weld_ssd_config::FrameColors> for FrameColors {
+    fn from(value: weld_ssd_config::FrameColors) -> Self {
+        let color = |value: weld_ssd_config::Rgba| {
+            let [r, g, b, a] = value.0;
+            Color::srgba(r, g, b, a)
+        };
+        Self {
+            border: color(value.border),
+            background: color(value.background),
+            foreground: color(value.foreground),
+            indicator: color(value.indicator),
+            child_border: color(value.child_border),
         }
     }
 }
@@ -134,12 +132,27 @@ pub struct TitleFont {
 
 impl Default for TitleFont {
     fn default() -> Self {
+        weld_ssd_config::FontSettings::default().into()
+    }
+}
+impl From<weld_ssd_config::FontSettings> for TitleFont {
+    fn from(value: weld_ssd_config::FontSettings) -> Self {
         Self {
-            family: FontSource::sans_serif(),
-            size: 14.0,
-            weight: FontWeight::NORMAL,
-            style: FontStyle::Normal,
-            width: FontWidth::NORMAL,
+            family: match value.family {
+                FontFamily::Family(name) => FontSource::Family(name.into()),
+                FontFamily::SansSerif => FontSource::sans_serif(),
+                FontFamily::Serif => FontSource::serif(),
+                FontFamily::Monospace => FontSource::monospace(),
+                FontFamily::SystemUi => FontSource::system_ui(),
+            },
+            size: value.size,
+            weight: FontWeight(value.weight.0),
+            width: FontWidth(value.width.0),
+            style: match value.style {
+                FontSlant::Normal => FontStyle::Normal,
+                FontSlant::Italic => FontStyle::Italic,
+                FontSlant::Oblique(angle) => FontStyle::Oblique(angle),
+            },
         }
     }
 }

@@ -4,10 +4,9 @@ use bevy::ecs::query::With;
 use indoc::indoc;
 use weld_app::output::OutputInfo;
 use weld_app::workspace::{DesktopWorkspaceActivation, DesktopWorkspaceId};
-use weld_i3_quirks::{
-    config,
-    workspace::{I3WorkspaceRequest, WorkspaceTarget},
-};
+use weld_i3_config::{I3WorkspaceRequest, WorkspaceTarget};
+use weld_master_config as config;
+
 use weld_window::workspace::{
     FocusedWorkspace, OutputWorkspaces, Workspace, WorkspaceMember, WorkspaceOutput,
     WorkspaceRequest, WorkspaceWindows,
@@ -16,7 +15,9 @@ use weld_window::workspace_protocol::WorkspaceProtocolPlugin;
 use weld_window::{OccupiesWindow, WindowOutput, WindowPresentationOverride, WindowVisibility};
 
 fn parse_config(name: &str, source: &str) -> anyhow::Result<config::Configuration> {
-    config::parse_with_extensions(name, source, |_| anyhow::bail!("unsupported i3 command"))
+    weld_sway_adapter::parse_with_extensions(name, source, |_| {
+        anyhow::bail!("unsupported i3 command")
+    })
 }
 
 #[test]

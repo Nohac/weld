@@ -11,9 +11,8 @@ use bevy::{
     },
     window::RequestRedraw,
 };
-use weld_tile::{
-    Direction, SplitAxis, TileCommands, TileParent, TileSelect, TileSelection, TileTreeChanged,
-};
+use weld_tile::{TileCommands, TileParent, TileSelect, TileSelection, TileTreeChanged};
+use weld_tile_config::{Direction, SplitAxis};
 use weld_window::{
     FloatingWindow, FocusedWindow, ManagedWindow, WindowCommand, WindowCommandKind,
     WindowFocusChanged,

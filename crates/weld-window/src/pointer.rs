@@ -41,7 +41,7 @@ use bevy::{
 };
 use std::collections::{HashMap, HashSet};
 use weld_app::{
-    input::{PointerShortcut, PointerShortcutId, PointerShortcutModifiers, PointerShortcutPressed},
+    input::{PointerShortcut, PointerShortcutId, PointerShortcutPressed},
     output::{OutputPosition, WeldOutput},
     surface::{
         ClientDecorated, ClientToplevel, MappedSurface, ToplevelInteractionRequest,
@@ -51,14 +51,7 @@ use weld_app::{
 use weld_input::{
     PointerShortcutRegistry, PointerShortcutSet, PublishedPointerTarget, register_pointer_shortcuts,
 };
-
-/// Live compositor pointer chords and focus policy, configured by the distribution.
-#[derive(Resource, Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct WindowPointerSettings {
-    pub modifier: Option<PointerShortcutModifiers>,
-    /// Focus a window when mouse motion enters it, preserving its stacking order.
-    pub focus_follows_mouse: bool,
-}
+use weld_window_config::WindowPointerSettings;
 
 /// A picked handle/chord or host-validated native grab offered to the manager.
 /// The manager checks window ownership and support for the requested operation.

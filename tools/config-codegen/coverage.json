@@ -1,0 +1,1705 @@
+{
+  "revision": "903bcd518df32b0e055b17f5da3f988a0187fd3d",
+  "note": "Adapted states may cover only Weld's existing subset; reference-only states add no executable support.",
+  "states": [
+    {
+      "state": "config.spec:INITIAL",
+      "line": 14,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:IGNORE_LINE",
+      "line": 67,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:GAPS",
+      "line": 72,
+      "disposition": "adapted",
+      "owners": [
+        "Setting"
+      ],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:GAPS_WITH_SCOPE",
+      "line": 76,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:GAPS_END",
+      "line": 80,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_gaps"
+      ]
+    },
+    {
+      "state": "config.spec:SMART_BORDERS",
+      "line": 88,
+      "disposition": "adapted",
+      "owners": [
+        "Setting"
+      ],
+      "callbacks": [
+        "cfg_smart_borders"
+      ]
+    },
+    {
+      "state": "config.spec:SMART_GAPS",
+      "line": 95,
+      "disposition": "adapted",
+      "owners": [
+        "Setting"
+      ],
+      "callbacks": [
+        "cfg_smart_gaps"
+      ]
+    },
+    {
+      "state": "config.spec:INCLUDE",
+      "line": 104,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_include"
+      ]
+    },
+    {
+      "state": "config.spec:FLOATING_MINIMUM_SIZE_WIDTH",
+      "line": 109,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:FLOATING_MINIMUM_SIZE_X",
+      "line": 113,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:FLOATING_MINIMUM_SIZE_HEIGHT",
+      "line": 117,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_floating_minimum_size"
+      ]
+    },
+    {
+      "state": "config.spec:FLOATING_MAXIMUM_SIZE_WIDTH",
+      "line": 122,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:FLOATING_MAXIMUM_SIZE_X",
+      "line": 126,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:FLOATING_MAXIMUM_SIZE_HEIGHT",
+      "line": 130,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_floating_maximum_size"
+      ]
+    },
+    {
+      "state": "config.spec:FLOATING_MODIFIER",
+      "line": 135,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_floating_modifier"
+      ]
+    },
+    {
+      "state": "config.spec:TILING_DRAG_SWAP_MODIFIER",
+      "line": 144,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_tiling_drag_swap_modifier"
+      ]
+    },
+    {
+      "state": "config.spec:DEFAULT_ORIENTATION",
+      "line": 153,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_default_orientation"
+      ]
+    },
+    {
+      "state": "config.spec:WORKSPACE_LAYOUT",
+      "line": 158,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_workspace_layout"
+      ]
+    },
+    {
+      "state": "config.spec:DEFAULT_BORDER",
+      "line": 164,
+      "disposition": "adapted",
+      "owners": [
+        "Setting"
+      ],
+      "callbacks": [
+        "cfg_default_border"
+      ]
+    },
+    {
+      "state": "config.spec:DEFAULT_BORDER_PIXELS",
+      "line": 170,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_default_border"
+      ]
+    },
+    {
+      "state": "config.spec:DEFAULT_BORDER_PIXELS_PX",
+      "line": 176,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_default_border"
+      ]
+    },
+    {
+      "state": "config.spec:HIDE_EDGE_BORDERS",
+      "line": 184,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_hide_edge_borders"
+      ]
+    },
+    {
+      "state": "config.spec:FOR_WINDOW",
+      "line": 191,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_criteria_init"
+      ]
+    },
+    {
+      "state": "config.spec:FOR_WINDOW_COMMAND",
+      "line": 195,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_for_window"
+      ]
+    },
+    {
+      "state": "config.spec:ASSIGN",
+      "line": 200,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_criteria_init"
+      ]
+    },
+    {
+      "state": "config.spec:ASSIGN_WORKSPACE",
+      "line": 204,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_assign"
+      ]
+    },
+    {
+      "state": "config.spec:ASSIGN_OUTPUT",
+      "line": 216,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_assign_output"
+      ]
+    },
+    {
+      "state": "config.spec:ASSIGN_WORKSPACE_NUMBER",
+      "line": 220,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_assign"
+      ]
+    },
+    {
+      "state": "config.spec:NO_FOCUS",
+      "line": 225,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_criteria_init"
+      ]
+    },
+    {
+      "state": "config.spec:NO_FOCUS_END",
+      "line": 229,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_no_focus"
+      ]
+    },
+    {
+      "state": "config.spec:CRITERIA",
+      "line": 234,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_criteria_add",
+        "cfg_criteria_pop_state"
+      ]
+    },
+    {
+      "state": "config.spec:CRITERION",
+      "line": 253,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:CRITERION_FROM",
+      "line": 256,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:CRITERION_FROM_STR_START",
+      "line": 259,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_criteria_add"
+      ]
+    },
+    {
+      "state": "config.spec:CRITERION_FROM_STR",
+      "line": 264,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:CRITERION_FROM_STR_END",
+      "line": 268,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_criteria_add"
+      ]
+    },
+    {
+      "state": "config.spec:CRITERION_STR",
+      "line": 272,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_criteria_add"
+      ]
+    },
+    {
+      "state": "config.spec:FOCUS_FOLLOWS_MOUSE",
+      "line": 277,
+      "disposition": "adapted",
+      "owners": [
+        "Setting"
+      ],
+      "callbacks": [
+        "cfg_focus_follows_mouse"
+      ]
+    },
+    {
+      "state": "config.spec:MOUSE_WARPING",
+      "line": 282,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_mouse_warping"
+      ]
+    },
+    {
+      "state": "config.spec:FOCUS_WRAPPING",
+      "line": 287,
+      "disposition": "adapted",
+      "owners": [
+        "Setting"
+      ],
+      "callbacks": [
+        "cfg_focus_wrapping"
+      ]
+    },
+    {
+      "state": "config.spec:FORCE_FOCUS_WRAPPING",
+      "line": 292,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_force_focus_wrapping"
+      ]
+    },
+    {
+      "state": "config.spec:FORCE_XINERAMA",
+      "line": 297,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_force_xinerama"
+      ]
+    },
+    {
+      "state": "config.spec:DISABLE_RANDR15",
+      "line": 302,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_disable_randr15"
+      ]
+    },
+    {
+      "state": "config.spec:WORKSPACE_BACK_AND_FORTH",
+      "line": 307,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_workspace_back_and_forth"
+      ]
+    },
+    {
+      "state": "config.spec:FAKE_OUTPUTS",
+      "line": 313,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_fake_outputs"
+      ]
+    },
+    {
+      "state": "config.spec:FORCE_DISPLAY_URGENCY_HINT",
+      "line": 318,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:TITLE_ALIGN",
+      "line": 323,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_title_align"
+      ]
+    },
+    {
+      "state": "config.spec:SHOW_MARKS",
+      "line": 328,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_show_marks"
+      ]
+    },
+    {
+      "state": "config.spec:FORCE_DISPLAY_URGENCY_HINT_MS",
+      "line": 332,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_force_display_urgency_hint"
+      ]
+    },
+    {
+      "state": "config.spec:FOCUS_ON_WINDOW_ACTIVATION",
+      "line": 339,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_focus_on_window_activation"
+      ]
+    },
+    {
+      "state": "config.spec:WORKSPACE",
+      "line": 345,
+      "disposition": "adapted",
+      "owners": [
+        "Setting"
+      ],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:WORKSPACE_COMMAND",
+      "line": 349,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:WORKSPACE_OUTPUT_WORD",
+      "line": 355,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_workspace"
+      ]
+    },
+    {
+      "state": "config.spec:IPC_SOCKET",
+      "line": 362,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_ipc_socket"
+      ]
+    },
+    {
+      "state": "config.spec:IPC_KILL_TIMEOUT",
+      "line": 367,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_ipc_kill_timeout"
+      ]
+    },
+    {
+      "state": "config.spec:RESTART_STATE",
+      "line": 372,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_restart_state"
+      ]
+    },
+    {
+      "state": "config.spec:POPUP_DURING_FULLSCREEN",
+      "line": 377,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_popup_during_fullscreen"
+      ]
+    },
+    {
+      "state": "config.spec:TILING_DRAG_MODE",
+      "line": 381,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_tiling_drag"
+      ]
+    },
+    {
+      "state": "config.spec:TILING_DRAG",
+      "line": 387,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_tiling_drag"
+      ]
+    },
+    {
+      "state": "config.spec:COLOR_SINGLE",
+      "line": 396,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_color_single"
+      ]
+    },
+    {
+      "state": "config.spec:COLOR_BORDER",
+      "line": 401,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:COLOR_BACKGROUND",
+      "line": 405,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:COLOR_TEXT",
+      "line": 409,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:COLOR_INDICATOR",
+      "line": 413,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_color"
+      ]
+    },
+    {
+      "state": "config.spec:COLOR_CHILD_BORDER",
+      "line": 419,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_color"
+      ]
+    },
+    {
+      "state": "config.spec:EXEC",
+      "line": 426,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_exec"
+      ]
+    },
+    {
+      "state": "config.spec:FONT",
+      "line": 433,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_font"
+      ]
+    },
+    {
+      "state": "config.spec:BINDING",
+      "line": 438,
+      "disposition": "adapted",
+      "owners": [
+        "Binding"
+      ],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:BINDCOMMAND",
+      "line": 454,
+      "disposition": "adapted",
+      "owners": [
+        "Binding"
+      ],
+      "callbacks": [
+        "cfg_binding"
+      ]
+    },
+    {
+      "state": "config.spec:MODENAME",
+      "line": 470,
+      "disposition": "adapted",
+      "owners": [
+        "ModeHeader"
+      ],
+      "callbacks": [
+        "cfg_enter_mode"
+      ]
+    },
+    {
+      "state": "config.spec:MODEBRACE",
+      "line": 476,
+      "disposition": "adapted",
+      "owners": [
+        "ModeHeader"
+      ],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:MODE",
+      "line": 482,
+      "disposition": "adapted",
+      "owners": [
+        "Binding"
+      ],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:MODE_IGNORE_LINE",
+      "line": 493,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:MODE_BINDING",
+      "line": 497,
+      "disposition": "adapted",
+      "owners": [
+        "Binding"
+      ],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:MODE_BINDCOMMAND",
+      "line": 513,
+      "disposition": "adapted",
+      "owners": [
+        "Binding"
+      ],
+      "callbacks": [
+        "cfg_mode_binding"
+      ]
+    },
+    {
+      "state": "config.spec:BARBRACE",
+      "line": 529,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_start"
+      ]
+    },
+    {
+      "state": "config.spec:BAR",
+      "line": 535,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_finish"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_IGNORE_LINE",
+      "line": 570,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:BAR_BAR_COMMAND",
+      "line": 574,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_i3bar_command"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_STATUS_COMMAND",
+      "line": 578,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_status_command"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_WORKSPACE_COMMAND",
+      "line": 582,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_workspace_command"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_SOCKET_PATH",
+      "line": 586,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_socket_path"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_MODE",
+      "line": 590,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_mode"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_HIDDEN_STATE",
+      "line": 594,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_hidden_state"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_ID",
+      "line": 598,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_id"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_MODIFIER",
+      "line": 602,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_modifier"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_WHEEL_UP_CMD",
+      "line": 612,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_wheel_up_cmd"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_WHEEL_DOWN_CMD",
+      "line": 616,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_wheel_down_cmd"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_BINDSYM",
+      "line": 620,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:BAR_BINDSYM_COMMAND",
+      "line": 626,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_bindsym"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_POSITION",
+      "line": 632,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_position"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_OUTPUT",
+      "line": 636,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_output"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_TRAY_OUTPUT",
+      "line": 640,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_tray_output"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_TRAY_PADDING",
+      "line": 644,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:BAR_TRAY_PADDING_PX",
+      "line": 648,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_tray_padding"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_FONT",
+      "line": 654,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_font"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_SEPARATOR_SYMBOL",
+      "line": 658,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_separator_symbol"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_BINDING_MODE_INDICATOR",
+      "line": 662,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_binding_mode_indicator"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_WORKSPACE_BUTTONS",
+      "line": 666,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_workspace_buttons"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_WORKSPACE_MIN_WIDTH",
+      "line": 670,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:BAR_WORKSPACE_MIN_WIDTH_PX",
+      "line": 674,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_workspace_min_width"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_STRIP_WORKSPACE_NUMBERS",
+      "line": 680,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_strip_workspace_numbers"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_STRIP_WORKSPACE_NAME",
+      "line": 684,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_strip_workspace_name"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_VERBOSE",
+      "line": 688,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_verbose"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_HEIGHT",
+      "line": 692,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_height"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_PADDING",
+      "line": 696,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:BAR_PADDING_TOP",
+      "line": 700,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_padding_one"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_PADDING_RIGHT",
+      "line": 708,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_padding_two"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_PADDING_BOTTOM",
+      "line": 716,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_padding_three"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_PADDING_LEFT",
+      "line": 724,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_padding_four"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_COLORS_BRACE",
+      "line": 730,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:BAR_COLORS",
+      "line": 736,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:BAR_COLORS_IGNORE_LINE",
+      "line": 748,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:BAR_COLORS_SINGLE",
+      "line": 752,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_color_single"
+      ]
+    },
+    {
+      "state": "config.spec:BAR_COLORS_BORDER",
+      "line": 756,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:BAR_COLORS_BACKGROUND",
+      "line": 760,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "config.spec:BAR_COLORS_TEXT",
+      "line": 764,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cfg_bar_color"
+      ]
+    },
+    {
+      "state": "commands.spec:INITIAL",
+      "line": 12,
+      "disposition": "adapted",
+      "owners": [
+        "Command"
+      ],
+      "callbacks": [
+        "cmd_criteria_init",
+        "cmd_exit",
+        "cmd_open",
+        "cmd_reload",
+        "cmd_restart"
+      ]
+    },
+    {
+      "state": "commands.spec:CRITERIA",
+      "line": 48,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_criteria_add",
+        "cmd_criteria_match_windows"
+      ]
+    },
+    {
+      "state": "commands.spec:CRITERION",
+      "line": 66,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "commands.spec:CRITERION_FROM",
+      "line": 69,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "commands.spec:CRITERION_FROM_STR_START",
+      "line": 72,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_criteria_add"
+      ]
+    },
+    {
+      "state": "commands.spec:CRITERION_FROM_STR",
+      "line": 77,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "commands.spec:CRITERION_FROM_STR_END",
+      "line": 81,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_criteria_add"
+      ]
+    },
+    {
+      "state": "commands.spec:CRITERION_STR",
+      "line": 85,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_criteria_add"
+      ]
+    },
+    {
+      "state": "commands.spec:EXEC",
+      "line": 90,
+      "disposition": "adapted",
+      "owners": [
+        "Command"
+      ],
+      "callbacks": [
+        "cmd_exec"
+      ]
+    },
+    {
+      "state": "commands.spec:SHMLOG",
+      "line": 97,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_shmlog"
+      ]
+    },
+    {
+      "state": "commands.spec:DEBUGLOG",
+      "line": 103,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_debuglog"
+      ]
+    },
+    {
+      "state": "commands.spec:BORDER",
+      "line": 109,
+      "disposition": "adapted",
+      "owners": [
+        "Border"
+      ],
+      "callbacks": [
+        "cmd_border"
+      ]
+    },
+    {
+      "state": "commands.spec:BORDER_WIDTH",
+      "line": 117,
+      "disposition": "adapted",
+      "owners": [
+        "Border"
+      ],
+      "callbacks": [
+        "cmd_border"
+      ]
+    },
+    {
+      "state": "commands.spec:GAPS",
+      "line": 124,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "commands.spec:GAPS_WITH_TYPE",
+      "line": 128,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "commands.spec:GAPS_WITH_SCOPE",
+      "line": 132,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "commands.spec:GAPS_WITH_MODE",
+      "line": 136,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "commands.spec:GAPS_END",
+      "line": 140,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_gaps"
+      ]
+    },
+    {
+      "state": "commands.spec:LAYOUT",
+      "line": 148,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_layout"
+      ]
+    },
+    {
+      "state": "commands.spec:LAYOUT_TOGGLE",
+      "line": 155,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_layout_toggle"
+      ]
+    },
+    {
+      "state": "commands.spec:APPEND_LAYOUT",
+      "line": 162,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_append_layout"
+      ]
+    },
+    {
+      "state": "commands.spec:WORKSPACE",
+      "line": 169,
+      "disposition": "adapted",
+      "owners": [
+        "WorkspaceTarget"
+      ],
+      "callbacks": [
+        "cmd_workspace",
+        "cmd_workspace_back_and_forth",
+        "cmd_workspace_name"
+      ]
+    },
+    {
+      "state": "commands.spec:WORKSPACE_NUMBER",
+      "line": 181,
+      "disposition": "adapted",
+      "owners": [
+        "WorkspaceTarget"
+      ],
+      "callbacks": [
+        "cmd_workspace_number"
+      ]
+    },
+    {
+      "state": "commands.spec:FOCUS",
+      "line": 191,
+      "disposition": "adapted",
+      "owners": [
+        "Direction"
+      ],
+      "callbacks": [
+        "cmd_focus",
+        "cmd_focus_direction",
+        "cmd_focus_level",
+        "cmd_focus_window_mode"
+      ]
+    },
+    {
+      "state": "commands.spec:FOCUS_AUTO",
+      "line": 207,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_focus_direction",
+        "cmd_focus_sibling"
+      ]
+    },
+    {
+      "state": "commands.spec:FOCUS_OUTPUT",
+      "line": 213,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_focus_output"
+      ]
+    },
+    {
+      "state": "commands.spec:KILL",
+      "line": 220,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_kill"
+      ]
+    },
+    {
+      "state": "commands.spec:FULLSCREEN",
+      "line": 229,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_fullscreen"
+      ]
+    },
+    {
+      "state": "commands.spec:FULLSCREEN_MODE",
+      "line": 237,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_fullscreen"
+      ]
+    },
+    {
+      "state": "commands.spec:FULLSCREEN_COMPAT",
+      "line": 243,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_fullscreen"
+      ]
+    },
+    {
+      "state": "commands.spec:STICKY",
+      "line": 250,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_sticky"
+      ]
+    },
+    {
+      "state": "commands.spec:SPLIT",
+      "line": 255,
+      "disposition": "adapted",
+      "owners": [
+        "Command"
+      ],
+      "callbacks": [
+        "cmd_split"
+      ]
+    },
+    {
+      "state": "commands.spec:FLOATING",
+      "line": 260,
+      "disposition": "adapted",
+      "owners": [
+        "Command"
+      ],
+      "callbacks": [
+        "cmd_floating"
+      ]
+    },
+    {
+      "state": "commands.spec:MARK",
+      "line": 265,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_mark"
+      ]
+    },
+    {
+      "state": "commands.spec:UNMARK",
+      "line": 274,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_unmark"
+      ]
+    },
+    {
+      "state": "commands.spec:RESIZE",
+      "line": 281,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "commands.spec:RESIZE_DIRECTION",
+      "line": 287,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "commands.spec:RESIZE_PX",
+      "line": 291,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_resize"
+      ]
+    },
+    {
+      "state": "commands.spec:RESIZE_TILING",
+      "line": 297,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_resize"
+      ]
+    },
+    {
+      "state": "commands.spec:RESIZE_TILING_OR",
+      "line": 305,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "commands.spec:RESIZE_TILING_FINAL",
+      "line": 309,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_resize"
+      ]
+    },
+    {
+      "state": "commands.spec:RESIZE_SET",
+      "line": 313,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "commands.spec:RESIZE_WIDTH",
+      "line": 321,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_resize_set"
+      ]
+    },
+    {
+      "state": "commands.spec:RESIZE_HEIGHT_GET_NUMBER",
+      "line": 331,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "commands.spec:RESIZE_HEIGHT",
+      "line": 335,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_resize_set"
+      ]
+    },
+    {
+      "state": "commands.spec:RENAME",
+      "line": 343,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "commands.spec:RENAME_WORKSPACE",
+      "line": 347,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "commands.spec:RENAME_WORKSPACE_LIKELY_TO",
+      "line": 353,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_rename_workspace"
+      ]
+    },
+    {
+      "state": "commands.spec:RENAME_WORKSPACE_LIKELY_TO_NEW_NAME",
+      "line": 359,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_rename_workspace"
+      ]
+    },
+    {
+      "state": "commands.spec:RENAME_WORKSPACE_TO",
+      "line": 365,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "commands.spec:RENAME_WORKSPACE_TO_NEW_NAME",
+      "line": 369,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_rename_workspace"
+      ]
+    },
+    {
+      "state": "commands.spec:MOVE",
+      "line": 383,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_move_scratchpad"
+      ]
+    },
+    {
+      "state": "commands.spec:MOVE_DIRECTION",
+      "line": 407,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_move_direction"
+      ]
+    },
+    {
+      "state": "commands.spec:MOVE_DIRECTION_NUMBER",
+      "line": 413,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_move_direction"
+      ]
+    },
+    {
+      "state": "commands.spec:MOVE_WORKSPACE",
+      "line": 419,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_move_con_to_workspace",
+        "cmd_move_con_to_workspace_back_and_forth",
+        "cmd_move_con_to_workspace_name"
+      ]
+    },
+    {
+      "state": "commands.spec:MOVE_WORKSPACE_NUMBER",
+      "line": 431,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_move_con_to_workspace_number"
+      ]
+    },
+    {
+      "state": "commands.spec:MOVE_TO_OUTPUT",
+      "line": 435,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_move_con_to_output"
+      ]
+    },
+    {
+      "state": "commands.spec:MOVE_TO_MARK",
+      "line": 441,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_move_con_to_mark"
+      ]
+    },
+    {
+      "state": "commands.spec:MOVE_WORKSPACE_TO_OUTPUT",
+      "line": 445,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "commands.spec:MOVE_WORKSPACE_TO_OUTPUT_WORD",
+      "line": 449,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_move_con_to_output"
+      ]
+    },
+    {
+      "state": "commands.spec:MOVE_TO_ABSOLUTE_POSITION",
+      "line": 455,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "commands.spec:MOVE_TO_POSITION",
+      "line": 459,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_move_window_to_center",
+        "cmd_move_window_to_mouse"
+      ]
+    },
+    {
+      "state": "commands.spec:MOVE_TO_POSITION_X",
+      "line": 467,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "commands.spec:MOVE_TO_POSITION_Y",
+      "line": 473,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_move_window_to_position"
+      ]
+    },
+    {
+      "state": "commands.spec:MODE",
+      "line": 480,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_mode"
+      ]
+    },
+    {
+      "state": "commands.spec:NOP",
+      "line": 484,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_nop"
+      ]
+    },
+    {
+      "state": "commands.spec:SCRATCHPAD",
+      "line": 490,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_scratchpad_show"
+      ]
+    },
+    {
+      "state": "commands.spec:SWAP",
+      "line": 497,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "commands.spec:SWAP_ARGUMENT",
+      "line": 505,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_swap"
+      ]
+    },
+    {
+      "state": "commands.spec:TITLE_FORMAT",
+      "line": 509,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_title_format"
+      ]
+    },
+    {
+      "state": "commands.spec:TITLE_WINDOW_ICON",
+      "line": 513,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_title_window_icon"
+      ]
+    },
+    {
+      "state": "commands.spec:TITLE_WINDOW_ICON_PADDING",
+      "line": 521,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_title_window_icon"
+      ]
+    },
+    {
+      "state": "commands.spec:BAR",
+      "line": 530,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "commands.spec:BAR_HIDDEN_STATE",
+      "line": 536,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "commands.spec:BAR_HIDDEN_STATE_ID",
+      "line": 540,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_bar_hidden_state"
+      ]
+    },
+    {
+      "state": "commands.spec:BAR_MODE",
+      "line": 546,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": []
+    },
+    {
+      "state": "commands.spec:BAR_MODE_ID",
+      "line": 550,
+      "disposition": "reference-only",
+      "owners": [],
+      "callbacks": [
+        "cmd_bar_mode"
+      ]
+    }
+  ]
+}

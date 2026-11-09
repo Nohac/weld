@@ -1,6 +1,7 @@
 //! Tab and stack headers projected from the tiler's owned layout facts.
 
 use std::collections::HashMap;
+use weld_tile_config::TileLayout;
 mod divider;
 mod frame;
 mod scroll;
@@ -36,9 +37,7 @@ use weld_app::{
     output::OutputCompositionCamera, pixel_snap::PixelSnapPaint, surface::ClientWindowMetadata,
 };
 use weld_ssd::{FrameColors, SsdSettings};
-use weld_tile::{
-    TileContainer, TileFocusHistory, TileGeometry, TileHeaders, TileLayout, TileParent,
-};
+use weld_tile::{TileContainer, TileFocusHistory, TileGeometry, TileHeaders, TileParent};
 use weld_window::persistence::PersistentWindow;
 use weld_window::{
     FocusedWindow, WindowClientResolver, WindowGeometry, WindowGroupSelected, WindowInSoloFrame,

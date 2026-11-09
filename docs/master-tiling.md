@@ -140,6 +140,9 @@ Tree/output queries support Grimshot's selectors. Workspace buttons use
 `ext-workspace-v1`; IPC command execution and the remaining Sway query families
 remain follow-ups.
 
+The [typed configuration pipeline](configuration.md) describes syntax generation,
+native contract ownership, preparation, and validation.
+
 ## Supported configuration
 
 DRM output scale accepts connector names, quoted EDID identifiers, or `*`:

@@ -1,13 +1,9 @@
-//! Sway configuration spelling and structural diagnostics, without a compositor.
+//! Generated typed Sway configuration syntax and source-aware diagnostics.
 //!
-//! [`parse`] recognizes statements, arguments and multiline blocks. It preserves
-//! quotes, escapes, criteria and command-chain punctuation rather than assigning
-//! them meaning. Unknown directives, `set`, and `include` are ordinary statements:
-//! parsing performs no expansion, file access, regex compilation or execution.
-//! The optional `input` feature translates keyboard settings and binding chords
-//! into Weld input configuration for distribution assemblies.
-//! The optional `evaluate` feature provides source-ordered variable expansion
-//! and unsupported-feature warnings; `input` enables it as well.
+//! [`parse`] expands ordered variables and produces typed declarations. Parsing
+//! performs no command execution, keymap compilation or compositor mutation.
+//! Feature-owned configuration lowering lives in `weld-sway-adapter`.
+//! The internal spelling tree retains lexical distinctions needed by expansion.
 //!
 //! # Syntax boundary
 //!
@@ -41,21 +37,17 @@
 
 #![deny(missing_docs)]
 
-#[cfg(feature = "evaluate")]
-pub mod commands;
-#[cfg(feature = "evaluate")]
-pub mod criteria;
+mod commands;
+mod criteria;
 mod diagnostic;
-#[cfg(feature = "evaluate")]
-pub mod evaluation;
-#[cfg(feature = "input")]
-pub mod input;
-#[cfg(feature = "output")]
-pub mod output;
+mod evaluation;
 mod parser;
 mod syntax;
-#[cfg(any(feature = "input", feature = "output"))]
 mod value;
+
+pub mod typed;
+
+pub use typed::parse;
 
 pub use diagnostic::{Diagnostic, DiagnosticKind};
 pub use syntax::{Block, ParsedConfig, RawText, Statement};
@@ -72,7 +64,7 @@ pub const MAX_BLOCK_DEPTH: usize = 64;
 ///
 /// Returns the first structural diagnostic. Unknown commands and unresolved
 /// variables are not structural errors. See the crate documentation for scope.
-pub fn parse(source_name: &str, source: &str) -> Result<ParsedConfig, Diagnostic> {
+pub(crate) fn parse_source(source_name: &str, source: &str) -> Result<ParsedConfig, Diagnostic> {
     parser::parse(source_name, source)
 }
 

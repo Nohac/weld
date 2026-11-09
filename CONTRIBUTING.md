@@ -225,7 +225,8 @@ configuration in both nested and DRM modes.
 The example starts Waybar through `exec`, using the repository's example config
 and style paths. Launch from the repository root, or adjust those paths in your
 own configuration. Its workspace buttons use `ext-workspace-v1`.
-Master now uses the native tiler. Its initial Sway configuration subset and
+Master uses the native tiler. The [typed configuration pipeline](docs/configuration.md)
+and its generator are maintained independently of runtime policy. Its Sway configuration subset and
 reload semantics are documented in [Master tiling](docs/master-tiling.md).
 
 Weld options precede an explicit `--` when a client is also present. Capture a

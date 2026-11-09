@@ -1,5 +1,7 @@
 //! Projects domain-owned inventories into one coherent Sway IPC publication.
 
+use weld_tile_config::{SplitAxis, TileLayout};
+use weld_window_config::FullscreenMode;
 #[cfg(test)]
 #[path = "integration_tests.rs"]
 mod tests;
@@ -17,13 +19,9 @@ use weld_app::{
     inspection::{InspectionPlugin, InspectionSystems, OutputInventory},
     output::OutputId,
 };
-use weld_tile::{
-    SplitAxis, TileLayout,
-    inspection::{TileInventory, TileNodeId},
-};
+use weld_tile::inspection::{TileInventory, TileNodeId};
 use weld_window::{
     WindowId,
-    fullscreen::FullscreenMode,
     inspection::{WindowInventory, WorkspaceInventory},
 };
 

@@ -1,0 +1,22 @@
+[package]
+name = "weld-sway-adapter"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+weld-master-config = { path = "../weld-master-config" }
+weld-config = { path = "../weld-config" }
+weld-ssd-config = { path = "../weld-ssd-config" }
+weld-i3-config = { path = "../weld-i3-config" }
+weld-window-config = { path = "../weld-window-config" }
+weld-tile-config = { path = "../weld-tile-config" }
+weld-input-config = { path = "../weld-input-config" }
+anyhow.workspace = true
+pango = { version = "=0.22.9", features = ["v1_56"] }
+weld-sway-config = { path = "../weld-sway-config" }
+weld-output = { path = "../weld-output" }
+
+
+[dev-dependencies]
+indoc.workspace = true

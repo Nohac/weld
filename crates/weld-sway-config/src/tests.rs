@@ -1,8 +1,8 @@
 use std::fmt::Write;
 
-use crate::{DiagnosticKind, MAX_BLOCK_DEPTH, Statement, parse};
+use crate::{DiagnosticKind, MAX_BLOCK_DEPTH, Statement, parse_source as parse};
 
-// Snapshot the public spelling model, not Winnow internals or serialization.
+// Snapshot the internal spelling model, not Winnow internals or serialization.
 fn outline(source: &str) -> String {
     fn append(output: &mut String, statements: &[Statement], depth: usize) {
         for statement in statements {

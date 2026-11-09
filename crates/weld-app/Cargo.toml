@@ -8,6 +8,7 @@ publish.workspace = true
 test-support = ["dep:pollster", "weld-client/test-support", "weld-core/test-support"]
 
 [dependencies]
+weld-input-config = { path = "../weld-input-config", features = ["ecs"] }
 weld-output = { path = "../weld-output" }
 weld-diagnostics = { path = "../weld-diagnostics" }
 anyhow.workspace = true

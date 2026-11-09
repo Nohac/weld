@@ -1,0 +1,20 @@
+{
+  "revision": "903bcd518df32b0e055b17f5da3f988a0187fd3d",
+  "files": [
+    {
+      "file": "config.spec",
+      "url": "https://raw.githubusercontent.com/i3/i3/903bcd518df32b0e055b17f5da3f988a0187fd3d/parser-specs/config.spec",
+      "sha256": "0c1f8d8ba73616b65f5a3ab68c1d21240cbad15cdd6dacafe4397237bfc8e727"
+    },
+    {
+      "file": "commands.spec",
+      "url": "https://raw.githubusercontent.com/i3/i3/903bcd518df32b0e055b17f5da3f988a0187fd3d/parser-specs/commands.spec",
+      "sha256": "a6c077b5bf9154a3045480090aa779a09c089f0925a310355fb431854bcf6c8b"
+    },
+    {
+      "file": "LICENSE",
+      "url": "https://raw.githubusercontent.com/i3/i3/903bcd518df32b0e055b17f5da3f988a0187fd3d/LICENSE",
+      "sha256": "cefa5e57afbfcdc39cdf3434d6d9381216ba015d4a0768ad87e358f78ea3733e"
+    }
+  ]
+}

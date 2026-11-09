@@ -9,6 +9,7 @@ profiling-tracy = []
 test-support = ["weld-client/test-support"]
 
 [dependencies]
+weld-input-config = { path = "../weld-input-config" }
 weld-audio = { path = "../weld-audio" }
 anyhow.workspace = true
 # Match Smithay's DRM bindings; the safe slice API creates variable-sized LUT blobs.

@@ -21,12 +21,15 @@ use weld_app::{
     },
 };
 use weld_client::ClientSurfaceMetadata;
-use weld_i3_quirks::{I3LayoutRequest, I3QuirksPlugin};
-use weld_tile::{SplitAxis, TileLayout, TilePlugin, TileSelect, TileSide, TileTreeEdit};
-use weld_window::persistence::{PersistenceAction, PersistenceMatch, WindowPersistenceRequest};
+use weld_i3_config::I3LayoutRequest;
+use weld_i3_quirks::I3QuirksPlugin;
+use weld_tile::{TilePlugin, TileSelect, TileSide, TileTreeEdit};
+use weld_tile_config::{SplitAxis, TileLayout, TileOperation, TileSettings};
+use weld_window::persistence::WindowPersistenceRequest;
 use weld_window::{
     ManagedWindow, OccupiesWindow, WindowId, WindowPlugin, WindowVacancy, WindowVisibility,
 };
+use weld_window_config::{FullscreenAction, FullscreenMode, PersistenceAction, PersistenceMatch};
 
 #[test]
 fn attention_marks_the_inactive_tab_and_shared_frame_until_its_owner_retires() {
@@ -148,7 +151,7 @@ fn header_scroll_accumulates_motion_wraps_and_resets_between_gestures() {
 fn persistent_palette_updates_the_group_frame_and_headers_together() {
     for layout in [TileLayout::Tabbed, TileLayout::Stacked] {
         let (mut app, first, second) = setup();
-        let settings = weld_i3_quirks::config::parse_with_extensions(
+        let settings: SsdSettings = weld_sway_adapter::parse_with_extensions(
             "colors",
             concat!(
                 "client.persistent_focused #112233 #223344 #334455 #445566 #556677\n",
@@ -157,7 +160,8 @@ fn persistent_palette_updates_the_group_frame_and_headers_together() {
             |_| Ok(()),
         )
         .expect("persistent palettes")
-        .decorations;
+        .decorations
+        .into();
         let focused = settings.persistent_focused;
         let unfocused = settings.persistent_unfocused;
         let normal = settings.focused;
@@ -383,7 +387,7 @@ fn selecting_a_group_highlights_all_its_headers_and_leaf_focus_restores_one() {
 
 #[test]
 fn smart_outer_chrome_counts_a_tab_or_stack_group_as_one_frame() {
-    use weld_tile::{SplitAxis, TileSettings, TileSide, TileTreeEdit};
+    use weld_tile::{TileSide, TileTreeEdit};
     for layout in [TileLayout::Tabbed, TileLayout::Stacked] {
         let (mut app, first, second) = setup();
         app.world_mut()
@@ -559,13 +563,13 @@ fn font_reload_updates_header_text_and_reserved_height_together() {
         .world()
         .resource::<weld_tile::TilePresentationMetrics>()
         .header_height;
-    let config = weld_i3_quirks::config::parse_with_extensions(
+    let config = weld_sway_adapter::parse_with_extensions(
         "font",
         "font pango:serif Bold Italic 24px",
         |_| Ok(()),
     )
     .expect("font config");
-    *app.world_mut().resource_mut::<SsdSettings>() = config.decorations;
+    *app.world_mut().resource_mut::<SsdSettings>() = config.decorations.into();
     app.update();
     let height = app
         .world()
@@ -689,9 +693,7 @@ fn static_headers_do_not_republish_visual_components() {
 
 #[test]
 fn fullscreen_hides_headers_and_restores_them_on_exit() {
-    use weld_window::fullscreen::{
-        FullscreenAction, FullscreenMode, FullscreenPlugin, FullscreenRequest,
-    };
+    use weld_window::fullscreen::{FullscreenPlugin, FullscreenRequest};
     let (mut app, first, _) = setup();
     app.add_plugins(FullscreenPlugin);
     let focused = app
@@ -895,7 +897,7 @@ fn group_frame_clips_headers_to_its_shared_inner_radius() {
 
 #[test]
 fn nested_tab_and_stack_combinations_share_one_frame_and_keep_independent_headers() {
-    use weld_tile::{SplitAxis, TileOperation, TileRequest, TileSide, TileTreeEdit};
+    use weld_tile::{TileRequest, TileSide, TileTreeEdit};
     for outer_layout in [TileLayout::Tabbed, TileLayout::Stacked] {
         for inner_layout in [TileLayout::Tabbed, TileLayout::Stacked] {
             let (mut app, first, second) = setup();
@@ -1003,10 +1005,10 @@ fn management_reload_preserves_presenter_insets_and_border_changes_apply_in_the_
     app.add_systems(
         PreUpdate,
         (|mut once: bevy::ecs::system::Local<bool>,
-          mut settings: bevy::ecs::system::ResMut<weld_tile::TileSettings>| {
+          mut settings: bevy::ecs::system::ResMut<weld_tile_config::TileSettings>| {
             if !*once {
                 *once = true;
-                *settings = weld_tile::TileSettings::default();
+                *settings = weld_tile_config::TileSettings::default();
             }
         })
         .in_set(weld_tile::TileSystems::Actions),
@@ -1022,7 +1024,7 @@ fn management_reload_preserves_presenter_insets_and_border_changes_apply_in_the_
     app.add_systems(
         PreUpdate,
         (|mut style: bevy::ecs::system::ResMut<SsdSettings>| {
-            style.tiled = weld_ssd::BorderStyle::Pixel(7);
+            style.tiled = weld_ssd_config::BorderStyle::Pixel(7);
         })
         .in_set(weld_tile::TileSystems::Actions),
     );
@@ -1040,7 +1042,7 @@ fn management_reload_preserves_presenter_insets_and_border_changes_apply_in_the_
 
 #[test]
 fn inner_dividers_share_border_style_reserve_content_space_and_follow_visibility() {
-    use weld_tile::{SplitAxis, TileOperation, TileRequest, TileSelect};
+    use weld_tile::{TileRequest, TileSelect};
     use weld_window::{WindowCommand, WindowCommandKind};
     for (axis, smart) in [
         (SplitAxis::Horizontal, false),
@@ -1053,7 +1055,7 @@ fn inner_dividers_share_border_style_reserve_content_space_and_follow_visibility
             .resource_mut::<SsdSettings>()
             .hide_solo_border = smart;
         app.world_mut()
-            .resource_mut::<weld_tile::TileSettings>()
+            .resource_mut::<weld_tile_config::TileSettings>()
             .hide_solo_gaps = smart;
         app.update();
         app.world_mut()
@@ -1111,7 +1113,8 @@ fn inner_dividers_share_border_style_reserve_content_space_and_follow_visibility
         }
         app.update();
         assert!(app.world().get::<divider::PaneDivider>(entity).is_some());
-        app.world_mut().resource_mut::<SsdSettings>().tiled = weld_ssd::BorderStyle::Pixel(5);
+        app.world_mut().resource_mut::<SsdSettings>().tiled =
+            weld_ssd_config::BorderStyle::Pixel(5);
         app.world_mut().trigger(TileSelect(inner));
         app.update();
         let node = app.world().get::<Node>(entity).expect("retained divider");
@@ -1151,7 +1154,7 @@ fn inner_dividers_share_border_style_reserve_content_space_and_follow_visibility
                 .count(),
             1
         );
-        app.world_mut().resource_mut::<SsdSettings>().tiled = weld_ssd::BorderStyle::None;
+        app.world_mut().resource_mut::<SsdSettings>().tiled = weld_ssd_config::BorderStyle::None;
         app.update();
         assert_eq!(
             app.world_mut()

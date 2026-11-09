@@ -445,3 +445,19 @@ pub fn filter_global_shortcut_event(world: &mut World, event: &RawSeatEvent) -> 
         consumed
     }
 }
+
+impl From<weld_input_config::Shortcut> for GlobalShortcut {
+    fn from(value: weld_input_config::Shortcut) -> Self {
+        Self {
+            trigger: value
+                .trigger
+                .map(|code| physical_keycode(LinuxKeycode(code))),
+            modifiers: GlobalShortcutModifiers {
+                control: value.modifiers.control,
+                alt: value.modifiers.alt,
+                shift: value.modifiers.shift,
+                super_key: value.modifiers.super_key,
+            },
+        }
+    }
+}

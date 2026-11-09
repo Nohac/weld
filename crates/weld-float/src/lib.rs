@@ -1,6 +1,10 @@
 //! Conventional floating window-management policy for Weld.
 
 use std::{collections::hash_map::RandomState, hash::BuildHasher};
+#[cfg(test)]
+use weld_input_config::PointerShortcutModifiers;
+#[cfg(test)]
+use weld_window_config::{FullscreenAction, FullscreenMode};
 
 use bevy::{
     app::{App, Plugin, PreUpdate},
@@ -814,10 +818,10 @@ mod tests {
 
     use super::*;
     use weld_input::{
-        LinuxButtonCode, PointerShortcutId, PointerShortcutModifiers, RawSeatEvent,
-        RawSeatEventKind, SeatModifiers, filter_pointer_shortcut_event,
+        LinuxButtonCode, PointerShortcutId, RawSeatEvent, RawSeatEventKind, SeatModifiers,
+        filter_pointer_shortcut_event,
     };
-    use weld_window::pointer::WindowPointerSettings;
+    use weld_window_config::WindowPointerSettings;
 
     fn shortcut(app: &mut App, button: u32) -> PointerShortcutId {
         let event = |state| {
@@ -1629,9 +1633,7 @@ mod tests {
 
     #[test]
     fn fullscreen_ends_the_shared_drag_and_retires_its_settlement_anchor() {
-        use weld_window::fullscreen::{
-            FullscreenAction, FullscreenMode, FullscreenPlugin, FullscreenRequest,
-        };
+        use weld_window::fullscreen::{FullscreenPlugin, FullscreenRequest};
         let mut app = float_test_app();
         app.add_plugins(FullscreenPlugin);
         let window = admit_float_window(&mut app, 209);

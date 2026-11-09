@@ -5,6 +5,7 @@ use std::{
     sync::{Arc, Mutex, mpsc},
     time::{Duration, Instant},
 };
+use weld_i3_config::WorkspaceTarget;
 
 use anyhow::{Context as ContextExt, Result, ensure};
 use bevy::prelude::*;
@@ -14,7 +15,7 @@ use weld_control::launch::{LaunchOptions, LaunchReceipt, LaunchRequest};
 use weld_core::runtime::launch::{
     ApplicationLaunch, ClientLauncher, LaunchRejected, MAX_ATTRIBUTED_LAUNCHES,
 };
-use weld_i3_quirks::workspace::{I3WindowWorkspaceRequest, WorkspaceTarget};
+use weld_i3_quirks::workspace::I3WindowWorkspaceRequest;
 use weld_window::{
     ManagedWindow, WindowAdmissionPreferences, WindowClientResolver, WindowManagementHold,
     WindowSystems, WindowVisibility,

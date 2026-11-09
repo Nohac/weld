@@ -1,0 +1,3706 @@
+{
+  "revision": "903bcd518df32b0e055b17f5da3f988a0187fd3d",
+  "states": {
+    "config.spec:INITIAL": {
+      "line": 14,
+      "productions": [
+        {
+          "pattern": "end",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "error",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "'#'",
+          "action": "IGNORE_LINE",
+          "callbacks": []
+        },
+        {
+          "pattern": "'set '",
+          "action": "IGNORE_LINE",
+          "callbacks": []
+        },
+        {
+          "pattern": "'set\t'",
+          "action": "IGNORE_LINE",
+          "callbacks": []
+        },
+        {
+          "pattern": "'set_from_resource'",
+          "action": "IGNORE_LINE",
+          "callbacks": []
+        },
+        {
+          "pattern": "'include'",
+          "action": "INCLUDE",
+          "callbacks": []
+        },
+        {
+          "pattern": "bindtype = 'bindsym', 'bindcode', 'bind'",
+          "action": "BINDING",
+          "callbacks": []
+        },
+        {
+          "pattern": "'bar'",
+          "action": "BARBRACE",
+          "callbacks": []
+        },
+        {
+          "pattern": "'font'",
+          "action": "FONT",
+          "callbacks": []
+        },
+        {
+          "pattern": "'mode'",
+          "action": "MODENAME",
+          "callbacks": []
+        },
+        {
+          "pattern": "'gaps'",
+          "action": "GAPS",
+          "callbacks": []
+        },
+        {
+          "pattern": "'smart_borders'",
+          "action": "SMART_BORDERS",
+          "callbacks": []
+        },
+        {
+          "pattern": "'smart_gaps'",
+          "action": "SMART_GAPS",
+          "callbacks": []
+        },
+        {
+          "pattern": "'floating_minimum_size'",
+          "action": "FLOATING_MINIMUM_SIZE_WIDTH",
+          "callbacks": []
+        },
+        {
+          "pattern": "'floating_maximum_size'",
+          "action": "FLOATING_MAXIMUM_SIZE_WIDTH",
+          "callbacks": []
+        },
+        {
+          "pattern": "'floating_modifier'",
+          "action": "FLOATING_MODIFIER",
+          "callbacks": []
+        },
+        {
+          "pattern": "'default_orientation'",
+          "action": "DEFAULT_ORIENTATION",
+          "callbacks": []
+        },
+        {
+          "pattern": "'workspace_layout'",
+          "action": "WORKSPACE_LAYOUT",
+          "callbacks": []
+        },
+        {
+          "pattern": "windowtype = 'default_border', 'new_window', 'default_floating_border', 'new_float'",
+          "action": "DEFAULT_BORDER",
+          "callbacks": []
+        },
+        {
+          "pattern": "'hide_edge_borders'",
+          "action": "HIDE_EDGE_BORDERS",
+          "callbacks": []
+        },
+        {
+          "pattern": "'for_window'",
+          "action": "FOR_WINDOW",
+          "callbacks": []
+        },
+        {
+          "pattern": "'assign'",
+          "action": "ASSIGN",
+          "callbacks": []
+        },
+        {
+          "pattern": "'no_focus'",
+          "action": "NO_FOCUS",
+          "callbacks": []
+        },
+        {
+          "pattern": "'focus_follows_mouse'",
+          "action": "FOCUS_FOLLOWS_MOUSE",
+          "callbacks": []
+        },
+        {
+          "pattern": "'mouse_warping'",
+          "action": "MOUSE_WARPING",
+          "callbacks": []
+        },
+        {
+          "pattern": "'focus_wrapping'",
+          "action": "FOCUS_WRAPPING",
+          "callbacks": []
+        },
+        {
+          "pattern": "'force_focus_wrapping'",
+          "action": "FORCE_FOCUS_WRAPPING",
+          "callbacks": []
+        },
+        {
+          "pattern": "'force_xinerama', 'force-xinerama'",
+          "action": "FORCE_XINERAMA",
+          "callbacks": []
+        },
+        {
+          "pattern": "'disable_randr15', 'disable-randr15'",
+          "action": "DISABLE_RANDR15",
+          "callbacks": []
+        },
+        {
+          "pattern": "'workspace_auto_back_and_forth'",
+          "action": "WORKSPACE_BACK_AND_FORTH",
+          "callbacks": []
+        },
+        {
+          "pattern": "'fake_outputs', 'fake-outputs'",
+          "action": "FAKE_OUTPUTS",
+          "callbacks": []
+        },
+        {
+          "pattern": "'force_display_urgency_hint'",
+          "action": "FORCE_DISPLAY_URGENCY_HINT",
+          "callbacks": []
+        },
+        {
+          "pattern": "'focus_on_window_activation'",
+          "action": "FOCUS_ON_WINDOW_ACTIVATION",
+          "callbacks": []
+        },
+        {
+          "pattern": "'title_align'",
+          "action": "TITLE_ALIGN",
+          "callbacks": []
+        },
+        {
+          "pattern": "'show_marks'",
+          "action": "SHOW_MARKS",
+          "callbacks": []
+        },
+        {
+          "pattern": "'workspace'",
+          "action": "WORKSPACE",
+          "callbacks": []
+        },
+        {
+          "pattern": "'ipc_socket', 'ipc-socket'",
+          "action": "IPC_SOCKET",
+          "callbacks": []
+        },
+        {
+          "pattern": "'ipc_kill_timeout'",
+          "action": "IPC_KILL_TIMEOUT",
+          "callbacks": []
+        },
+        {
+          "pattern": "'restart_state'",
+          "action": "RESTART_STATE",
+          "callbacks": []
+        },
+        {
+          "pattern": "'popup_during_fullscreen'",
+          "action": "POPUP_DURING_FULLSCREEN",
+          "callbacks": []
+        },
+        {
+          "pattern": "'tiling_drag'",
+          "action": "TILING_DRAG",
+          "callbacks": []
+        },
+        {
+          "pattern": "exectype = 'exec_always', 'exec'",
+          "action": "EXEC",
+          "callbacks": []
+        },
+        {
+          "pattern": "colorclass = 'client.background'",
+          "action": "COLOR_SINGLE",
+          "callbacks": []
+        },
+        {
+          "pattern": "colorclass = 'client.focused_inactive', 'client.focused_tab_title', 'client.focused', 'client.unfocused', 'client.urgent', 'client.placeholder'",
+          "action": "COLOR_BORDER",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:IGNORE_LINE": {
+      "line": 67,
+      "productions": [
+        {
+          "pattern": "line",
+          "action": "INITIAL",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:GAPS": {
+      "line": 72,
+      "productions": [
+        {
+          "pattern": "scope = 'inner', 'outer', 'horizontal', 'vertical', 'top', 'right', 'bottom', 'left'",
+          "action": "GAPS_WITH_SCOPE",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:GAPS_WITH_SCOPE": {
+      "line": 76,
+      "productions": [
+        {
+          "pattern": "value = number",
+          "action": "GAPS_END",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:GAPS_END": {
+      "line": 80,
+      "productions": [
+        {
+          "pattern": "'px'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "end",
+          "action": "call cfg_gaps($workspace, $scope, &value)",
+          "callbacks": [
+            "cfg_gaps"
+          ]
+        }
+      ]
+    },
+    "config.spec:SMART_BORDERS": {
+      "line": 88,
+      "productions": [
+        {
+          "pattern": "enabled = '1', 'yes', 'true', 'on', 'enable', 'active'",
+          "action": "call cfg_smart_borders($enabled)",
+          "callbacks": [
+            "cfg_smart_borders"
+          ]
+        },
+        {
+          "pattern": "enabled = 'no_gaps'",
+          "action": "call cfg_smart_borders($enabled)",
+          "callbacks": [
+            "cfg_smart_borders"
+          ]
+        }
+      ]
+    },
+    "config.spec:SMART_GAPS": {
+      "line": 95,
+      "productions": [
+        {
+          "pattern": "enabled = '1', 'yes', 'true', 'on', 'enable', 'active'",
+          "action": "call cfg_smart_gaps($enabled)",
+          "callbacks": [
+            "cfg_smart_gaps"
+          ]
+        },
+        {
+          "pattern": "enabled = '0', 'no', 'false', 'off', 'disable', 'inactive'",
+          "action": "call cfg_smart_gaps($enabled)",
+          "callbacks": [
+            "cfg_smart_gaps"
+          ]
+        },
+        {
+          "pattern": "enabled = 'inverse_outer'",
+          "action": "call cfg_smart_gaps($enabled)",
+          "callbacks": [
+            "cfg_smart_gaps"
+          ]
+        }
+      ]
+    },
+    "config.spec:INCLUDE": {
+      "line": 104,
+      "productions": [
+        {
+          "pattern": "pattern = string",
+          "action": "call cfg_include($pattern)",
+          "callbacks": [
+            "cfg_include"
+          ]
+        }
+      ]
+    },
+    "config.spec:FLOATING_MINIMUM_SIZE_WIDTH": {
+      "line": 109,
+      "productions": [
+        {
+          "pattern": "width = number",
+          "action": "FLOATING_MINIMUM_SIZE_X",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:FLOATING_MINIMUM_SIZE_X": {
+      "line": 113,
+      "productions": [
+        {
+          "pattern": "'x'",
+          "action": "FLOATING_MINIMUM_SIZE_HEIGHT",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:FLOATING_MINIMUM_SIZE_HEIGHT": {
+      "line": 117,
+      "productions": [
+        {
+          "pattern": "height = number",
+          "action": "call cfg_floating_minimum_size(&width, &height)",
+          "callbacks": [
+            "cfg_floating_minimum_size"
+          ]
+        }
+      ]
+    },
+    "config.spec:FLOATING_MAXIMUM_SIZE_WIDTH": {
+      "line": 122,
+      "productions": [
+        {
+          "pattern": "width = number",
+          "action": "FLOATING_MAXIMUM_SIZE_X",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:FLOATING_MAXIMUM_SIZE_X": {
+      "line": 126,
+      "productions": [
+        {
+          "pattern": "'x'",
+          "action": "FLOATING_MAXIMUM_SIZE_HEIGHT",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:FLOATING_MAXIMUM_SIZE_HEIGHT": {
+      "line": 130,
+      "productions": [
+        {
+          "pattern": "height = number",
+          "action": "call cfg_floating_maximum_size(&width, &height)",
+          "callbacks": [
+            "cfg_floating_maximum_size"
+          ]
+        }
+      ]
+    },
+    "config.spec:FLOATING_MODIFIER": {
+      "line": 135,
+      "productions": [
+        {
+          "pattern": "modifiers = 'Mod1', 'Mod2', 'Mod3', 'Mod4', 'Mod5', 'Shift', 'Control', 'Ctrl'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "'+'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "end",
+          "action": "call cfg_floating_modifier($modifiers)",
+          "callbacks": [
+            "cfg_floating_modifier"
+          ]
+        }
+      ]
+    },
+    "config.spec:TILING_DRAG_SWAP_MODIFIER": {
+      "line": 144,
+      "productions": [
+        {
+          "pattern": "modifiers = 'Mod1', 'Mod2', 'Mod3', 'Mod4', 'Mod5', 'Shift', 'Control', 'Ctrl'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "'+'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "end",
+          "action": "call cfg_tiling_drag_swap_modifier($modifiers)",
+          "callbacks": [
+            "cfg_tiling_drag_swap_modifier"
+          ]
+        }
+      ]
+    },
+    "config.spec:DEFAULT_ORIENTATION": {
+      "line": 153,
+      "productions": [
+        {
+          "pattern": "orientation = 'horizontal', 'vertical', 'auto'",
+          "action": "call cfg_default_orientation($orientation)",
+          "callbacks": [
+            "cfg_default_orientation"
+          ]
+        }
+      ]
+    },
+    "config.spec:WORKSPACE_LAYOUT": {
+      "line": 158,
+      "productions": [
+        {
+          "pattern": "layout = 'default', 'stacking', 'stacked', 'tabbed'",
+          "action": "call cfg_workspace_layout($layout)",
+          "callbacks": [
+            "cfg_workspace_layout"
+          ]
+        }
+      ]
+    },
+    "config.spec:DEFAULT_BORDER": {
+      "line": 164,
+      "productions": [
+        {
+          "pattern": "border = 'normal', 'pixel'",
+          "action": "DEFAULT_BORDER_PIXELS",
+          "callbacks": []
+        },
+        {
+          "pattern": "border = '1pixel', 'none'",
+          "action": "call cfg_default_border($windowtype, $border, -1)",
+          "callbacks": [
+            "cfg_default_border"
+          ]
+        }
+      ]
+    },
+    "config.spec:DEFAULT_BORDER_PIXELS": {
+      "line": 170,
+      "productions": [
+        {
+          "pattern": "end",
+          "action": "call cfg_default_border($windowtype, $border, 2)",
+          "callbacks": [
+            "cfg_default_border"
+          ]
+        },
+        {
+          "pattern": "width = number",
+          "action": "DEFAULT_BORDER_PIXELS_PX",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:DEFAULT_BORDER_PIXELS_PX": {
+      "line": 176,
+      "productions": [
+        {
+          "pattern": "'px'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "end",
+          "action": "call cfg_default_border($windowtype, $border, &width)",
+          "callbacks": [
+            "cfg_default_border"
+          ]
+        }
+      ]
+    },
+    "config.spec:HIDE_EDGE_BORDERS": {
+      "line": 184,
+      "productions": [
+        {
+          "pattern": "hide_borders = 'none', 'vertical', 'horizontal', 'both', 'smart_no_gaps', 'smart'",
+          "action": "call cfg_hide_edge_borders($hide_borders)",
+          "callbacks": [
+            "cfg_hide_edge_borders"
+          ]
+        },
+        {
+          "pattern": "hide_borders = '1', 'yes', 'true', 'on', 'enable', 'active'",
+          "action": "call cfg_hide_edge_borders($hide_borders)",
+          "callbacks": [
+            "cfg_hide_edge_borders"
+          ]
+        }
+      ]
+    },
+    "config.spec:FOR_WINDOW": {
+      "line": 191,
+      "productions": [
+        {
+          "pattern": "'['",
+          "action": "call cfg_criteria_init(FOR_WINDOW_COMMAND); CRITERIA",
+          "callbacks": [
+            "cfg_criteria_init"
+          ]
+        }
+      ]
+    },
+    "config.spec:FOR_WINDOW_COMMAND": {
+      "line": 195,
+      "productions": [
+        {
+          "pattern": "command = string",
+          "action": "call cfg_for_window($command)",
+          "callbacks": [
+            "cfg_for_window"
+          ]
+        }
+      ]
+    },
+    "config.spec:ASSIGN": {
+      "line": 200,
+      "productions": [
+        {
+          "pattern": "'['",
+          "action": "call cfg_criteria_init(ASSIGN_WORKSPACE); CRITERIA",
+          "callbacks": [
+            "cfg_criteria_init"
+          ]
+        }
+      ]
+    },
+    "config.spec:ASSIGN_WORKSPACE": {
+      "line": 204,
+      "productions": [
+        {
+          "pattern": "'\u2192'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "'output'",
+          "action": "ASSIGN_OUTPUT",
+          "callbacks": []
+        },
+        {
+          "pattern": "'workspace'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "'number'",
+          "action": "ASSIGN_WORKSPACE_NUMBER",
+          "callbacks": []
+        },
+        {
+          "pattern": "workspace = string",
+          "action": "call cfg_assign($workspace, 0)",
+          "callbacks": [
+            "cfg_assign"
+          ]
+        }
+      ]
+    },
+    "config.spec:ASSIGN_OUTPUT": {
+      "line": 216,
+      "productions": [
+        {
+          "pattern": "output = string",
+          "action": "call cfg_assign_output($output)",
+          "callbacks": [
+            "cfg_assign_output"
+          ]
+        }
+      ]
+    },
+    "config.spec:ASSIGN_WORKSPACE_NUMBER": {
+      "line": 220,
+      "productions": [
+        {
+          "pattern": "number = string",
+          "action": "call cfg_assign($number, 1)",
+          "callbacks": [
+            "cfg_assign"
+          ]
+        }
+      ]
+    },
+    "config.spec:NO_FOCUS": {
+      "line": 225,
+      "productions": [
+        {
+          "pattern": "'['",
+          "action": "call cfg_criteria_init(NO_FOCUS_END); CRITERIA",
+          "callbacks": [
+            "cfg_criteria_init"
+          ]
+        }
+      ]
+    },
+    "config.spec:NO_FOCUS_END": {
+      "line": 229,
+      "productions": [
+        {
+          "pattern": "end",
+          "action": "call cfg_no_focus()",
+          "callbacks": [
+            "cfg_no_focus"
+          ]
+        }
+      ]
+    },
+    "config.spec:CRITERIA": {
+      "line": 234,
+      "productions": [
+        {
+          "pattern": "ctype = 'class'",
+          "action": "CRITERION",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'instance'",
+          "action": "CRITERION",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'window_role'",
+          "action": "CRITERION",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'con_id'",
+          "action": "CRITERION",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'id'",
+          "action": "CRITERION",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'window_type'",
+          "action": "CRITERION",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'con_mark'",
+          "action": "CRITERION",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'title'",
+          "action": "CRITERION",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'urgent'",
+          "action": "CRITERION",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'workspace'",
+          "action": "CRITERION",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'machine'",
+          "action": "CRITERION",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'floating_from'",
+          "action": "CRITERION_FROM",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'tiling_from'",
+          "action": "CRITERION_FROM",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'tiling', 'floating', 'all'",
+          "action": "call cfg_criteria_add($ctype, NULL); CRITERIA",
+          "callbacks": [
+            "cfg_criteria_add"
+          ]
+        },
+        {
+          "pattern": "']'",
+          "action": "call cfg_criteria_pop_state()",
+          "callbacks": [
+            "cfg_criteria_pop_state"
+          ]
+        }
+      ]
+    },
+    "config.spec:CRITERION": {
+      "line": 253,
+      "productions": [
+        {
+          "pattern": "'='",
+          "action": "CRITERION_STR",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:CRITERION_FROM": {
+      "line": 256,
+      "productions": [
+        {
+          "pattern": "'='",
+          "action": "CRITERION_FROM_STR_START",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:CRITERION_FROM_STR_START": {
+      "line": 259,
+      "productions": [
+        {
+          "pattern": "'\"'",
+          "action": "CRITERION_FROM_STR",
+          "callbacks": []
+        },
+        {
+          "pattern": "kind = 'auto', 'user'",
+          "action": "call cfg_criteria_add($ctype, $kind); CRITERIA",
+          "callbacks": [
+            "cfg_criteria_add"
+          ]
+        }
+      ]
+    },
+    "config.spec:CRITERION_FROM_STR": {
+      "line": 264,
+      "productions": [
+        {
+          "pattern": "kind = 'auto', 'user'",
+          "action": "CRITERION_FROM_STR_END",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:CRITERION_FROM_STR_END": {
+      "line": 268,
+      "productions": [
+        {
+          "pattern": "'\"'",
+          "action": "call cfg_criteria_add($ctype, $kind); CRITERIA",
+          "callbacks": [
+            "cfg_criteria_add"
+          ]
+        }
+      ]
+    },
+    "config.spec:CRITERION_STR": {
+      "line": 272,
+      "productions": [
+        {
+          "pattern": "cvalue = word",
+          "action": "call cfg_criteria_add($ctype, $cvalue); CRITERIA",
+          "callbacks": [
+            "cfg_criteria_add"
+          ]
+        }
+      ]
+    },
+    "config.spec:FOCUS_FOLLOWS_MOUSE": {
+      "line": 277,
+      "productions": [
+        {
+          "pattern": "value = word",
+          "action": "call cfg_focus_follows_mouse($value)",
+          "callbacks": [
+            "cfg_focus_follows_mouse"
+          ]
+        }
+      ]
+    },
+    "config.spec:MOUSE_WARPING": {
+      "line": 282,
+      "productions": [
+        {
+          "pattern": "value = 'none', 'output'",
+          "action": "call cfg_mouse_warping($value)",
+          "callbacks": [
+            "cfg_mouse_warping"
+          ]
+        }
+      ]
+    },
+    "config.spec:FOCUS_WRAPPING": {
+      "line": 287,
+      "productions": [
+        {
+          "pattern": "value = '1', 'yes', 'true', 'on', 'enable', 'active', '0', 'no', 'false', 'off', 'disable', 'inactive', 'force', 'workspace'",
+          "action": "call cfg_focus_wrapping($value)",
+          "callbacks": [
+            "cfg_focus_wrapping"
+          ]
+        }
+      ]
+    },
+    "config.spec:FORCE_FOCUS_WRAPPING": {
+      "line": 292,
+      "productions": [
+        {
+          "pattern": "value = word",
+          "action": "call cfg_force_focus_wrapping($value)",
+          "callbacks": [
+            "cfg_force_focus_wrapping"
+          ]
+        }
+      ]
+    },
+    "config.spec:FORCE_XINERAMA": {
+      "line": 297,
+      "productions": [
+        {
+          "pattern": "value = word",
+          "action": "call cfg_force_xinerama($value)",
+          "callbacks": [
+            "cfg_force_xinerama"
+          ]
+        }
+      ]
+    },
+    "config.spec:DISABLE_RANDR15": {
+      "line": 302,
+      "productions": [
+        {
+          "pattern": "value = word",
+          "action": "call cfg_disable_randr15($value)",
+          "callbacks": [
+            "cfg_disable_randr15"
+          ]
+        }
+      ]
+    },
+    "config.spec:WORKSPACE_BACK_AND_FORTH": {
+      "line": 307,
+      "productions": [
+        {
+          "pattern": "value = word",
+          "action": "call cfg_workspace_back_and_forth($value)",
+          "callbacks": [
+            "cfg_workspace_back_and_forth"
+          ]
+        }
+      ]
+    },
+    "config.spec:FAKE_OUTPUTS": {
+      "line": 313,
+      "productions": [
+        {
+          "pattern": "outputs = string",
+          "action": "call cfg_fake_outputs($outputs)",
+          "callbacks": [
+            "cfg_fake_outputs"
+          ]
+        }
+      ]
+    },
+    "config.spec:FORCE_DISPLAY_URGENCY_HINT": {
+      "line": 318,
+      "productions": [
+        {
+          "pattern": "duration_ms = number",
+          "action": "FORCE_DISPLAY_URGENCY_HINT_MS",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:TITLE_ALIGN": {
+      "line": 323,
+      "productions": [
+        {
+          "pattern": "alignment = 'left', 'center', 'right'",
+          "action": "call cfg_title_align($alignment)",
+          "callbacks": [
+            "cfg_title_align"
+          ]
+        }
+      ]
+    },
+    "config.spec:SHOW_MARKS": {
+      "line": 328,
+      "productions": [
+        {
+          "pattern": "value = word",
+          "action": "call cfg_show_marks($value)",
+          "callbacks": [
+            "cfg_show_marks"
+          ]
+        }
+      ]
+    },
+    "config.spec:FORCE_DISPLAY_URGENCY_HINT_MS": {
+      "line": 332,
+      "productions": [
+        {
+          "pattern": "'ms'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "end",
+          "action": "call cfg_force_display_urgency_hint(&duration_ms)",
+          "callbacks": [
+            "cfg_force_display_urgency_hint"
+          ]
+        }
+      ]
+    },
+    "config.spec:FOCUS_ON_WINDOW_ACTIVATION": {
+      "line": 339,
+      "productions": [
+        {
+          "pattern": "mode = word",
+          "action": "call cfg_focus_on_window_activation($mode)",
+          "callbacks": [
+            "cfg_focus_on_window_activation"
+          ]
+        }
+      ]
+    },
+    "config.spec:WORKSPACE": {
+      "line": 345,
+      "productions": [
+        {
+          "pattern": "workspace = word",
+          "action": "WORKSPACE_COMMAND",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:WORKSPACE_COMMAND": {
+      "line": 349,
+      "productions": [
+        {
+          "pattern": "'output'",
+          "action": "WORKSPACE_OUTPUT_WORD",
+          "callbacks": []
+        },
+        {
+          "pattern": "'gaps'",
+          "action": "GAPS",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:WORKSPACE_OUTPUT_WORD": {
+      "line": 355,
+      "productions": [
+        {
+          "pattern": "output = word",
+          "action": "call cfg_workspace($workspace, $output); WORKSPACE_OUTPUT_WORD",
+          "callbacks": [
+            "cfg_workspace"
+          ]
+        },
+        {
+          "pattern": "end",
+          "action": "INITIAL",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:IPC_SOCKET": {
+      "line": 362,
+      "productions": [
+        {
+          "pattern": "path = string",
+          "action": "call cfg_ipc_socket($path)",
+          "callbacks": [
+            "cfg_ipc_socket"
+          ]
+        }
+      ]
+    },
+    "config.spec:IPC_KILL_TIMEOUT": {
+      "line": 367,
+      "productions": [
+        {
+          "pattern": "timeout = number",
+          "action": "call cfg_ipc_kill_timeout(&timeout)",
+          "callbacks": [
+            "cfg_ipc_kill_timeout"
+          ]
+        }
+      ]
+    },
+    "config.spec:RESTART_STATE": {
+      "line": 372,
+      "productions": [
+        {
+          "pattern": "path = string",
+          "action": "call cfg_restart_state($path)",
+          "callbacks": [
+            "cfg_restart_state"
+          ]
+        }
+      ]
+    },
+    "config.spec:POPUP_DURING_FULLSCREEN": {
+      "line": 377,
+      "productions": [
+        {
+          "pattern": "value = 'ignore', 'leave_fullscreen', 'all', 'smart'",
+          "action": "call cfg_popup_during_fullscreen($value)",
+          "callbacks": [
+            "cfg_popup_during_fullscreen"
+          ]
+        }
+      ]
+    },
+    "config.spec:TILING_DRAG_MODE": {
+      "line": 381,
+      "productions": [
+        {
+          "pattern": "value = 'modifier', 'titlebar'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "end",
+          "action": "call cfg_tiling_drag($value)",
+          "callbacks": [
+            "cfg_tiling_drag"
+          ]
+        }
+      ]
+    },
+    "config.spec:TILING_DRAG": {
+      "line": 387,
+      "productions": [
+        {
+          "pattern": "off = '0', 'no', 'false', 'off', 'disable', 'inactive'",
+          "action": "call cfg_tiling_drag($off)",
+          "callbacks": [
+            "cfg_tiling_drag"
+          ]
+        },
+        {
+          "pattern": "swap_modifier = 'swap_modifier'",
+          "action": "TILING_DRAG_SWAP_MODIFIER",
+          "callbacks": []
+        },
+        {
+          "pattern": "value = 'modifier', 'titlebar'",
+          "action": "TILING_DRAG_MODE",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:COLOR_SINGLE": {
+      "line": 396,
+      "productions": [
+        {
+          "pattern": "color = word",
+          "action": "call cfg_color_single($colorclass, $color)",
+          "callbacks": [
+            "cfg_color_single"
+          ]
+        }
+      ]
+    },
+    "config.spec:COLOR_BORDER": {
+      "line": 401,
+      "productions": [
+        {
+          "pattern": "border = word",
+          "action": "COLOR_BACKGROUND",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:COLOR_BACKGROUND": {
+      "line": 405,
+      "productions": [
+        {
+          "pattern": "background = word",
+          "action": "COLOR_TEXT",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:COLOR_TEXT": {
+      "line": 409,
+      "productions": [
+        {
+          "pattern": "text = word",
+          "action": "COLOR_INDICATOR",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:COLOR_INDICATOR": {
+      "line": 413,
+      "productions": [
+        {
+          "pattern": "indicator = word",
+          "action": "COLOR_CHILD_BORDER",
+          "callbacks": []
+        },
+        {
+          "pattern": "end",
+          "action": "call cfg_color($colorclass, $border, $background, $text, NULL, NULL)",
+          "callbacks": [
+            "cfg_color"
+          ]
+        }
+      ]
+    },
+    "config.spec:COLOR_CHILD_BORDER": {
+      "line": 419,
+      "productions": [
+        {
+          "pattern": "child_border = word",
+          "action": "call cfg_color($colorclass, $border, $background, $text, $indicator, $child_border)",
+          "callbacks": [
+            "cfg_color"
+          ]
+        },
+        {
+          "pattern": "end",
+          "action": "call cfg_color($colorclass, $border, $background, $text, $indicator, NULL)",
+          "callbacks": [
+            "cfg_color"
+          ]
+        }
+      ]
+    },
+    "config.spec:EXEC": {
+      "line": 426,
+      "productions": [
+        {
+          "pattern": "no_startup_id = '--no-startup-id'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "command = string",
+          "action": "call cfg_exec($exectype, $no_startup_id, $command)",
+          "callbacks": [
+            "cfg_exec"
+          ]
+        }
+      ]
+    },
+    "config.spec:FONT": {
+      "line": 433,
+      "productions": [
+        {
+          "pattern": "font = string",
+          "action": "call cfg_font($font)",
+          "callbacks": [
+            "cfg_font"
+          ]
+        }
+      ]
+    },
+    "config.spec:BINDING": {
+      "line": 438,
+      "productions": [
+        {
+          "pattern": "release = '--release'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "border = '--border'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "whole_window = '--whole-window'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "exclude_titlebar = '--exclude-titlebar'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "modifiers = 'Mod1', 'Mod2', 'Mod3', 'Mod4', 'Mod5', 'Shift', 'Control', 'Ctrl', 'Mode_switch', 'Group1', 'Group2', 'Group3', 'Group4', '$mod'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "'+'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "key = word",
+          "action": "BINDCOMMAND",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:BINDCOMMAND": {
+      "line": 454,
+      "productions": [
+        {
+          "pattern": "release = '--release'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "border = '--border'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "whole_window = '--whole-window'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "exclude_titlebar = '--exclude-titlebar'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "command = string",
+          "action": "call cfg_binding($bindtype, $modifiers, $key, $release, $border, $whole_window, $exclude_titlebar, $command)",
+          "callbacks": [
+            "cfg_binding"
+          ]
+        }
+      ]
+    },
+    "config.spec:MODENAME": {
+      "line": 470,
+      "productions": [
+        {
+          "pattern": "pango_markup = '--pango_markup'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "modename = word",
+          "action": "call cfg_enter_mode($pango_markup, $modename); MODEBRACE",
+          "callbacks": [
+            "cfg_enter_mode"
+          ]
+        }
+      ]
+    },
+    "config.spec:MODEBRACE": {
+      "line": 476,
+      "productions": [
+        {
+          "pattern": "end",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "'{'",
+          "action": "MODE",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:MODE": {
+      "line": 482,
+      "productions": [
+        {
+          "pattern": "end",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "error",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "'#'",
+          "action": "MODE_IGNORE_LINE",
+          "callbacks": []
+        },
+        {
+          "pattern": "'set'",
+          "action": "MODE_IGNORE_LINE",
+          "callbacks": []
+        },
+        {
+          "pattern": "bindtype = 'bindsym', 'bindcode', 'bind'",
+          "action": "MODE_BINDING",
+          "callbacks": []
+        },
+        {
+          "pattern": "'}'",
+          "action": "INITIAL",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:MODE_IGNORE_LINE": {
+      "line": 493,
+      "productions": [
+        {
+          "pattern": "line",
+          "action": "MODE",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:MODE_BINDING": {
+      "line": 497,
+      "productions": [
+        {
+          "pattern": "release = '--release'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "border = '--border'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "whole_window = '--whole-window'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "exclude_titlebar = '--exclude-titlebar'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "modifiers = 'Mod1', 'Mod2', 'Mod3', 'Mod4', 'Mod5', 'Shift', 'Control', 'Ctrl', 'Mode_switch', 'Group1', 'Group2', 'Group3', 'Group4', '$mod'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "'+'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "key = word",
+          "action": "MODE_BINDCOMMAND",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:MODE_BINDCOMMAND": {
+      "line": 513,
+      "productions": [
+        {
+          "pattern": "release = '--release'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "border = '--border'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "whole_window = '--whole-window'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "exclude_titlebar = '--exclude-titlebar'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "command = string",
+          "action": "call cfg_mode_binding($bindtype, $modifiers, $key, $release, $border, $whole_window, $exclude_titlebar, $command); MODE",
+          "callbacks": [
+            "cfg_mode_binding"
+          ]
+        }
+      ]
+    },
+    "config.spec:BARBRACE": {
+      "line": 529,
+      "productions": [
+        {
+          "pattern": "end",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "'{'",
+          "action": "call cfg_bar_start(); BAR",
+          "callbacks": [
+            "cfg_bar_start"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR": {
+      "line": 535,
+      "productions": [
+        {
+          "pattern": "end",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "error",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "'#'",
+          "action": "BAR_IGNORE_LINE",
+          "callbacks": []
+        },
+        {
+          "pattern": "'set'",
+          "action": "BAR_IGNORE_LINE",
+          "callbacks": []
+        },
+        {
+          "pattern": "'i3bar_command'",
+          "action": "BAR_BAR_COMMAND",
+          "callbacks": []
+        },
+        {
+          "pattern": "'status_command'",
+          "action": "BAR_STATUS_COMMAND",
+          "callbacks": []
+        },
+        {
+          "pattern": "'workspace_command'",
+          "action": "BAR_WORKSPACE_COMMAND",
+          "callbacks": []
+        },
+        {
+          "pattern": "'socket_path'",
+          "action": "BAR_SOCKET_PATH",
+          "callbacks": []
+        },
+        {
+          "pattern": "'mode'",
+          "action": "BAR_MODE",
+          "callbacks": []
+        },
+        {
+          "pattern": "'hidden_state'",
+          "action": "BAR_HIDDEN_STATE",
+          "callbacks": []
+        },
+        {
+          "pattern": "'id'",
+          "action": "BAR_ID",
+          "callbacks": []
+        },
+        {
+          "pattern": "'modifier'",
+          "action": "BAR_MODIFIER",
+          "callbacks": []
+        },
+        {
+          "pattern": "'wheel_up_cmd'",
+          "action": "BAR_WHEEL_UP_CMD",
+          "callbacks": []
+        },
+        {
+          "pattern": "'wheel_down_cmd'",
+          "action": "BAR_WHEEL_DOWN_CMD",
+          "callbacks": []
+        },
+        {
+          "pattern": "'bindsym'",
+          "action": "BAR_BINDSYM",
+          "callbacks": []
+        },
+        {
+          "pattern": "'position'",
+          "action": "BAR_POSITION",
+          "callbacks": []
+        },
+        {
+          "pattern": "'output'",
+          "action": "BAR_OUTPUT",
+          "callbacks": []
+        },
+        {
+          "pattern": "'tray_output'",
+          "action": "BAR_TRAY_OUTPUT",
+          "callbacks": []
+        },
+        {
+          "pattern": "'tray_padding'",
+          "action": "BAR_TRAY_PADDING",
+          "callbacks": []
+        },
+        {
+          "pattern": "'font'",
+          "action": "BAR_FONT",
+          "callbacks": []
+        },
+        {
+          "pattern": "'separator_symbol'",
+          "action": "BAR_SEPARATOR_SYMBOL",
+          "callbacks": []
+        },
+        {
+          "pattern": "'binding_mode_indicator'",
+          "action": "BAR_BINDING_MODE_INDICATOR",
+          "callbacks": []
+        },
+        {
+          "pattern": "'workspace_buttons'",
+          "action": "BAR_WORKSPACE_BUTTONS",
+          "callbacks": []
+        },
+        {
+          "pattern": "'workspace_min_width'",
+          "action": "BAR_WORKSPACE_MIN_WIDTH",
+          "callbacks": []
+        },
+        {
+          "pattern": "'strip_workspace_numbers'",
+          "action": "BAR_STRIP_WORKSPACE_NUMBERS",
+          "callbacks": []
+        },
+        {
+          "pattern": "'strip_workspace_name'",
+          "action": "BAR_STRIP_WORKSPACE_NAME",
+          "callbacks": []
+        },
+        {
+          "pattern": "'verbose'",
+          "action": "BAR_VERBOSE",
+          "callbacks": []
+        },
+        {
+          "pattern": "'height'",
+          "action": "BAR_HEIGHT",
+          "callbacks": []
+        },
+        {
+          "pattern": "'padding'",
+          "action": "BAR_PADDING",
+          "callbacks": []
+        },
+        {
+          "pattern": "'colors'",
+          "action": "BAR_COLORS_BRACE",
+          "callbacks": []
+        },
+        {
+          "pattern": "'}'",
+          "action": "call cfg_bar_finish(); INITIAL",
+          "callbacks": [
+            "cfg_bar_finish"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_IGNORE_LINE": {
+      "line": 570,
+      "productions": [
+        {
+          "pattern": "line",
+          "action": "BAR",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:BAR_BAR_COMMAND": {
+      "line": 574,
+      "productions": [
+        {
+          "pattern": "command = string",
+          "action": "call cfg_bar_i3bar_command($command); BAR",
+          "callbacks": [
+            "cfg_bar_i3bar_command"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_STATUS_COMMAND": {
+      "line": 578,
+      "productions": [
+        {
+          "pattern": "command = string",
+          "action": "call cfg_bar_status_command($command); BAR",
+          "callbacks": [
+            "cfg_bar_status_command"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_WORKSPACE_COMMAND": {
+      "line": 582,
+      "productions": [
+        {
+          "pattern": "command = string",
+          "action": "call cfg_bar_workspace_command($command); BAR",
+          "callbacks": [
+            "cfg_bar_workspace_command"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_SOCKET_PATH": {
+      "line": 586,
+      "productions": [
+        {
+          "pattern": "path = string",
+          "action": "call cfg_bar_socket_path($path); BAR",
+          "callbacks": [
+            "cfg_bar_socket_path"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_MODE": {
+      "line": 590,
+      "productions": [
+        {
+          "pattern": "mode = 'dock', 'hide', 'invisible'",
+          "action": "call cfg_bar_mode($mode); BAR",
+          "callbacks": [
+            "cfg_bar_mode"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_HIDDEN_STATE": {
+      "line": 594,
+      "productions": [
+        {
+          "pattern": "hidden_state = 'hide', 'show'",
+          "action": "call cfg_bar_hidden_state($hidden_state); BAR",
+          "callbacks": [
+            "cfg_bar_hidden_state"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_ID": {
+      "line": 598,
+      "productions": [
+        {
+          "pattern": "bar_id = word",
+          "action": "call cfg_bar_id($bar_id); BAR",
+          "callbacks": [
+            "cfg_bar_id"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_MODIFIER": {
+      "line": 602,
+      "productions": [
+        {
+          "pattern": "'off', 'none'",
+          "action": "call cfg_bar_modifier(NULL); BAR",
+          "callbacks": [
+            "cfg_bar_modifier"
+          ]
+        },
+        {
+          "pattern": "modifiers = 'Mod1', 'Mod2', 'Mod3', 'Mod4', 'Mod5', 'Shift', 'Control', 'Ctrl'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "'+'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "end",
+          "action": "call cfg_bar_modifier($modifiers); BAR",
+          "callbacks": [
+            "cfg_bar_modifier"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_WHEEL_UP_CMD": {
+      "line": 612,
+      "productions": [
+        {
+          "pattern": "command = string",
+          "action": "call cfg_bar_wheel_up_cmd($command); BAR",
+          "callbacks": [
+            "cfg_bar_wheel_up_cmd"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_WHEEL_DOWN_CMD": {
+      "line": 616,
+      "productions": [
+        {
+          "pattern": "command = string",
+          "action": "call cfg_bar_wheel_down_cmd($command); BAR",
+          "callbacks": [
+            "cfg_bar_wheel_down_cmd"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_BINDSYM": {
+      "line": 620,
+      "productions": [
+        {
+          "pattern": "release = '--release'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "button = word",
+          "action": "BAR_BINDSYM_COMMAND",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:BAR_BINDSYM_COMMAND": {
+      "line": 626,
+      "productions": [
+        {
+          "pattern": "release = '--release'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "command = string",
+          "action": "call cfg_bar_bindsym($button, $release, $command); BAR",
+          "callbacks": [
+            "cfg_bar_bindsym"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_POSITION": {
+      "line": 632,
+      "productions": [
+        {
+          "pattern": "position = 'top', 'bottom'",
+          "action": "call cfg_bar_position($position); BAR",
+          "callbacks": [
+            "cfg_bar_position"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_OUTPUT": {
+      "line": 636,
+      "productions": [
+        {
+          "pattern": "output = word",
+          "action": "call cfg_bar_output($output); BAR",
+          "callbacks": [
+            "cfg_bar_output"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_TRAY_OUTPUT": {
+      "line": 640,
+      "productions": [
+        {
+          "pattern": "output = word",
+          "action": "call cfg_bar_tray_output($output); BAR",
+          "callbacks": [
+            "cfg_bar_tray_output"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_TRAY_PADDING": {
+      "line": 644,
+      "productions": [
+        {
+          "pattern": "padding_px = number",
+          "action": "BAR_TRAY_PADDING_PX",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:BAR_TRAY_PADDING_PX": {
+      "line": 648,
+      "productions": [
+        {
+          "pattern": "'px'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "end",
+          "action": "call cfg_bar_tray_padding(&padding_px); BAR",
+          "callbacks": [
+            "cfg_bar_tray_padding"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_FONT": {
+      "line": 654,
+      "productions": [
+        {
+          "pattern": "font = string",
+          "action": "call cfg_bar_font($font); BAR",
+          "callbacks": [
+            "cfg_bar_font"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_SEPARATOR_SYMBOL": {
+      "line": 658,
+      "productions": [
+        {
+          "pattern": "separator = string",
+          "action": "call cfg_bar_separator_symbol($separator); BAR",
+          "callbacks": [
+            "cfg_bar_separator_symbol"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_BINDING_MODE_INDICATOR": {
+      "line": 662,
+      "productions": [
+        {
+          "pattern": "value = word",
+          "action": "call cfg_bar_binding_mode_indicator($value); BAR",
+          "callbacks": [
+            "cfg_bar_binding_mode_indicator"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_WORKSPACE_BUTTONS": {
+      "line": 666,
+      "productions": [
+        {
+          "pattern": "value = word",
+          "action": "call cfg_bar_workspace_buttons($value); BAR",
+          "callbacks": [
+            "cfg_bar_workspace_buttons"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_WORKSPACE_MIN_WIDTH": {
+      "line": 670,
+      "productions": [
+        {
+          "pattern": "width = number",
+          "action": "BAR_WORKSPACE_MIN_WIDTH_PX",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:BAR_WORKSPACE_MIN_WIDTH_PX": {
+      "line": 674,
+      "productions": [
+        {
+          "pattern": "'px'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "end",
+          "action": "call cfg_bar_workspace_min_width(&width); BAR",
+          "callbacks": [
+            "cfg_bar_workspace_min_width"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_STRIP_WORKSPACE_NUMBERS": {
+      "line": 680,
+      "productions": [
+        {
+          "pattern": "value = word",
+          "action": "call cfg_bar_strip_workspace_numbers($value); BAR",
+          "callbacks": [
+            "cfg_bar_strip_workspace_numbers"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_STRIP_WORKSPACE_NAME": {
+      "line": 684,
+      "productions": [
+        {
+          "pattern": "value = word",
+          "action": "call cfg_bar_strip_workspace_name($value); BAR",
+          "callbacks": [
+            "cfg_bar_strip_workspace_name"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_VERBOSE": {
+      "line": 688,
+      "productions": [
+        {
+          "pattern": "value = word",
+          "action": "call cfg_bar_verbose($value); BAR",
+          "callbacks": [
+            "cfg_bar_verbose"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_HEIGHT": {
+      "line": 692,
+      "productions": [
+        {
+          "pattern": "value = number",
+          "action": "call cfg_bar_height(&value); BAR",
+          "callbacks": [
+            "cfg_bar_height"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_PADDING": {
+      "line": 696,
+      "productions": [
+        {
+          "pattern": "top_or_all = number",
+          "action": "BAR_PADDING_TOP",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:BAR_PADDING_TOP": {
+      "line": 700,
+      "productions": [
+        {
+          "pattern": "'px'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "right_or_right_and_left = number",
+          "action": "BAR_PADDING_RIGHT",
+          "callbacks": []
+        },
+        {
+          "pattern": "end",
+          "action": "call cfg_bar_padding_one(&top_or_all); BAR",
+          "callbacks": [
+            "cfg_bar_padding_one"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_PADDING_RIGHT": {
+      "line": 708,
+      "productions": [
+        {
+          "pattern": "'px'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "bottom = number",
+          "action": "BAR_PADDING_BOTTOM",
+          "callbacks": []
+        },
+        {
+          "pattern": "end",
+          "action": "call cfg_bar_padding_two(&top_or_all, &right_or_right_and_left); BAR",
+          "callbacks": [
+            "cfg_bar_padding_two"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_PADDING_BOTTOM": {
+      "line": 716,
+      "productions": [
+        {
+          "pattern": "'px'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "left = number",
+          "action": "BAR_PADDING_LEFT",
+          "callbacks": []
+        },
+        {
+          "pattern": "end",
+          "action": "call cfg_bar_padding_three(&top_or_all, &right_or_right_and_left, &bottom); BAR",
+          "callbacks": [
+            "cfg_bar_padding_three"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_PADDING_LEFT": {
+      "line": 724,
+      "productions": [
+        {
+          "pattern": "'px'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "end",
+          "action": "call cfg_bar_padding_four(&top_or_all, &right_or_right_and_left, &bottom, &left); BAR",
+          "callbacks": [
+            "cfg_bar_padding_four"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_COLORS_BRACE": {
+      "line": 730,
+      "productions": [
+        {
+          "pattern": "end",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "'{'",
+          "action": "BAR_COLORS",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:BAR_COLORS": {
+      "line": 736,
+      "productions": [
+        {
+          "pattern": "end",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "'#'",
+          "action": "BAR_COLORS_IGNORE_LINE",
+          "callbacks": []
+        },
+        {
+          "pattern": "'set'",
+          "action": "BAR_COLORS_IGNORE_LINE",
+          "callbacks": []
+        },
+        {
+          "pattern": "colorclass = 'background', 'statusline', 'separator', 'focused_background', 'focused_statusline', 'focused_separator'",
+          "action": "BAR_COLORS_SINGLE",
+          "callbacks": []
+        },
+        {
+          "pattern": "colorclass = 'focused_workspace', 'active_workspace', 'inactive_workspace', 'urgent_workspace', 'binding_mode'",
+          "action": "BAR_COLORS_BORDER",
+          "callbacks": []
+        },
+        {
+          "pattern": "'}'",
+          "action": "BAR",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:BAR_COLORS_IGNORE_LINE": {
+      "line": 748,
+      "productions": [
+        {
+          "pattern": "line",
+          "action": "BAR_COLORS",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:BAR_COLORS_SINGLE": {
+      "line": 752,
+      "productions": [
+        {
+          "pattern": "color = word",
+          "action": "call cfg_bar_color_single($colorclass, $color); BAR_COLORS",
+          "callbacks": [
+            "cfg_bar_color_single"
+          ]
+        }
+      ]
+    },
+    "config.spec:BAR_COLORS_BORDER": {
+      "line": 756,
+      "productions": [
+        {
+          "pattern": "border = word",
+          "action": "BAR_COLORS_BACKGROUND",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:BAR_COLORS_BACKGROUND": {
+      "line": 760,
+      "productions": [
+        {
+          "pattern": "background = word",
+          "action": "BAR_COLORS_TEXT",
+          "callbacks": []
+        }
+      ]
+    },
+    "config.spec:BAR_COLORS_TEXT": {
+      "line": 764,
+      "productions": [
+        {
+          "pattern": "end",
+          "action": "call cfg_bar_color($colorclass, $border, $background, NULL); BAR_COLORS",
+          "callbacks": [
+            "cfg_bar_color"
+          ]
+        },
+        {
+          "pattern": "text = word",
+          "action": "call cfg_bar_color($colorclass, $border, $background, $text); BAR_COLORS",
+          "callbacks": [
+            "cfg_bar_color"
+          ]
+        }
+      ]
+    },
+    "commands.spec:INITIAL": {
+      "line": 12,
+      "productions": [
+        {
+          "pattern": "end",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "'['",
+          "action": "call cmd_criteria_init(); CRITERIA",
+          "callbacks": [
+            "cmd_criteria_init"
+          ]
+        },
+        {
+          "pattern": "'move'",
+          "action": "MOVE",
+          "callbacks": []
+        },
+        {
+          "pattern": "'exec'",
+          "action": "EXEC",
+          "callbacks": []
+        },
+        {
+          "pattern": "'exit'",
+          "action": "call cmd_exit()",
+          "callbacks": [
+            "cmd_exit"
+          ]
+        },
+        {
+          "pattern": "'restart'",
+          "action": "call cmd_restart()",
+          "callbacks": [
+            "cmd_restart"
+          ]
+        },
+        {
+          "pattern": "'reload'",
+          "action": "call cmd_reload()",
+          "callbacks": [
+            "cmd_reload"
+          ]
+        },
+        {
+          "pattern": "'shmlog'",
+          "action": "SHMLOG",
+          "callbacks": []
+        },
+        {
+          "pattern": "'debuglog'",
+          "action": "DEBUGLOG",
+          "callbacks": []
+        },
+        {
+          "pattern": "'border'",
+          "action": "BORDER",
+          "callbacks": []
+        },
+        {
+          "pattern": "'layout'",
+          "action": "LAYOUT",
+          "callbacks": []
+        },
+        {
+          "pattern": "'append_layout'",
+          "action": "APPEND_LAYOUT",
+          "callbacks": []
+        },
+        {
+          "pattern": "'workspace'",
+          "action": "WORKSPACE",
+          "callbacks": []
+        },
+        {
+          "pattern": "'focus'",
+          "action": "FOCUS",
+          "callbacks": []
+        },
+        {
+          "pattern": "'kill'",
+          "action": "KILL",
+          "callbacks": []
+        },
+        {
+          "pattern": "'open'",
+          "action": "call cmd_open()",
+          "callbacks": [
+            "cmd_open"
+          ]
+        },
+        {
+          "pattern": "'fullscreen'",
+          "action": "FULLSCREEN",
+          "callbacks": []
+        },
+        {
+          "pattern": "'sticky'",
+          "action": "STICKY",
+          "callbacks": []
+        },
+        {
+          "pattern": "'split'",
+          "action": "SPLIT",
+          "callbacks": []
+        },
+        {
+          "pattern": "'floating'",
+          "action": "FLOATING",
+          "callbacks": []
+        },
+        {
+          "pattern": "'mark'",
+          "action": "MARK",
+          "callbacks": []
+        },
+        {
+          "pattern": "'unmark'",
+          "action": "UNMARK",
+          "callbacks": []
+        },
+        {
+          "pattern": "'resize'",
+          "action": "RESIZE",
+          "callbacks": []
+        },
+        {
+          "pattern": "'rename'",
+          "action": "RENAME",
+          "callbacks": []
+        },
+        {
+          "pattern": "'nop'",
+          "action": "NOP",
+          "callbacks": []
+        },
+        {
+          "pattern": "'scratchpad'",
+          "action": "SCRATCHPAD",
+          "callbacks": []
+        },
+        {
+          "pattern": "'swap'",
+          "action": "SWAP",
+          "callbacks": []
+        },
+        {
+          "pattern": "'title_format'",
+          "action": "TITLE_FORMAT",
+          "callbacks": []
+        },
+        {
+          "pattern": "'title_window_icon'",
+          "action": "TITLE_WINDOW_ICON",
+          "callbacks": []
+        },
+        {
+          "pattern": "'mode'",
+          "action": "MODE",
+          "callbacks": []
+        },
+        {
+          "pattern": "'bar'",
+          "action": "BAR",
+          "callbacks": []
+        },
+        {
+          "pattern": "'gaps'",
+          "action": "GAPS",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:CRITERIA": {
+      "line": 48,
+      "productions": [
+        {
+          "pattern": "ctype = 'class'",
+          "action": "CRITERION",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'instance'",
+          "action": "CRITERION",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'window_role'",
+          "action": "CRITERION",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'con_id'",
+          "action": "CRITERION",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'id'",
+          "action": "CRITERION",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'window_type'",
+          "action": "CRITERION",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'con_mark'",
+          "action": "CRITERION",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'title'",
+          "action": "CRITERION",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'urgent'",
+          "action": "CRITERION",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'workspace'",
+          "action": "CRITERION",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'machine'",
+          "action": "CRITERION",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'floating_from'",
+          "action": "CRITERION_FROM",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'tiling_from'",
+          "action": "CRITERION_FROM",
+          "callbacks": []
+        },
+        {
+          "pattern": "ctype = 'tiling', 'floating', 'all'",
+          "action": "call cmd_criteria_add($ctype, NULL); CRITERIA",
+          "callbacks": [
+            "cmd_criteria_add"
+          ]
+        },
+        {
+          "pattern": "']'",
+          "action": "call cmd_criteria_match_windows(); INITIAL",
+          "callbacks": [
+            "cmd_criteria_match_windows"
+          ]
+        }
+      ]
+    },
+    "commands.spec:CRITERION": {
+      "line": 66,
+      "productions": [
+        {
+          "pattern": "'='",
+          "action": "CRITERION_STR",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:CRITERION_FROM": {
+      "line": 69,
+      "productions": [
+        {
+          "pattern": "'='",
+          "action": "CRITERION_FROM_STR_START",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:CRITERION_FROM_STR_START": {
+      "line": 72,
+      "productions": [
+        {
+          "pattern": "'\"'",
+          "action": "CRITERION_FROM_STR",
+          "callbacks": []
+        },
+        {
+          "pattern": "kind = 'auto', 'user'",
+          "action": "call cmd_criteria_add($ctype, $kind); CRITERIA",
+          "callbacks": [
+            "cmd_criteria_add"
+          ]
+        }
+      ]
+    },
+    "commands.spec:CRITERION_FROM_STR": {
+      "line": 77,
+      "productions": [
+        {
+          "pattern": "kind = 'auto', 'user'",
+          "action": "CRITERION_FROM_STR_END",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:CRITERION_FROM_STR_END": {
+      "line": 81,
+      "productions": [
+        {
+          "pattern": "'\"'",
+          "action": "call cmd_criteria_add($ctype, $kind); CRITERIA",
+          "callbacks": [
+            "cmd_criteria_add"
+          ]
+        }
+      ]
+    },
+    "commands.spec:CRITERION_STR": {
+      "line": 85,
+      "productions": [
+        {
+          "pattern": "cvalue = word",
+          "action": "call cmd_criteria_add($ctype, $cvalue); CRITERIA",
+          "callbacks": [
+            "cmd_criteria_add"
+          ]
+        }
+      ]
+    },
+    "commands.spec:EXEC": {
+      "line": 90,
+      "productions": [
+        {
+          "pattern": "nosn = '--no-startup-id'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "command = string",
+          "action": "call cmd_exec($nosn, $command)",
+          "callbacks": [
+            "cmd_exec"
+          ]
+        }
+      ]
+    },
+    "commands.spec:SHMLOG": {
+      "line": 97,
+      "productions": [
+        {
+          "pattern": "argument = string",
+          "action": "call cmd_shmlog($argument)",
+          "callbacks": [
+            "cmd_shmlog"
+          ]
+        }
+      ]
+    },
+    "commands.spec:DEBUGLOG": {
+      "line": 103,
+      "productions": [
+        {
+          "pattern": "argument = 'toggle', 'on', 'off'",
+          "action": "call cmd_debuglog($argument)",
+          "callbacks": [
+            "cmd_debuglog"
+          ]
+        }
+      ]
+    },
+    "commands.spec:BORDER": {
+      "line": 109,
+      "productions": [
+        {
+          "pattern": "border_style = 'normal', 'pixel', 'toggle'",
+          "action": "BORDER_WIDTH",
+          "callbacks": []
+        },
+        {
+          "pattern": "border_style = 'none'",
+          "action": "call cmd_border($border_style, 0)",
+          "callbacks": [
+            "cmd_border"
+          ]
+        },
+        {
+          "pattern": "'1pixel'",
+          "action": "call cmd_border(\"pixel\", 1)",
+          "callbacks": [
+            "cmd_border"
+          ]
+        }
+      ]
+    },
+    "commands.spec:BORDER_WIDTH": {
+      "line": 117,
+      "productions": [
+        {
+          "pattern": "end",
+          "action": "call cmd_border($border_style, -1)",
+          "callbacks": [
+            "cmd_border"
+          ]
+        },
+        {
+          "pattern": "border_width = number",
+          "action": "call cmd_border($border_style, &border_width)",
+          "callbacks": [
+            "cmd_border"
+          ]
+        }
+      ]
+    },
+    "commands.spec:GAPS": {
+      "line": 124,
+      "productions": [
+        {
+          "pattern": "type = 'inner', 'outer', 'horizontal', 'vertical', 'top', 'right', 'bottom', 'left'",
+          "action": "GAPS_WITH_TYPE",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:GAPS_WITH_TYPE": {
+      "line": 128,
+      "productions": [
+        {
+          "pattern": "scope = 'current', 'all'",
+          "action": "GAPS_WITH_SCOPE",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:GAPS_WITH_SCOPE": {
+      "line": 132,
+      "productions": [
+        {
+          "pattern": "mode = 'plus', 'minus', 'set', 'toggle'",
+          "action": "GAPS_WITH_MODE",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:GAPS_WITH_MODE": {
+      "line": 136,
+      "productions": [
+        {
+          "pattern": "value = word",
+          "action": "GAPS_END",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:GAPS_END": {
+      "line": 140,
+      "productions": [
+        {
+          "pattern": "'px'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "end",
+          "action": "call cmd_gaps($type, $scope, $mode, $value)",
+          "callbacks": [
+            "cmd_gaps"
+          ]
+        }
+      ]
+    },
+    "commands.spec:LAYOUT": {
+      "line": 148,
+      "productions": [
+        {
+          "pattern": "layout_mode = 'default', 'stacked', 'stacking', 'tabbed', 'splitv', 'splith'",
+          "action": "call cmd_layout($layout_mode)",
+          "callbacks": [
+            "cmd_layout"
+          ]
+        },
+        {
+          "pattern": "'toggle'",
+          "action": "LAYOUT_TOGGLE",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:LAYOUT_TOGGLE": {
+      "line": 155,
+      "productions": [
+        {
+          "pattern": "end",
+          "action": "call cmd_layout_toggle($toggle_mode)",
+          "callbacks": [
+            "cmd_layout_toggle"
+          ]
+        },
+        {
+          "pattern": "toggle_mode = string",
+          "action": "call cmd_layout_toggle($toggle_mode)",
+          "callbacks": [
+            "cmd_layout_toggle"
+          ]
+        }
+      ]
+    },
+    "commands.spec:APPEND_LAYOUT": {
+      "line": 162,
+      "productions": [
+        {
+          "pattern": "path = string",
+          "action": "call cmd_append_layout($path)",
+          "callbacks": [
+            "cmd_append_layout"
+          ]
+        }
+      ]
+    },
+    "commands.spec:WORKSPACE": {
+      "line": 169,
+      "productions": [
+        {
+          "pattern": "no_auto_back_and_forth = '--no-auto-back-and-forth'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "direction = 'next_on_output', 'prev_on_output', 'next', 'prev'",
+          "action": "call cmd_workspace($direction)",
+          "callbacks": [
+            "cmd_workspace"
+          ]
+        },
+        {
+          "pattern": "'back_and_forth'",
+          "action": "call cmd_workspace_back_and_forth()",
+          "callbacks": [
+            "cmd_workspace_back_and_forth"
+          ]
+        },
+        {
+          "pattern": "'number'",
+          "action": "WORKSPACE_NUMBER",
+          "callbacks": []
+        },
+        {
+          "pattern": "workspace = string",
+          "action": "call cmd_workspace_name($workspace, $no_auto_back_and_forth)",
+          "callbacks": [
+            "cmd_workspace_name"
+          ]
+        }
+      ]
+    },
+    "commands.spec:WORKSPACE_NUMBER": {
+      "line": 181,
+      "productions": [
+        {
+          "pattern": "workspace = string",
+          "action": "call cmd_workspace_number($workspace, $no_auto_back_and_forth)",
+          "callbacks": [
+            "cmd_workspace_number"
+          ]
+        }
+      ]
+    },
+    "commands.spec:FOCUS": {
+      "line": 191,
+      "productions": [
+        {
+          "pattern": "direction = 'left', 'right', 'up', 'down'",
+          "action": "call cmd_focus_direction($direction)",
+          "callbacks": [
+            "cmd_focus_direction"
+          ]
+        },
+        {
+          "pattern": "direction = 'prev', 'next'",
+          "action": "FOCUS_AUTO",
+          "callbacks": []
+        },
+        {
+          "pattern": "'output'",
+          "action": "FOCUS_OUTPUT",
+          "callbacks": []
+        },
+        {
+          "pattern": "window_mode = 'tiling', 'floating', 'mode_toggle'",
+          "action": "call cmd_focus_window_mode($window_mode)",
+          "callbacks": [
+            "cmd_focus_window_mode"
+          ]
+        },
+        {
+          "pattern": "level = 'parent', 'child'",
+          "action": "call cmd_focus_level($level)",
+          "callbacks": [
+            "cmd_focus_level"
+          ]
+        },
+        {
+          "pattern": "workspace = 'workspace'",
+          "action": "call cmd_focus(1)",
+          "callbacks": [
+            "cmd_focus"
+          ]
+        },
+        {
+          "pattern": "end",
+          "action": "call cmd_focus(0)",
+          "callbacks": [
+            "cmd_focus"
+          ]
+        }
+      ]
+    },
+    "commands.spec:FOCUS_AUTO": {
+      "line": 207,
+      "productions": [
+        {
+          "pattern": "'sibling'",
+          "action": "call cmd_focus_sibling($direction)",
+          "callbacks": [
+            "cmd_focus_sibling"
+          ]
+        },
+        {
+          "pattern": "end",
+          "action": "call cmd_focus_direction($direction)",
+          "callbacks": [
+            "cmd_focus_direction"
+          ]
+        }
+      ]
+    },
+    "commands.spec:FOCUS_OUTPUT": {
+      "line": 213,
+      "productions": [
+        {
+          "pattern": "output = word",
+          "action": "call cmd_focus_output($output); FOCUS_OUTPUT",
+          "callbacks": [
+            "cmd_focus_output"
+          ]
+        },
+        {
+          "pattern": "end",
+          "action": "call cmd_focus_output(NULL); INITIAL",
+          "callbacks": [
+            "cmd_focus_output"
+          ]
+        }
+      ]
+    },
+    "commands.spec:KILL": {
+      "line": 220,
+      "productions": [
+        {
+          "pattern": "kill_mode = 'window', 'client'",
+          "action": "call cmd_kill($kill_mode)",
+          "callbacks": [
+            "cmd_kill"
+          ]
+        },
+        {
+          "pattern": "end",
+          "action": "call cmd_kill($kill_mode)",
+          "callbacks": [
+            "cmd_kill"
+          ]
+        }
+      ]
+    },
+    "commands.spec:FULLSCREEN": {
+      "line": 229,
+      "productions": [
+        {
+          "pattern": "action = 'disable'",
+          "action": "call cmd_fullscreen($action, \"output\")",
+          "callbacks": [
+            "cmd_fullscreen"
+          ]
+        },
+        {
+          "pattern": "action = 'enable', 'toggle'",
+          "action": "FULLSCREEN_MODE",
+          "callbacks": []
+        },
+        {
+          "pattern": "action = ''",
+          "action": "FULLSCREEN_COMPAT",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:FULLSCREEN_MODE": {
+      "line": 237,
+      "productions": [
+        {
+          "pattern": "mode = 'global'",
+          "action": "call cmd_fullscreen($action, $mode)",
+          "callbacks": [
+            "cmd_fullscreen"
+          ]
+        },
+        {
+          "pattern": "end",
+          "action": "call cmd_fullscreen($action, \"output\")",
+          "callbacks": [
+            "cmd_fullscreen"
+          ]
+        }
+      ]
+    },
+    "commands.spec:FULLSCREEN_COMPAT": {
+      "line": 243,
+      "productions": [
+        {
+          "pattern": "mode = 'global'",
+          "action": "call cmd_fullscreen(\"toggle\", $mode)",
+          "callbacks": [
+            "cmd_fullscreen"
+          ]
+        },
+        {
+          "pattern": "end",
+          "action": "call cmd_fullscreen(\"toggle\", \"output\")",
+          "callbacks": [
+            "cmd_fullscreen"
+          ]
+        }
+      ]
+    },
+    "commands.spec:STICKY": {
+      "line": 250,
+      "productions": [
+        {
+          "pattern": "action = 'enable', 'disable', 'toggle'",
+          "action": "call cmd_sticky($action)",
+          "callbacks": [
+            "cmd_sticky"
+          ]
+        }
+      ]
+    },
+    "commands.spec:SPLIT": {
+      "line": 255,
+      "productions": [
+        {
+          "pattern": "direction = 'horizontal', 'vertical', 'toggle', 'v', 'h', 't'",
+          "action": "call cmd_split($direction)",
+          "callbacks": [
+            "cmd_split"
+          ]
+        }
+      ]
+    },
+    "commands.spec:FLOATING": {
+      "line": 260,
+      "productions": [
+        {
+          "pattern": "floating = 'enable', 'disable', 'toggle'",
+          "action": "call cmd_floating($floating)",
+          "callbacks": [
+            "cmd_floating"
+          ]
+        }
+      ]
+    },
+    "commands.spec:MARK": {
+      "line": 265,
+      "productions": [
+        {
+          "pattern": "mode = '--add', '--replace'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "toggle = '--toggle'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "mark = string",
+          "action": "call cmd_mark($mark, $mode, $toggle)",
+          "callbacks": [
+            "cmd_mark"
+          ]
+        }
+      ]
+    },
+    "commands.spec:UNMARK": {
+      "line": 274,
+      "productions": [
+        {
+          "pattern": "end",
+          "action": "call cmd_unmark($mark)",
+          "callbacks": [
+            "cmd_unmark"
+          ]
+        },
+        {
+          "pattern": "mark = string",
+          "action": "call cmd_unmark($mark)",
+          "callbacks": [
+            "cmd_unmark"
+          ]
+        }
+      ]
+    },
+    "commands.spec:RESIZE": {
+      "line": 281,
+      "productions": [
+        {
+          "pattern": "way = 'grow', 'shrink'",
+          "action": "RESIZE_DIRECTION",
+          "callbacks": []
+        },
+        {
+          "pattern": "set = 'set'",
+          "action": "RESIZE_SET",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:RESIZE_DIRECTION": {
+      "line": 287,
+      "productions": [
+        {
+          "pattern": "direction = 'up', 'down', 'left', 'right', 'width', 'height'",
+          "action": "RESIZE_PX",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:RESIZE_PX": {
+      "line": 291,
+      "productions": [
+        {
+          "pattern": "resize_px = number",
+          "action": "RESIZE_TILING",
+          "callbacks": []
+        },
+        {
+          "pattern": "end",
+          "action": "call cmd_resize($way, $direction, 10, 10)",
+          "callbacks": [
+            "cmd_resize"
+          ]
+        }
+      ]
+    },
+    "commands.spec:RESIZE_TILING": {
+      "line": 297,
+      "productions": [
+        {
+          "pattern": "'px'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "'or'",
+          "action": "RESIZE_TILING_OR",
+          "callbacks": []
+        },
+        {
+          "pattern": "end",
+          "action": "call cmd_resize($way, $direction, &resize_px, 0)",
+          "callbacks": [
+            "cmd_resize"
+          ]
+        }
+      ]
+    },
+    "commands.spec:RESIZE_TILING_OR": {
+      "line": 305,
+      "productions": [
+        {
+          "pattern": "resize_ppt = number",
+          "action": "RESIZE_TILING_FINAL",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:RESIZE_TILING_FINAL": {
+      "line": 309,
+      "productions": [
+        {
+          "pattern": "'ppt', end",
+          "action": "call cmd_resize($way, $direction, &resize_px, &resize_ppt)",
+          "callbacks": [
+            "cmd_resize"
+          ]
+        }
+      ]
+    },
+    "commands.spec:RESIZE_SET": {
+      "line": 313,
+      "productions": [
+        {
+          "pattern": "'height'",
+          "action": "RESIZE_HEIGHT_GET_NUMBER",
+          "callbacks": []
+        },
+        {
+          "pattern": "'width'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "width = number",
+          "action": "RESIZE_WIDTH",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:RESIZE_WIDTH": {
+      "line": 321,
+      "productions": [
+        {
+          "pattern": "mode_width = 'px', 'ppt'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "end",
+          "action": "call cmd_resize_set(&width, $mode_width, 0, 0)",
+          "callbacks": [
+            "cmd_resize_set"
+          ]
+        },
+        {
+          "pattern": "'height'",
+          "action": "RESIZE_HEIGHT_GET_NUMBER",
+          "callbacks": []
+        },
+        {
+          "pattern": "height = number",
+          "action": "RESIZE_HEIGHT",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:RESIZE_HEIGHT_GET_NUMBER": {
+      "line": 331,
+      "productions": [
+        {
+          "pattern": "height = number",
+          "action": "RESIZE_HEIGHT",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:RESIZE_HEIGHT": {
+      "line": 335,
+      "productions": [
+        {
+          "pattern": "mode_height = 'px', 'ppt'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "end",
+          "action": "call cmd_resize_set(&width, $mode_width, &height, $mode_height)",
+          "callbacks": [
+            "cmd_resize_set"
+          ]
+        }
+      ]
+    },
+    "commands.spec:RENAME": {
+      "line": 343,
+      "productions": [
+        {
+          "pattern": "'workspace'",
+          "action": "RENAME_WORKSPACE",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:RENAME_WORKSPACE": {
+      "line": 347,
+      "productions": [
+        {
+          "pattern": "'to'",
+          "action": "RENAME_WORKSPACE_LIKELY_TO",
+          "callbacks": []
+        },
+        {
+          "pattern": "old_name = word",
+          "action": "RENAME_WORKSPACE_TO",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:RENAME_WORKSPACE_LIKELY_TO": {
+      "line": 353,
+      "productions": [
+        {
+          "pattern": "'to '",
+          "action": "RENAME_WORKSPACE_LIKELY_TO_NEW_NAME",
+          "callbacks": []
+        },
+        {
+          "pattern": "new_name = word",
+          "action": "call cmd_rename_workspace(NULL, $new_name)",
+          "callbacks": [
+            "cmd_rename_workspace"
+          ]
+        }
+      ]
+    },
+    "commands.spec:RENAME_WORKSPACE_LIKELY_TO_NEW_NAME": {
+      "line": 359,
+      "productions": [
+        {
+          "pattern": "new_name = string",
+          "action": "call cmd_rename_workspace(\"to\", $new_name)",
+          "callbacks": [
+            "cmd_rename_workspace"
+          ]
+        },
+        {
+          "pattern": "end",
+          "action": "call cmd_rename_workspace(NULL, \"to\")",
+          "callbacks": [
+            "cmd_rename_workspace"
+          ]
+        }
+      ]
+    },
+    "commands.spec:RENAME_WORKSPACE_TO": {
+      "line": 365,
+      "productions": [
+        {
+          "pattern": "'to'",
+          "action": "RENAME_WORKSPACE_TO_NEW_NAME",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:RENAME_WORKSPACE_TO_NEW_NAME": {
+      "line": 369,
+      "productions": [
+        {
+          "pattern": "new_name = string",
+          "action": "call cmd_rename_workspace($old_name, $new_name)",
+          "callbacks": [
+            "cmd_rename_workspace"
+          ]
+        }
+      ]
+    },
+    "commands.spec:MOVE": {
+      "line": 383,
+      "productions": [
+        {
+          "pattern": "'window'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "'container'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "'to'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "no_auto_back_and_forth = '--no-auto-back-and-forth'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "'workspace'",
+          "action": "MOVE_WORKSPACE",
+          "callbacks": []
+        },
+        {
+          "pattern": "'output'",
+          "action": "MOVE_TO_OUTPUT",
+          "callbacks": []
+        },
+        {
+          "pattern": "'mark'",
+          "action": "MOVE_TO_MARK",
+          "callbacks": []
+        },
+        {
+          "pattern": "'scratchpad'",
+          "action": "call cmd_move_scratchpad()",
+          "callbacks": [
+            "cmd_move_scratchpad"
+          ]
+        },
+        {
+          "pattern": "direction = 'left', 'right', 'up', 'down'",
+          "action": "MOVE_DIRECTION",
+          "callbacks": []
+        },
+        {
+          "pattern": "method = 'position'",
+          "action": "MOVE_TO_POSITION",
+          "callbacks": []
+        },
+        {
+          "pattern": "method = 'absolute'",
+          "action": "MOVE_TO_ABSOLUTE_POSITION",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:MOVE_DIRECTION": {
+      "line": 407,
+      "productions": [
+        {
+          "pattern": "amount = number",
+          "action": "MOVE_DIRECTION_NUMBER",
+          "callbacks": []
+        },
+        {
+          "pattern": "end",
+          "action": "call cmd_move_direction($direction, 10, \"px\")",
+          "callbacks": [
+            "cmd_move_direction"
+          ]
+        }
+      ]
+    },
+    "commands.spec:MOVE_DIRECTION_NUMBER": {
+      "line": 413,
+      "productions": [
+        {
+          "pattern": "mode = 'px', 'ppt'",
+          "action": "call cmd_move_direction($direction, &amount, $mode)",
+          "callbacks": [
+            "cmd_move_direction"
+          ]
+        },
+        {
+          "pattern": "end",
+          "action": "call cmd_move_direction($direction, &amount, \"px\")",
+          "callbacks": [
+            "cmd_move_direction"
+          ]
+        }
+      ]
+    },
+    "commands.spec:MOVE_WORKSPACE": {
+      "line": 419,
+      "productions": [
+        {
+          "pattern": "'to '",
+          "action": "MOVE_WORKSPACE_TO_OUTPUT",
+          "callbacks": []
+        },
+        {
+          "pattern": "workspace = 'next_on_output', 'prev_on_output', 'next', 'prev', 'current'",
+          "action": "call cmd_move_con_to_workspace($workspace)",
+          "callbacks": [
+            "cmd_move_con_to_workspace"
+          ]
+        },
+        {
+          "pattern": "'back_and_forth'",
+          "action": "call cmd_move_con_to_workspace_back_and_forth()",
+          "callbacks": [
+            "cmd_move_con_to_workspace_back_and_forth"
+          ]
+        },
+        {
+          "pattern": "'number'",
+          "action": "MOVE_WORKSPACE_NUMBER",
+          "callbacks": []
+        },
+        {
+          "pattern": "workspace = string",
+          "action": "call cmd_move_con_to_workspace_name($workspace, $no_auto_back_and_forth)",
+          "callbacks": [
+            "cmd_move_con_to_workspace_name"
+          ]
+        }
+      ]
+    },
+    "commands.spec:MOVE_WORKSPACE_NUMBER": {
+      "line": 431,
+      "productions": [
+        {
+          "pattern": "number = string",
+          "action": "call cmd_move_con_to_workspace_number($number, $no_auto_back_and_forth)",
+          "callbacks": [
+            "cmd_move_con_to_workspace_number"
+          ]
+        }
+      ]
+    },
+    "commands.spec:MOVE_TO_OUTPUT": {
+      "line": 435,
+      "productions": [
+        {
+          "pattern": "output = word",
+          "action": "call cmd_move_con_to_output($output, 0); MOVE_TO_OUTPUT",
+          "callbacks": [
+            "cmd_move_con_to_output"
+          ]
+        },
+        {
+          "pattern": "end",
+          "action": "call cmd_move_con_to_output(NULL, 0); INITIAL",
+          "callbacks": [
+            "cmd_move_con_to_output"
+          ]
+        }
+      ]
+    },
+    "commands.spec:MOVE_TO_MARK": {
+      "line": 441,
+      "productions": [
+        {
+          "pattern": "mark = string",
+          "action": "call cmd_move_con_to_mark($mark)",
+          "callbacks": [
+            "cmd_move_con_to_mark"
+          ]
+        }
+      ]
+    },
+    "commands.spec:MOVE_WORKSPACE_TO_OUTPUT": {
+      "line": 445,
+      "productions": [
+        {
+          "pattern": "'output'",
+          "action": "MOVE_WORKSPACE_TO_OUTPUT_WORD",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:MOVE_WORKSPACE_TO_OUTPUT_WORD": {
+      "line": 449,
+      "productions": [
+        {
+          "pattern": "output = word",
+          "action": "call cmd_move_con_to_output($output, 1); MOVE_WORKSPACE_TO_OUTPUT_WORD",
+          "callbacks": [
+            "cmd_move_con_to_output"
+          ]
+        },
+        {
+          "pattern": "end",
+          "action": "call cmd_move_con_to_output(NULL, 1); INITIAL",
+          "callbacks": [
+            "cmd_move_con_to_output"
+          ]
+        }
+      ]
+    },
+    "commands.spec:MOVE_TO_ABSOLUTE_POSITION": {
+      "line": 455,
+      "productions": [
+        {
+          "pattern": "'position'",
+          "action": "MOVE_TO_POSITION",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:MOVE_TO_POSITION": {
+      "line": 459,
+      "productions": [
+        {
+          "pattern": "'center'",
+          "action": "call cmd_move_window_to_center($method)",
+          "callbacks": [
+            "cmd_move_window_to_center"
+          ]
+        },
+        {
+          "pattern": "'mouse', 'cursor', 'pointer'",
+          "action": "call cmd_move_window_to_mouse()",
+          "callbacks": [
+            "cmd_move_window_to_mouse"
+          ]
+        },
+        {
+          "pattern": "coord_x = number",
+          "action": "MOVE_TO_POSITION_X",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:MOVE_TO_POSITION_X": {
+      "line": 467,
+      "productions": [
+        {
+          "pattern": "mode_x = 'px', 'ppt'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "coord_y = number",
+          "action": "MOVE_TO_POSITION_Y",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:MOVE_TO_POSITION_Y": {
+      "line": 473,
+      "productions": [
+        {
+          "pattern": "mode_y = 'px', 'ppt'",
+          "action": "call cmd_move_window_to_position(&coord_x, $mode_x, &coord_y, $mode_y)",
+          "callbacks": [
+            "cmd_move_window_to_position"
+          ]
+        },
+        {
+          "pattern": "end",
+          "action": "call cmd_move_window_to_position(&coord_x, $mode_x, &coord_y, 0)",
+          "callbacks": [
+            "cmd_move_window_to_position"
+          ]
+        }
+      ]
+    },
+    "commands.spec:MODE": {
+      "line": 480,
+      "productions": [
+        {
+          "pattern": "mode = string",
+          "action": "call cmd_mode($mode)",
+          "callbacks": [
+            "cmd_mode"
+          ]
+        }
+      ]
+    },
+    "commands.spec:NOP": {
+      "line": 484,
+      "productions": [
+        {
+          "pattern": "comment = string",
+          "action": "call cmd_nop($comment)",
+          "callbacks": [
+            "cmd_nop"
+          ]
+        },
+        {
+          "pattern": "end",
+          "action": "call cmd_nop(NULL)",
+          "callbacks": [
+            "cmd_nop"
+          ]
+        }
+      ]
+    },
+    "commands.spec:SCRATCHPAD": {
+      "line": 490,
+      "productions": [
+        {
+          "pattern": "'show'",
+          "action": "call cmd_scratchpad_show()",
+          "callbacks": [
+            "cmd_scratchpad_show"
+          ]
+        }
+      ]
+    },
+    "commands.spec:SWAP": {
+      "line": 497,
+      "productions": [
+        {
+          "pattern": "'container'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "'with'",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "mode = 'id', 'con_id', 'mark'",
+          "action": "SWAP_ARGUMENT",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:SWAP_ARGUMENT": {
+      "line": 505,
+      "productions": [
+        {
+          "pattern": "arg = string",
+          "action": "call cmd_swap($mode, $arg)",
+          "callbacks": [
+            "cmd_swap"
+          ]
+        }
+      ]
+    },
+    "commands.spec:TITLE_FORMAT": {
+      "line": 509,
+      "productions": [
+        {
+          "pattern": "format = string",
+          "action": "call cmd_title_format($format)",
+          "callbacks": [
+            "cmd_title_format"
+          ]
+        }
+      ]
+    },
+    "commands.spec:TITLE_WINDOW_ICON": {
+      "line": 513,
+      "productions": [
+        {
+          "pattern": "'padding'",
+          "action": "TITLE_WINDOW_ICON_PADDING",
+          "callbacks": []
+        },
+        {
+          "pattern": "enable = 'toggle'",
+          "action": "TITLE_WINDOW_ICON_PADDING",
+          "callbacks": []
+        },
+        {
+          "pattern": "enable = '1', 'yes', 'true', 'on', 'enable', 'active', '0', 'no', 'false', 'off', 'disable', 'inactive'",
+          "action": "call cmd_title_window_icon($enable, 0)",
+          "callbacks": [
+            "cmd_title_window_icon"
+          ]
+        }
+      ]
+    },
+    "commands.spec:TITLE_WINDOW_ICON_PADDING": {
+      "line": 521,
+      "productions": [
+        {
+          "pattern": "end",
+          "action": "call cmd_title_window_icon($enable, &padding)",
+          "callbacks": [
+            "cmd_title_window_icon"
+          ]
+        },
+        {
+          "pattern": "'px'",
+          "action": "call cmd_title_window_icon($enable, &padding)",
+          "callbacks": [
+            "cmd_title_window_icon"
+          ]
+        },
+        {
+          "pattern": "padding = number",
+          "action": "",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:BAR": {
+      "line": 530,
+      "productions": [
+        {
+          "pattern": "'hidden_state'",
+          "action": "BAR_HIDDEN_STATE",
+          "callbacks": []
+        },
+        {
+          "pattern": "'mode'",
+          "action": "BAR_MODE",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:BAR_HIDDEN_STATE": {
+      "line": 536,
+      "productions": [
+        {
+          "pattern": "bar_value = 'hide', 'show', 'toggle'",
+          "action": "BAR_HIDDEN_STATE_ID",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:BAR_HIDDEN_STATE_ID": {
+      "line": 540,
+      "productions": [
+        {
+          "pattern": "bar_id = word",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "end",
+          "action": "call cmd_bar_hidden_state($bar_value, $bar_id)",
+          "callbacks": [
+            "cmd_bar_hidden_state"
+          ]
+        }
+      ]
+    },
+    "commands.spec:BAR_MODE": {
+      "line": 546,
+      "productions": [
+        {
+          "pattern": "bar_value = 'dock', 'hide', 'invisible', 'toggle'",
+          "action": "BAR_MODE_ID",
+          "callbacks": []
+        }
+      ]
+    },
+    "commands.spec:BAR_MODE_ID": {
+      "line": 550,
+      "productions": [
+        {
+          "pattern": "bar_id = word",
+          "action": "",
+          "callbacks": []
+        },
+        {
+          "pattern": "end",
+          "action": "call cmd_bar_mode($bar_value, $bar_id)",
+          "callbacks": [
+            "cmd_bar_mode"
+          ]
+        }
+      ]
+    }
+  }
+}

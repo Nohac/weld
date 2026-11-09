@@ -460,7 +460,7 @@ pub trait HostPolicy {
         None
     }
     /// Publishes a complete replacement of physical pointer-device preferences.
-    fn take_pointer_device_settings(&mut self) -> Option<weld_input::PointerDeviceSettings> {
+    fn take_pointer_device_settings(&mut self) -> Option<weld_input_config::PointerDeviceSettings> {
         None
     }
     /// Publishes a complete replacement of native output preferences.

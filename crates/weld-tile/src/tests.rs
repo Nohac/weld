@@ -23,6 +23,7 @@ use weld_window::{
     WindowCommand, WindowCommandKind, WindowGeometry, WindowId, WindowPlugin,
     WindowPresentationOverride, WindowVacancy,
 };
+use weld_window_config::{FullscreenAction, FullscreenMode};
 
 #[test]
 fn inactive_tabs_pause_local_demand_and_switching_reactivates_the_retained_surface() {
@@ -750,8 +751,7 @@ fn border_press_drives_shared_motion_and_only_its_release_ends_resize() {
 }
 use weld_app::layer_shell::DesktopLayerVisibility;
 use weld_window::fullscreen::{
-    FullscreenAction, FullscreenMode, FullscreenOccluded, FullscreenPlugin, FullscreenRequest,
-    WindowFullscreen,
+    FullscreenOccluded, FullscreenPlugin, FullscreenRequest, WindowFullscreen,
 };
 
 #[test]

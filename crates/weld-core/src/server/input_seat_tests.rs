@@ -265,7 +265,7 @@ impl Dispatch<wl_keyboard::WlKeyboard, u32> for Observer {
 #[ignore = "native socket fixture requires XDG_RUNTIME_DIR"]
 fn held_control_survives_closing_its_press_recipient_and_releases_on_the_next_window() {
     let mut f = Fixture::new();
-    let keymap = crate::input::KeyboardKeymap::compile(&crate::input::KeymapConfig {
+    let keymap = crate::input::KeyboardKeymap::compile(&weld_input_config::KeymapConfig {
         options: "ctrl:swapcaps".into(),
         ..Default::default()
     })
@@ -353,7 +353,7 @@ fn held_control_survives_closing_its_press_recipient_and_releases_on_the_next_wi
 #[ignore = "native socket fixture requires XDG_RUNTIME_DIR"]
 fn local_keyboard_synchronization_preserves_caps_lock_and_layout_group() {
     let mut f = Fixture::new();
-    let keymap = crate::input::KeyboardKeymap::compile(&crate::input::KeymapConfig {
+    let keymap = crate::input::KeyboardKeymap::compile(&weld_input_config::KeymapConfig {
         layout: "us,no".into(),
         options: "grp:alt_shift_toggle".into(),
         ..Default::default()

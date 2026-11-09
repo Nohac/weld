@@ -4,6 +4,7 @@ use bevy::{
     input::{keyboard::KeyCode, mouse::MouseButton},
 };
 use weld_input::*;
+use weld_input_config::{KeymapConfig, PointerShortcutModifiers};
 
 fn mapper() -> KeyboardMapper {
     KeyboardMapper::new(

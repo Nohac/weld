@@ -129,8 +129,8 @@ mod tests {
         OutputId, OutputScale,
         dmabuf::DmabufSourceCache,
         input::{
-            KeyboardKeyState, KeyboardKeymap, KeyboardRepeatMode, KeymapConfig, LegacyKeyRepeat,
-            LinuxKeycode, RawSeatEventKind,
+            KeyboardKeyState, KeyboardKeymap, KeyboardRepeatMode, LegacyKeyRepeat, LinuxKeycode,
+            RawSeatEventKind,
         },
         server::{
             OutputDescriptor, OutputMetrics, ServerOptions, ServerOutputDefinition,
@@ -146,6 +146,7 @@ mod tests {
         utils::SERIAL_COUNTER,
     };
     use std::time::Instant;
+    use weld_input_config::KeymapConfig;
 
     #[test]
     #[ignore = "native socket fixture requires XDG_RUNTIME_DIR"]

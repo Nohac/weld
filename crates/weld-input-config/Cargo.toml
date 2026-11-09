@@ -1,0 +1,11 @@
+[package]
+name = "weld-input-config"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[features]
+ecs = ["dep:bevy_ecs"]
+
+[dependencies]
+bevy_ecs = { workspace = true, optional = true }

@@ -4,14 +4,12 @@
 //! managed-window commands. Window identity, node history and tree mutation remain
 //! owned by `weld-window` and `weld-tile`.
 
-pub mod config;
+use weld_i3_config::{FocusWrapping, I3FocusHierarchy};
+use weld_tile_config::Direction;
 mod focus;
-mod font;
 mod layout;
 mod movement;
 mod resize;
-pub use layout::{I3LayoutRequest, LayoutChoice};
-pub use resize::I3ResizeRequest;
 mod sticky;
 pub use sticky::I3StickyRequest;
 mod tree;
@@ -20,9 +18,9 @@ pub mod workspace;
 
 use bevy::{
     app::{App, Plugin, PreUpdate},
-    ecs::{event::Event, resource::Resource, schedule::IntoScheduleConfigs},
+    ecs::{event::Event, schedule::IntoScheduleConfigs},
 };
-use weld_tile::{Direction, TileSystems};
+use weld_tile::TileSystems;
 
 /// Directional navigation through the current i3 layout and focus history.
 #[derive(Event, Clone, Copy, Debug)]
@@ -36,25 +34,6 @@ pub struct I3MoveRequest(pub Direction);
 #[derive(Event, Clone, Copy, Debug)]
 pub struct I3FocusModeToggle;
 
-/// Select an ancestor split or its last-selected direct child.
-#[derive(Event, Clone, Copy, Debug, PartialEq)]
-pub enum I3FocusHierarchy {
-    Parent,
-    Child,
-}
-
-/// Where directional navigation may wrap after reaching a split edge.
-#[derive(Resource, Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum FocusWrapping {
-    No,
-    #[default]
-    Yes,
-    Force,
-    /// Keeps navigation within the current workspace. Directional output
-    /// traversal remains a follow-up, so currently this matches [`Self::Yes`].
-    Workspace,
-}
-
 /// Installs i3 navigation and close-focus restoration over the shared tree.
 pub struct I3QuirksPlugin;
 
@@ -62,7 +41,7 @@ impl Plugin for I3QuirksPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<FocusWrapping>()
             .init_resource::<window_rules::WindowRules>()
-            .init_resource::<workspace::WorkspaceSettings>()
+            .init_resource::<weld_i3_config::WorkspaceSettings>()
             .init_resource::<workspace::PreviousWorkspace>()
             .add_observer(workspace::request)
             .add_observer(workspace::move_explicit)

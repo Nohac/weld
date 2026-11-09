@@ -10,8 +10,10 @@ use weld_core::{
     host::{CompositionDestination, CompositionOutputRequest},
     surface::{Extent, LogicalPoint},
 };
-use weld_ssd::{BorderStyle, FrameColors, SsdPlugin, SsdSettings};
-use weld_tile::{TileLayout, TileParent, TilePlugin, TileSetLayout};
+use weld_ssd::{FrameColors, SsdPlugin, SsdSettings};
+use weld_ssd_config::BorderStyle;
+use weld_tile::{TileParent, TilePlugin, TileSetLayout};
+use weld_tile_config::TileLayout;
 use weld_window::{ManagedWindow, WindowHeaderRequested, WindowId, WindowPlugin, WindowVacancy};
 use weld_window_ui::WindowUiPlugin;
 

@@ -31,7 +31,6 @@ pub struct KeyboardSettings {
 #[cfg(feature = "bevy")]
 mod integration {
     use super::KeyboardSettings;
-    use crate::PointerDeviceSettings;
     use bevy::{
         app::App,
         ecs::{
@@ -41,6 +40,7 @@ mod integration {
             world::World,
         },
     };
+    use weld_input_config::PointerDeviceSettings;
 
     /// Native publication history for the [`World`] supplied at construction.
     /// Keep this reader in the host alongside its application.

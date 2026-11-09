@@ -5,6 +5,8 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+weld-ssd-config = { path = "../weld-ssd-config" }
+weld-tile-config = { path = "../weld-tile-config", features = ["ecs"] }
 bevy.workspace = true
 weld-app = { path = "../weld-app" }
 weld-window = { path = "../weld-window" }
@@ -12,5 +14,10 @@ weld-tile = { path = "../weld-tile" }
 weld-ssd = { path = "../weld-ssd" }
 
 [dev-dependencies]
+weld-i3-config = { path = "../weld-i3-config", features = ["ecs"] }
+
+weld-window-config = { path = "../weld-window-config", features = ["ecs"] }
+
+weld-sway-adapter = { path = "../weld-sway-adapter" }
 weld-client = { path = "../weld-client" }
 weld-i3-quirks = { path = "../weld-i3-quirks" }

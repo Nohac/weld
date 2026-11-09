@@ -21,7 +21,8 @@ use bevy::{
 };
 use std::collections::HashMap;
 use weld_app::border::BorderUnderlap;
-use weld_ssd::{BorderStyle, FrameColors, SsdSettings};
+use weld_ssd::{FrameColors, SsdSettings};
+use weld_ssd_config::BorderStyle;
 use weld_tile::{TileGeometry, TileHeaders, TilePresentationMetrics};
 use weld_window::WindowGeometry;
 

@@ -295,7 +295,7 @@ fn presentation_free_host_does_not_advertise_session_lock() {
 #[ignore = "native socket fixture requires XDG_RUNTIME_DIR"]
 fn session_lock_preserves_xkb_remappings_and_local_led_state() {
     let mut f = Fixture::with_session_lock(true);
-    let keymap = crate::input::KeyboardKeymap::compile(&crate::input::KeymapConfig {
+    let keymap = crate::input::KeyboardKeymap::compile(&weld_input_config::KeymapConfig {
         options: "ctrl:swapcaps,altwin:swap_lalt_lwin".into(),
         ..Default::default()
     })

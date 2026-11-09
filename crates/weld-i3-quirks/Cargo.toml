@@ -5,20 +5,26 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+weld-i3-config = { path = "../weld-i3-config", features = ["ecs"] }
+weld-tile-config = { path = "../weld-tile-config", features = ["ecs"] }
 weld-float = { path = "../weld-float" }
 anyhow.workspace = true
-pango = { version = "=0.22.9", features = ["v1_56"] }
 bevy.workspace = true
 regex.workspace = true
 weld-app = { path = "../weld-app" }
-weld-input = { path = "../weld-input", features = ["bevy"] }
-weld-sway-config = { path = "../weld-sway-config", features = ["input", "output"] }
-weld-output = { path = "../weld-output" }
 weld-tile = { path = "../weld-tile" }
 weld-window = { path = "../weld-window" }
 weld-ssd = { path = "../weld-ssd" }
 
 [dev-dependencies]
+weld-ssd-config = { path = "../weld-ssd-config" }
+
+weld-window-config = { path = "../weld-window-config", features = ["ecs"] }
+
+weld-config = { path = "../weld-config" }
+
+weld-master-config = { path = "../weld-master-config" }
+weld-sway-adapter = { path = "../weld-sway-adapter" }
 weld-window-ui = { path = "../weld-window-ui" }
 weld-client = { path = "../weld-client" }
 indoc.workspace = true

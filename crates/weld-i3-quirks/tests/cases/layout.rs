@@ -2,8 +2,10 @@
 //! See ../../UPSTREAM.md and ../../LICENSE-i3.
 
 use super::*;
-use weld_i3_quirks::{I3LayoutRequest, LayoutChoice};
-use weld_tile::{TileHeaders, TileLayout, TileSelect};
+use weld_i3_config::{I3LayoutRequest, LayoutChoice};
+use weld_tile_config::TileLayout;
+
+use weld_tile::{TileHeaders, TileSelect};
 use weld_window::{WindowVisibility, workspace::WorkspaceMember};
 
 fn layout(app: &mut App, request: I3LayoutRequest) {
@@ -309,7 +311,7 @@ fn stacking_navigation_uses_layout_axis_after_parent_split_changes() {
     app.update();
     split(&mut app, SplitAxis::Horizontal);
     app.world_mut()
-        .trigger(weld_i3_quirks::I3FocusHierarchy::Child);
+        .trigger(weld_i3_config::I3FocusHierarchy::Child);
     app.update();
     navigate(&mut app, Direction::Down);
     assert_eq!(selected(&app), first);

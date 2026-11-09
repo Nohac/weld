@@ -15,14 +15,13 @@ use weld_app::{
     surface::{SurfaceAction, SurfaceActionQueue, take_surface_actions},
 };
 use weld_float::{FloatBehaviorPlugin, FloatManagement};
-use weld_i3_quirks::{
-    FocusWrapping, I3FocusModeToggle, I3FocusRequest, I3QuirksPlugin,
-    workspace::{I3WorkspaceRequest, WorkspaceTarget},
-};
+use weld_i3_config::{FocusWrapping, I3WorkspaceRequest, WorkspaceTarget};
+use weld_i3_quirks::{I3FocusModeToggle, I3FocusRequest, I3QuirksPlugin};
 use weld_tile::{
-    Direction, SplitAxis, TileCommand, TileContainer, TileFloatingRequest, TileFocusHistory,
-    TileOperation, TileParent, TilePlugin, TileRequest, TileSettings, TileSystems, TileWorkspace,
+    TileCommand, TileContainer, TileFloatingRequest, TileFocusHistory, TileParent, TilePlugin,
+    TileRequest, TileSystems, TileWorkspace,
 };
+use weld_tile_config::{Direction, SplitAxis, TileOperation, TileSettings};
 use weld_window::{
     FloatingWindow, FocusedWindow, ManagedBy, ManagedWindow, WindowCommand, WindowCommandKind,
     WindowGeometry, WindowId, WindowIntent, WindowIntentKind, WindowInteractionKind,
@@ -213,7 +212,7 @@ fn resize_amounts_select_percent_for_tiles_and_pixels_for_floating() {
         .get::<WindowGeometry>(second)
         .expect("geometry")
         .size;
-    let request = weld_i3_quirks::I3ResizeRequest {
+    let request = weld_i3_config::I3ResizeRequest {
         axis: SplitAxis::Horizontal,
         pixels: Some(10.0),
         fraction: Some(0.1),
@@ -249,7 +248,7 @@ fn resize_amounts_select_percent_for_tiles_and_pixels_for_floating() {
         .get::<WindowGeometry>(second)
         .expect("tile")
         .size;
-    app.world_mut().trigger(weld_i3_quirks::I3ResizeRequest {
+    app.world_mut().trigger(weld_i3_config::I3ResizeRequest {
         fraction: None,
         ..request
     });

@@ -15,21 +15,20 @@ use weld_app::{
 };
 use weld_client::{ClientId, ClientSourceId, ClientSurfaceMetadata, ToplevelHints, ToplevelKind};
 use weld_float::FloatBehaviorPlugin;
-use weld_i3_quirks::{
-    I3QuirksPlugin,
-    config::{self, Configuration},
-    workspace::{I3WorkspaceRequest, WorkspaceTarget},
-};
-use weld_ssd::{BorderStyle, WindowBorderStyle};
-use weld_tile::{TileParent, TilePlugin, TileSettings};
-use weld_window::persistence::{
-    PersistenceAction, PersistenceMatch, PersistentWindow, WindowPersistenceRequest,
-};
+use weld_i3_config::{I3WorkspaceRequest, WorkspaceTarget};
+use weld_i3_quirks::I3QuirksPlugin;
+use weld_master_config::Configuration;
+use weld_ssd::WindowBorderStyle;
+use weld_ssd_config::BorderStyle;
+use weld_tile::{TileParent, TilePlugin};
+use weld_tile_config::TileSettings;
+use weld_window::persistence::{PersistentWindow, WindowPersistenceRequest};
 use weld_window::{
     FloatingWindow, FocusedWindow, OccupiesWindow, WindowCommand, WindowCommandKind,
     WindowGeometry, WindowPlugin, WindowVisibility,
     workspace::{FocusedWorkspace, Workspace, WorkspaceMember},
 };
+use weld_window_config::{PersistenceAction, PersistenceMatch};
 
 #[test]
 fn persistence_rule_retains_slot_geometry_and_workspace_then_rebinds_a_new_occupant() {
@@ -123,9 +122,9 @@ fn persistence_rule_retains_slot_geometry_and_workspace_then_rebinds_a_new_occup
 #[test]
 fn resized_vacant_slots_configure_replacements_to_current_layout() {
     for layout in [
-        weld_tile::TileLayout::Split(weld_tile::SplitAxis::Horizontal),
-        weld_tile::TileLayout::Tabbed,
-        weld_tile::TileLayout::Stacked,
+        weld_tile_config::TileLayout::Split(weld_tile_config::SplitAxis::Horizontal),
+        weld_tile_config::TileLayout::Tabbed,
+        weld_tile_config::TileLayout::Stacked,
     ] {
         let mut app = app("for_window [app_id=preview] weld persistent enable");
         let original = client(&mut app, 750, "preview", "First", ToplevelKind::Normal);
@@ -186,8 +185,8 @@ fn resized_vacant_slots_configure_replacements_to_current_layout() {
 #[test]
 fn replacement_in_a_hidden_persistent_tab_is_resized_before_activation() {
     for layout in [
-        weld_tile::TileLayout::Tabbed,
-        weld_tile::TileLayout::Stacked,
+        weld_tile_config::TileLayout::Tabbed,
+        weld_tile_config::TileLayout::Stacked,
     ] {
         let mut app = app("for_window [app_id=preview] weld persistent enable");
         let original = client(&mut app, 760, "preview", "First", ToplevelKind::Normal);
@@ -345,7 +344,7 @@ fn title_persistence_is_stable_through_metadata_changes_and_config_reload() {
     app.world_mut()
         .entity_mut(original)
         .insert(metadata("preview", "Game - paused"));
-    app.insert_resource(config(source).window_rules);
+    app.insert_resource(prepared_rules(source));
     app.update();
     app.world_mut().despawn(original);
     app.update();
@@ -432,8 +431,10 @@ fn close_requests_exit_then_removes_only_the_empty_persistent_slot() {
 }
 
 fn config(source: &str) -> Configuration {
-    config::parse_with_extensions("fixture", source, |_| Err(config::unsupported("command")))
-        .expect("config")
+    weld_sway_adapter::parse_with_extensions("fixture", source, |_| {
+        Err(weld_config::unsupported("command"))
+    })
+    .expect("config")
 }
 
 fn app(source: &str) -> App {
@@ -445,7 +446,7 @@ fn app(source: &str) -> App {
             I3QuirksPlugin,
             FloatBehaviorPlugin,
         ))
-        .insert_resource(config(source).window_rules)
+        .insert_resource(prepared_rules(source))
         .insert_resource(TileSettings {
             inner_gap: 0,
             outer_gap: 0,
@@ -626,7 +627,7 @@ fn assignments_use_first_match_and_preserve_numbered_workspace_identity() {
     app.update();
     assert_eq!(workspace(&app, window(&app, other)), "5: a,b");
     assert_eq!(app.world().resource::<FocusedWindow>().entity(), Some(tool));
-    app.insert_resource(config("assign [app_id=tool] workspace 8").window_rules);
+    app.insert_resource(prepared_rules("assign [app_id=tool] workspace 8"));
     app.update();
     assert_eq!(workspace(&app, tool), "3:tools");
 }
@@ -664,7 +665,7 @@ fn late_title_rules_target_background_window_once_and_reload_reapplies_commands(
         .insert(metadata("tool", "Ready again"));
     app.update();
     assert_eq!(workspace(&app, tool), "1");
-    app.insert_resource(config(source).window_rules);
+    app.insert_resource(prepared_rules(source));
     app.update();
     assert_eq!(workspace(&app, tool), "2");
     assert_eq!(app.world().resource::<FocusedWindow>().entity(), Some(main));
@@ -683,7 +684,7 @@ fn explicit_tiling_overrides_dialog_hint_and_rule_removal_preserves_manual_state
         enabled: Some(true),
     });
     app.update();
-    app.insert_resource(config("").window_rules);
+    app.insert_resource(prepared_rules(""));
     app.update();
     assert!(app.world().get::<FloatingWindow>(dialog).is_some());
 }
@@ -716,4 +717,12 @@ fn batch_admission_preserves_first_focus_and_reuses_assignment_destination() {
         .0;
     assert_eq!(member1, member2);
     assert_eq!(workspace(&app, window(&app, worker1)), "3");
+}
+
+fn prepared_rules(source: &str) -> weld_i3_quirks::window_rules::WindowRules {
+    let mut rules = weld_i3_quirks::window_rules::WindowRules::default();
+    for rule in config(source).window_rules {
+        rules.add(rule.value).expect("native rule");
+    }
+    rules
 }

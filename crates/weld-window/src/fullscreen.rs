@@ -27,22 +27,7 @@ use weld_app::{
     output::{OutputGeometry, WeldOutput},
     surface::{ClientToplevelParent, PendingClientFullscreen},
 };
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FullscreenMode {
-    /// Fill the workspace's output, retaining desktop overlay access.
-    Normal,
-    /// Give this application the output, including its ordinary overlay/input plane.
-    /// Compositor escape shortcuts remain available.
-    Exclusive,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FullscreenAction {
-    Enable(FullscreenMode),
-    Toggle(FullscreenMode),
-    Disable,
-}
+use weld_window_config::{FullscreenAction, FullscreenMode};
 
 #[derive(Event, Clone, Copy, Debug)]
 pub struct FullscreenRequest {

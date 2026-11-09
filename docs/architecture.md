@@ -138,11 +138,17 @@ Weld is a workspace of reusable layers and one standard distribution:
   from its control worker. Receiver reports are scoped
   to the approved source identity, and desktop grants are queried through a weak
   authority handle so archived reports cannot retain desktop/peer lifetimes.
-- `weld-sway-config` parses unexpanded Sway configuration spelling and reports
-  source-aware structural errors. Its default parser depends only on Winnow.
-  The optional `input` module translates keyboard directives and binding chords
-  into Weld input types.
-  The optional `output` module translates scale rules into `weld-output` settings.
+- Configuration uses a generated typed Sway frontend, explicit native lowering,
+  and distribution-owned preparation/publication. `weld-sway-config` owns source
+  processing and syntax; `weld-sway-adapter` lowers it into `weld-master-config`.
+  `weld-config` owns shared provenance and diagnostics. Feature contracts live in
+  `weld-input-config`, `weld-output`, `weld-tile-config`, `weld-window-config`,
+  `weld-ssd-config`, and `weld-i3-config`; the runtimes consume these directly.
+  Their normal frontend graph has no Bevy, Smithay, wgpu, or native-host dependency.
+  Opt-in ECS derives adapt the same owned values to runtime resources/events.
+  Master prepares keymaps, rule matchers, and decoration resources before
+  publication and queues startup effects only after successful activation.
+  See [Typed configuration](configuration.md) for generation, ownership, and scope.
 - `weld-sway-ipc` serves desktop tree/output queries and binding-mode subscriptions on a private
   same-user Unix socket. Its bounded Tokio codec handles framing, protocol types
   own message IDs and JSON, and connection tasks serve immutable snapshots.
@@ -158,12 +164,12 @@ Weld is a workspace of reusable layers and one standard distribution:
   descriptive monitor identifiers and wildcard defaults. Master publishes complete
   settings through `weld-app`; the native DRM host reads EDID, resolves each output,
   and applies scale changes to protocol metrics, presentation and input topology.
-- `weld-i3-quirks` consumes that Sway output, interprets the supported settings
-  and actions, applies criteria-based window rules, and supplies i3 tree-based focus,
-  structural movement and branch-local close recovery.
+- `weld-i3-quirks` consumes native i3 policy contracts, applies prepared
+  criteria-based window rules, and supplies i3 tree-based focus, structural
+  movement and branch-local close recovery.
   It uses the shared tree and node-focus history. Master owns file selection,
-  atomic settings/binding publication, reload and distribution effects. Future
-  config/behavior combinations will be shaped by a second concrete backend.
+  atomic settings/binding publication, reload and distribution effects.
+  Configuration syntax and lowering live outside the runtime behavior crate.
   Rule evaluation runs in `WindowSystems::AdmissionPolicy`: it supplies initial
   plane/focus preferences and explicit workspace membership before manager
   admission. Per-occupant actions run in source order after manager ownership

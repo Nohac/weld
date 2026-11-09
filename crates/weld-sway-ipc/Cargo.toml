@@ -5,6 +5,8 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
+weld-window-config = { path = "../weld-window-config", features = ["ecs"] }
+weld-tile-config = { path = "../weld-tile-config", features = ["ecs"] }
 anyhow.workspace = true
 bevy.workspace = true
 weld-app = { path = "../weld-app" }

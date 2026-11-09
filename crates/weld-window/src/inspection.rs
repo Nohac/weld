@@ -4,7 +4,7 @@ use crate::{
     FloatingWindow, FocusedWindow, ManagedWindow, PresentationInsets, PrimaryWindowPresentation,
     StickyWindow, WindowGeometry, WindowId, WindowOccupant, WindowOutput, WindowVisibility,
     attention::WindowAttention,
-    fullscreen::{FullscreenMode, FullscreenOccluded, WindowFullscreen},
+    fullscreen::{FullscreenOccluded, WindowFullscreen},
     workspace::{FocusedWorkspace, Workspace, WorkspaceId, WorkspaceMember, WorkspaceOutput},
 };
 use bevy::{
@@ -19,6 +19,7 @@ use weld_app::{
     surface::ClientWindowMetadata,
 };
 use weld_client::ClientSurfaceMetadata;
+use weld_window_config::FullscreenMode;
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindowSnapshot {

@@ -1,6 +1,27 @@
-//! Reloadable pointer-device preferences and selector precedence.
+//! Input preferences and modifier contracts shared by configuration and native hosts.
 
 use std::num::NonZeroU32;
+/// XKB rules, model, layout, variant and options selected by configuration.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct KeymapConfig {
+    pub rules: String,
+    pub model: String,
+    pub layout: String,
+    pub variant: String,
+    pub options: String,
+}
+
+impl Default for KeymapConfig {
+    fn default() -> Self {
+        Self {
+            rules: String::new(),
+            model: String::new(),
+            layout: "us".into(),
+            variant: String::new(),
+            options: String::new(),
+        }
+    }
+}
 
 /// Scope of one physical-device preference rule.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -50,7 +71,7 @@ pub struct PointerDeviceRule {
 
 /// Complete configuration; exact device rules override type rules and wildcard rules.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
-#[cfg_attr(feature = "bevy", derive(bevy::ecs::resource::Resource))]
+#[cfg_attr(feature = "ecs", derive(bevy_ecs::resource::Resource))]
 pub struct PointerDeviceSettings(pub Vec<PointerDeviceRule>);
 
 impl PointerDeviceSettings {
@@ -126,4 +147,31 @@ mod tests {
             TouchpadPreferences::default()
         );
     }
+}
+/// Modifier requirements for a shell-owned pointer shortcut.
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+pub struct PointerShortcutModifiers {
+    pub control: bool,
+    pub alt: bool,
+    pub shift: bool,
+    pub super_key: bool,
+}
+
+impl PointerShortcutModifiers {
+    /// Require the compositor Super modifier.
+    pub const fn super_key() -> Self {
+        Self {
+            super_key: true,
+            control: false,
+            alt: false,
+            shift: false,
+        }
+    }
+}
+
+/// A physical Linux key identity and modifiers, without toolkit key enums.
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub struct Shortcut {
+    pub trigger: Option<u32>,
+    pub modifiers: PointerShortcutModifiers,
 }

@@ -1,19 +1,16 @@
 //! Translate Sway's Pango font descriptions into decoration typography.
 
 use anyhow::{Context, Result, ensure};
-use bevy::text::{FontSource, FontStyle, FontWeight, FontWidth};
 use pango::{FontDescription, Gravity, Stretch, Style, Variant, glib::translate::IntoGlib};
-use weld_ssd::TitleFont;
-use weld_sway_config::evaluation::unsupported;
+use weld_config::unsupported;
+use weld_ssd_config::{
+    FontFamily as FontSource, FontSettings as TitleFont, FontSlant as FontStyle, FontWeight,
+    FontWidth,
+};
 
-pub(super) fn parse(words: &[&str]) -> Result<TitleFont> {
-    let text = words
-        .iter()
-        .map(|word| weld_sway_config::input::literal(word))
-        .collect::<Result<Vec<_>>>()?
-        .join(" ");
+pub(super) fn parse(text: &str) -> Result<TitleFont> {
     ensure!(!text.contains('\0'), "font description contains a NUL byte");
-    let description = FontDescription::from_string(text.strip_prefix("pango:").unwrap_or(&text));
+    let description = FontDescription::from_string(text.strip_prefix("pango:").unwrap_or(text));
     let family = description.family().context("font family is required")?;
     ensure!(!family.trim().is_empty(), "font family is required");
     ensure!(description.size() > 0, "font size must be positive");

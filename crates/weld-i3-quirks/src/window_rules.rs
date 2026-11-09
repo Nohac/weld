@@ -15,18 +15,18 @@ use bevy::math::Vec2;
 use regex::Regex;
 use weld_app::output::OutputPosition;
 use weld_app::surface::{ClientWindowMetadata, MappedSurface, SurfaceId};
-use weld_ssd::{BorderStyle, WindowBorderStyle};
+use weld_i3_config::{Field, RuleAction, RuleDefinition, RuleEffect};
+use weld_ssd::WindowBorderStyle;
+#[cfg(test)]
+use weld_ssd_config::BorderStyle;
 use weld_tile::TileFloatingRequest;
-use weld_window::persistence::{PersistenceAction, WindowPersistenceRequest};
+use weld_window::persistence::WindowPersistenceRequest;
 use weld_window::{
     FloatingWindow, ManagedBy, ManagedWindow, WindowAdmissionPreferences, WindowClientResolver,
     WindowGeometry, WindowIntent, WindowIntentKind, WindowOutput,
 };
 
-use crate::{
-    config::{border_style, unsupported, workspace_target},
-    workspace::{I3WindowWorkspaceRequest, WorkspaceTarget},
-};
+use crate::workspace::I3WindowWorkspaceRequest;
 
 /// Compiled configuration rules, replaced atomically on a successful reload.
 #[derive(Resource, Clone, Debug, Default)]
@@ -38,140 +38,27 @@ struct WindowRule {
     effect: RuleEffect,
 }
 
-#[derive(Clone, Debug)]
-enum RuleEffect {
-    Commands(Vec<RuleAction>),
-    Assign(WorkspaceTarget),
-    NoFocus,
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub(crate) enum RuleAction {
-    Persistent(PersistenceAction),
-    Border(BorderStyle),
-    Floating(bool),
-    Workspace(WorkspaceTarget),
-    Position(Vec2),
-}
-
-#[derive(Clone, Copy, Debug)]
-enum Field {
-    AppId,
-    Class,
-    Instance,
-    Title,
-}
-
 impl WindowRules {
-    pub(crate) fn add_commands(&mut self, criteria: &str, source: &str) -> Result<()> {
-        let commands = weld_sway_config::commands::parse(source)?;
-        let actions = commands
-            .iter()
-            .map(|words| rule_action(words))
-            .collect::<Result<Vec<_>>>()?;
-        self.add(criteria, RuleEffect::Commands(actions))
-    }
-
-    pub(crate) fn add_no_focus(&mut self, criteria: &str) -> Result<()> {
-        self.add(criteria, RuleEffect::NoFocus)
-    }
-
-    pub(crate) fn add_assignment(&mut self, criteria: &str, words: &[&str]) -> Result<()> {
-        let words = words.strip_prefix(&["→"]).unwrap_or(words);
-        if words.first() == Some(&"output") {
-            return Err(unsupported("assign output is not supported"));
-        }
-        let words = words.strip_prefix(&["workspace"]).unwrap_or(words);
-        self.add(criteria, RuleEffect::Assign(named_workspace(words)?))
-    }
-
-    fn add(&mut self, criteria: &str, effect: RuleEffect) -> Result<()> {
-        let fields = weld_sway_config::criteria::parse(criteria)?;
-        let mut compiled = Vec::new();
-        for field in fields {
-            if field.name == "all" && field.value.is_none() {
-                continue;
-            }
-            let kind = match field.name.as_str() {
-                "app_id" => Field::AppId,
-                "class" => Field::Class,
-                "instance" => Field::Instance,
-                "title" => Field::Title,
-                _ => {
-                    return Err(unsupported(format!(
-                        "unsupported window criterion {}",
-                        field.name
-                    )));
-                }
-            };
-            let value = field.value.context("window criterion requires a value")?;
-            if value == "__focused__" {
-                return Err(unsupported(
-                    "dynamic __focused__ criteria are not supported",
-                ));
-            }
-            let regex = Regex::new(&value)
-                .context("invalid or unsupported window-rule regular expression")?;
-            compiled.push((kind, regex));
-        }
+    /// Validate and compile one native rule before a candidate is activated.
+    pub fn add(&mut self, rule: RuleDefinition) -> Result<()> {
         ensure!(self.0.len() < 1024, "too many window rules");
+        let criteria = rule
+            .criteria
+            .into_iter()
+            .map(|(field, pattern)| {
+                Ok((
+                    field,
+                    Regex::new(&pattern)
+                        .context("invalid or unsupported window-rule regular expression")?,
+                ))
+            })
+            .collect::<Result<_>>()?;
         self.0.push(WindowRule {
-            criteria: compiled,
-            effect,
+            criteria,
+            effect: rule.effect,
         });
         Ok(())
     }
-}
-
-fn named_workspace(words: &[&str]) -> Result<WorkspaceTarget> {
-    let target = workspace_target(words)?;
-    ensure!(
-        matches!(
-            target,
-            WorkspaceTarget::Name(_) | WorkspaceTarget::Number(_)
-        ),
-        "window rules require a workspace name or number"
-    );
-    Ok(target)
-}
-
-fn rule_action(words: &[&str]) -> Result<RuleAction> {
-    Ok(match words {
-        ["weld", "persistent", args @ ..] => {
-            let action = crate::config::persistence_action(args)?;
-            ensure!(
-                !matches!(action, PersistenceAction::Toggle(_)),
-                "window rules require weld persistent enable or disable"
-            );
-            RuleAction::Persistent(action)
-        }
-        ["border", style @ ..] => RuleAction::Border(border_style(style)?),
-        ["floating", "enable"] => RuleAction::Floating(true),
-        ["floating", "disable"] => RuleAction::Floating(false),
-        ["move", "to", "workspace", target @ ..]
-        | [
-            "move",
-            "container" | "window",
-            "to",
-            "workspace",
-            target @ ..,
-        ]
-        | ["move", "workspace", target @ ..] => RuleAction::Workspace(named_workspace(target)?),
-        ["move", "absolute", "position", x, y] => {
-            let position = Vec2::new(
-                x.parse().context("invalid horizontal position")?,
-                y.parse().context("invalid vertical position")?,
-            );
-            ensure!(position.is_finite(), "window position must be finite");
-            RuleAction::Position(position)
-        }
-        _ => {
-            return Err(unsupported(format!(
-                "unsupported window-rule action {}",
-                words.join(" ")
-            )));
-        }
-    })
 }
 
 impl WindowRule {
@@ -389,7 +276,9 @@ pub(crate) fn execute(
                     .map_or(Vec2::ZERO, |position| position.0);
                 commands.trigger(WindowIntent {
                     window,
-                    kind: WindowIntentKind::MoveBy(*position - origin - geometry.position),
+                    kind: WindowIntentKind::MoveBy(
+                        Vec2::from_array(*position) - origin - geometry.position,
+                    ),
                 });
             }
         }
@@ -408,9 +297,16 @@ mod tests {
     use weld_window::{OccupiesWindow, WindowId};
 
     fn configured(source: &str) -> WindowRules {
-        crate::config::parse_with_extensions::<()>("test", source, |_| Err(unsupported("command")))
-            .expect("config")
-            .window_rules
+        let mut rules = WindowRules::default();
+        for rule in weld_sway_adapter::parse_with_extensions::<()>("test", source, |_| {
+            Err(weld_config::unsupported("command"))
+        })
+        .expect("config")
+        .window_rules
+        {
+            rules.add(rule.value).expect("native rule");
+        }
+        rules
     }
 
     #[test]
@@ -445,17 +341,17 @@ mod tests {
 
     #[test]
     fn unsupported_rule_sequences_are_skipped_whole() {
-        let config = crate::config::parse_with_policy::<()>(
+        let config = weld_sway_adapter::parse_with_policy::<()>(
             "test",
             "for_window [all] border pixel 2, unsupported action\nfor_window [all] border pixel 4",
-            crate::config::UnsupportedPolicy::Warn,
-            |_| Err(unsupported("command")),
+            weld_config::UnsupportedPolicy::Warn,
+            |_| Err(weld_config::unsupported("command")),
         )
         .expect("config");
         assert_eq!(config.warnings.len(), 1);
-        assert_eq!(config.window_rules.0.len(), 1);
+        assert_eq!(config.window_rules.len(), 1);
         assert!(
-            matches!(&config.window_rules.0[0].effect, RuleEffect::Commands(actions)
+            matches!(&config.window_rules[0].value.effect, RuleEffect::Commands(actions)
             if actions == &[RuleAction::Border(BorderStyle::Pixel(4))])
         );
     }

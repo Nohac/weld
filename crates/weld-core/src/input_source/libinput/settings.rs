@@ -2,7 +2,7 @@
 
 use smithay::reexports::input::{AsRaw, ClickMethod, Device, DeviceConfigError, TapButtonMap, ffi};
 use tracing::{debug, warn};
-use weld_input::{
+use weld_input_config::{
     FingerButtonMap, PointerDeviceSettings, TouchpadClickMethod, TouchpadPreferences,
 };
 

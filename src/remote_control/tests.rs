@@ -15,8 +15,9 @@ use weld_input::{
 use weld_remote_control::Capability;
 use weld_window::{
     OccupiesWindow, WindowCommand, WindowCommandKind, WindowPlugin,
-    persistence::{PersistenceAction, PersistenceMatch, WindowPersistenceRequest},
+    persistence::WindowPersistenceRequest,
 };
+use weld_window_config::{PersistenceAction, PersistenceMatch};
 
 struct NoCapture;
 impl Capture for NoCapture {

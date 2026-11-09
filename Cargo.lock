@@ -9676,6 +9676,7 @@ dependencies = [
  "weld-core",
  "weld-diagnostics",
  "weld-input",
+ "weld-input-config",
  "weld-output",
  "weld-presenter",
  "wgpu",
@@ -9704,6 +9705,13 @@ dependencies = [
  "serde",
  "tracing",
  "weld-diagnostics",
+]
+
+[[package]]
+name = "weld-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
 ]
 
 [[package]]
@@ -9764,6 +9772,7 @@ dependencies = [
  "weld-audio",
  "weld-client",
  "weld-input",
+ "weld-input-config",
  "weld-output",
  "wgpu",
  "winit",
@@ -9787,7 +9796,9 @@ dependencies = [
  "bevy",
  "weld-app",
  "weld-input",
+ "weld-input-config",
  "weld-window",
+ "weld-window-config",
 ]
 
 [[package]]
@@ -9810,7 +9821,9 @@ dependencies = [
  "weld-hoist-core",
  "weld-hoist-ui",
  "weld-ssd",
+ "weld-ssd-config",
  "weld-window",
+ "weld-window-config",
  "weld-window-ui",
 ]
 
@@ -9927,23 +9940,36 @@ dependencies = [
 ]
 
 [[package]]
+name = "weld-i3-config"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "weld-ssd-config",
+ "weld-tile-config",
+ "weld-window-config",
+]
+
+[[package]]
 name = "weld-i3-quirks"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "bevy",
  "indoc",
- "pango",
  "regex",
  "weld-app",
  "weld-client",
+ "weld-config",
  "weld-float",
- "weld-input",
- "weld-output",
+ "weld-i3-config",
+ "weld-master-config",
  "weld-ssd",
- "weld-sway-config",
+ "weld-ssd-config",
+ "weld-sway-adapter",
  "weld-tile",
+ "weld-tile-config",
  "weld-window",
+ "weld-window-config",
  "weld-window-ui",
 ]
 
@@ -9955,8 +9981,29 @@ dependencies = [
  "bevy",
  "bevy_winit",
  "weld-client",
+ "weld-input-config",
  "winit",
  "xkbcommon",
+]
+
+[[package]]
+name = "weld-input-config"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+]
+
+[[package]]
+name = "weld-master-config"
+version = "0.1.0"
+dependencies = [
+ "weld-config",
+ "weld-i3-config",
+ "weld-input-config",
+ "weld-output",
+ "weld-ssd-config",
+ "weld-tile-config",
+ "weld-window-config",
 ]
 
 [[package]]
@@ -10087,10 +10134,17 @@ dependencies = [
  "weld-app",
  "weld-client",
  "weld-float",
+ "weld-ssd-config",
  "weld-tile",
+ "weld-tile-config",
  "weld-window",
+ "weld-window-config",
  "weld-window-ui",
 ]
+
+[[package]]
+name = "weld-ssd-config"
+version = "0.1.0"
 
 [[package]]
 name = "weld-svg"
@@ -10103,13 +10157,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "weld-sway-adapter"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "indoc",
+ "pango",
+ "weld-config",
+ "weld-i3-config",
+ "weld-input-config",
+ "weld-master-config",
+ "weld-output",
+ "weld-ssd-config",
+ "weld-sway-config",
+ "weld-tile-config",
+ "weld-window-config",
+]
+
+[[package]]
 name = "weld-sway-config"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "insta",
- "weld-input",
- "weld-output",
+ "weld-config",
  "winnow",
 ]
 
@@ -10131,7 +10202,9 @@ dependencies = [
  "weld-app",
  "weld-client",
  "weld-tile",
+ "weld-tile-config",
  "weld-window",
+ "weld-window-config",
  "xdg",
 ]
 
@@ -10142,7 +10215,16 @@ dependencies = [
  "bevy",
  "weld-app",
  "weld-client",
+ "weld-tile-config",
  "weld-window",
+ "weld-window-config",
+]
+
+[[package]]
+name = "weld-tile-config"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
 ]
 
 [[package]]
@@ -10152,10 +10234,15 @@ dependencies = [
  "bevy",
  "weld-app",
  "weld-client",
+ "weld-i3-config",
  "weld-i3-quirks",
  "weld-ssd",
+ "weld-ssd-config",
+ "weld-sway-adapter",
  "weld-tile",
+ "weld-tile-config",
  "weld-window",
+ "weld-window-config",
 ]
 
 [[package]]
@@ -10168,6 +10255,16 @@ dependencies = [
  "weld-client",
  "weld-core",
  "weld-input",
+ "weld-input-config",
+ "weld-window-config",
+]
+
+[[package]]
+name = "weld-window-config"
+version = "0.1.0"
+dependencies = [
+ "bevy_ecs",
+ "weld-input-config",
 ]
 
 [[package]]
@@ -10198,6 +10295,7 @@ dependencies = [
  "weld-app",
  "weld-audio",
  "weld-client",
+ "weld-config",
  "weld-control",
  "weld-core",
  "weld-float",
@@ -10208,17 +10306,25 @@ dependencies = [
  "weld-hoist-iroh",
  "weld-hoist-local",
  "weld-hoist-protocol",
+ "weld-i3-config",
  "weld-i3-quirks",
  "weld-input",
+ "weld-input-config",
+ "weld-master-config",
  "weld-media",
  "weld-media-vaapi",
  "weld-remote-control",
  "weld-remote-control-ui",
  "weld-ssd",
+ "weld-ssd-config",
+ "weld-sway-adapter",
+ "weld-sway-config",
  "weld-sway-ipc",
  "weld-tile",
+ "weld-tile-config",
  "weld-tile-ui",
  "weld-window",
+ "weld-window-config",
  "weld-window-ui",
  "wgpu",
 ]
