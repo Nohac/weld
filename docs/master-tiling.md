@@ -168,8 +168,7 @@ adaptive sync are reported as unsupported while scale on the same line applies.
   `$HOME` remain for the shell; unresolved variables in required literal/chord
   values are errors. `$$` protects a dollar sign and backslash-escaped dollars
   remain escaped. Expanded text and the variable table are each limited to 8 MiB.
-  The pure syntax parser remains unexpanded; the optional `evaluate` feature owns
-  this pass. Prefix/redefinition behavior follows [Sway 1.12's variable replacement](https://github.com/swaywm/sway/blob/1.12/sway/config.c)
+  The internal syntax parser remains unexpanded; typed parsing owns this pass. Prefix/redefinition behavior follows [Sway 1.12's variable replacement](https://github.com/swaywm/sway/blob/1.12/sway/config.c)
   and [set handler](https://github.com/swaywm/sway/blob/1.12/sway/commands/set.c).
 - `gaps inner N` and `gaps outer N`, in logical pixels, integer 0..65535.
   Geometry clamps gaps to available space.
@@ -198,7 +197,9 @@ adaptive sync are reported as unsupported while scale on the same line applies.
   An optional trailing `normal` is accepted; `inverse` remains unsupported.
   Reload replaces these bindings while retaining already captured releases.
   Omission disables modifier pointer chords; titlebar and resize handles remain usable.
-- `floating enable|disable|toggle` and `focus mode_toggle` are bound commands.
+- `floating enable|disable|toggle` and `focus tiling|floating|mode_toggle` are
+  bound commands. Explicit plane selection restores that plane's most recent
+  window in the active workspace; an empty plane leaves focus unchanged.
 - `default_border normal|pixel [N]`, `default_floating_border normal|pixel [N]`
   and `none`, with widths 0..64 logical pixels. `new_window` and `new_float`
   are aliases. `normal` has a titlebar; `pixel` retains only the border; `none`
@@ -223,10 +224,20 @@ adaptive sync are reported as unsupported while scale on the same line applies.
   urgent palette, including inactive tabs and their ancestor group frames.
 - `border normal|pixel [N]|none|toggle` changes the selected window's frame.
   Per-window overrides survive global reload; live defaults apply to other windows.
-- `bindsym CHORD COMMAND` with literal Mod4, Mod1, Control/Ctrl and Shift
-  modifiers, lowercase ASCII letter names, digits, arrow/F1-F12 keys, Return, Escape, Tab, Pause, Print, space,
-  equal and minus. Trigger names currently select physical key positions; modifiers follow
-  Weld's configured XKB map. Full symbolic `bindsym` matching is a follow-up.
+- `bindsym CHORD COMMAND` and `bindcode CHORD COMMAND`, including inside modes.
+  Modifiers are Mod4/Super, Mod1/Alt, Control/Ctrl and Shift. Named triggers include
+  lowercase ASCII letters, digits, arrows, F1-F24, Return, Escape, Tab, Pause,
+  Print, space, BackSpace, Insert, Delete, Home, End, Prior/Page_Up, Next/Page_Down,
+  Caps_Lock, Num_Lock, Scroll_Lock, punctuation names and keypad names (`KP_0` through
+  `KP_9`, `KP_Enter`, `KP_Add`, `KP_Subtract`, `KP_Multiply`, `KP_Divide`, `KP_Decimal`).
+  The generated key vocabulary in `tools/config-codegen/sway.json` is exhaustive.
+  Named triggers retain physical-position semantics; modifiers follow Weld's
+  configured XKB map. Full symbolic `bindsym` matching remains a follow-up.
+  `bindcode` uses XKB codes: Linux evdev code plus eight (e.g. 36 is Return).
+  Numeric and named bindings normalize to the same identity for duplicate checks.
+  Codes must be integers in 9..4294967294 (excluding the reserved invalid XKB
+  code); modifier-only
+  `bindcode` chords and multi-key combinations are not supported.
 - `input type:keyboard { ... }` or `input * { ... }`, and their single-line
   forms, with `xkb_rules`, `xkb_model`, `xkb_layout`, `xkb_variant`, `xkb_options`.
   Values are literal XKB names, optionally quoted; empty quoted options clear
@@ -273,7 +284,8 @@ adaptive sync are reported as unsupported while scale on the same line applies.
   the shell. Bound `exec_always` behaves like bound `exec`.
   Bindings fire once per fresh press, not
   repeatedly while held.
-- `mode [--pango_markup] NAME { bindsym ... }` defines a binding context.
+- `mode [--pango_markup] NAME { bindsym ... }` defines a binding context;
+  `bindcode` is also accepted inside it.
   `mode NAME` switches context before the next raw input event. Successful reload
   keeps the current mode when it remains defined, otherwise selects `default`;
   releases of consumed shortcut keys remain consumed across the transition.
@@ -289,9 +301,16 @@ adaptive sync are reported as unsupported while scale on the same line applies.
   matching window. Supported actions are `weld persistent enable [identifier]`,
   `weld persistent disable`, `border normal|pixel [N]|none`,
   `floating enable|disable`, `move [container|window] to workspace [number] NAME`,
-  `move workspace [number] NAME`, and `move absolute position X Y`.
+  `move workspace [number] NAME`, `move absolute position X Y`,
+  `fullscreen [enable|disable|toggle]`, and `sticky enable|disable|toggle`.
+  Fullscreen and sticky actions explicitly target the matched window. Fullscreen
+  takes effect at the next fullscreen presentation boundary; sticky behavior
+  remains limited to floating windows on their current output. Toggle actions
+  execute again on successful reload, just like other repeated rule commands.
   Absolute positions use logical output-layout coordinates and apply to floating
-  windows. Quoted commas stay inside their argument. An unsupported action skips
+  windows. `move absolute position X Y` also works as a bound command, using
+  the focused window and the same positioning implementation; tiled windows are
+  unaffected. Quoted commas stay inside their argument. An unsupported action skips
   its entire rule under the warning policy.
   Criteria support `all` and regex matches for `app_id`, `class`,
   `instance`, and `title`, combined with AND. Missing native/X11 properties match

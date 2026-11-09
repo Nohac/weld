@@ -91,4 +91,6 @@ pub enum TileOperation {
 }
 
 mod navigation;
-pub use navigation::{FocusHierarchy, FocusWrapping, LayoutChoice, LayoutRequest, ResizeRequest};
+pub use navigation::{
+    FocusHierarchy, FocusPlaneRequest, FocusWrapping, LayoutChoice, LayoutRequest, ResizeRequest,
+};

@@ -157,11 +157,11 @@ fn mode_toggle_from_a_group_selects_the_floating_window_then_the_remembered_leaf
     app.update();
     focus(&mut app, third);
     hierarchy(&mut app, FocusHierarchy::Parent);
-    app.world_mut().trigger(I3FocusModeToggle);
+    app.world_mut().trigger(FocusPlaneRequest::Toggle);
     app.update();
     assert_eq!(selected(&app), floating);
     assert_eq!(group(&app), None);
-    app.world_mut().trigger(I3FocusModeToggle);
+    app.world_mut().trigger(FocusPlaneRequest::Toggle);
     app.update();
     assert_eq!(selected(&app), third);
 }
@@ -185,7 +185,10 @@ fn sticky_floating_placeholder_follows_workspaces_and_disable_stops_it() {
         window: Some(sticky),
         enabled: Some(true),
     });
-    app.world_mut().trigger(I3StickyRequest(None));
+    app.world_mut().trigger(I3StickyRequest {
+        window: None,
+        enabled: None,
+    });
     app.update();
     assert!(app.world().get::<StickyWindow>(sticky).is_some());
     let geometry = *app.world().get::<WindowGeometry>(sticky).expect("geometry");
@@ -218,7 +221,10 @@ fn sticky_floating_placeholder_follows_workspaces_and_disable_stops_it() {
             .get::<WindowPresentationOverride>(sticky)
             .is_some()
     );
-    app.world_mut().trigger(I3StickyRequest(None));
+    app.world_mut().trigger(I3StickyRequest {
+        window: None,
+        enabled: None,
+    });
     show(&mut app, "1");
     assert_eq!(selected(&app), tile);
     assert_eq!(
@@ -231,7 +237,10 @@ fn sticky_floating_placeholder_follows_workspaces_and_disable_stops_it() {
 fn sticky_on_a_tiled_window_is_retained_but_only_takes_effect_when_floating() {
     let mut app = app();
     let tile = window(&mut app, 1);
-    app.world_mut().trigger(I3StickyRequest(Some(true)));
+    app.world_mut().trigger(I3StickyRequest {
+        window: None,
+        enabled: Some(true),
+    });
     show(&mut app, "2");
     assert_eq!(
         app.world().get::<WindowVisibility>(tile),
@@ -478,7 +487,10 @@ fn an_unfocused_sticky_window_does_not_steal_destination_focus() {
         window: Some(sticky),
         enabled: Some(true),
     });
-    app.world_mut().trigger(I3StickyRequest(Some(true)));
+    app.world_mut().trigger(I3StickyRequest {
+        window: None,
+        enabled: Some(true),
+    });
     app.update();
     show(&mut app, "2");
     let destination = window(&mut app, 3);

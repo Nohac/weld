@@ -141,3 +141,23 @@ fn rule_commands_retain_typed_targeting_and_quoted_commas() {
         .is_err()
     );
 }
+
+#[test]
+fn bindcode_validates_numeric_codes_and_keeps_flags_explicitly_unsupported() {
+    for code in ["0", "8", "-1", "4294967295", "4294967296", "Return", "Mod4"] {
+        let source = format!("bindcode {code} exec app");
+        assert!(
+            parse("codes", &source, UnsupportedPolicy::Warn).is_err(),
+            "{code}"
+        );
+    }
+    let parsed = parse(
+        "codes",
+        "bindcode --release 36 exec app\nbindcode 36 exec app",
+        UnsupportedPolicy::Warn,
+    )
+    .expect("flags");
+    assert_eq!(parsed.warnings.len(), 1);
+    assert_eq!(parsed.directives.len(), 1);
+    assert_eq!(parsed.directives[0].location.line, 2);
+}

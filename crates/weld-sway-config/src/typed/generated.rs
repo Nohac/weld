@@ -21,8 +21,8 @@ pub struct Binding {
 pub struct Chord {
     /// Required modifiers in declaration order.
     pub modifiers: Modifiers,
-    /// Trigger key; absence denotes a held modifier chord.
-    pub key: Option<Key>,
+    /// Named physical position or XKB keycode; absent only for held modifier chords.
+    pub key: Option<BindingKey>,
 }
 /// Ordered output preferences for a workspace.
 #[derive(Clone, Debug, PartialEq)]
@@ -216,6 +216,28 @@ impl Word for Radius {
         Self::new(word.parse()?)
     }
 }
+/// Validated XkbKeycode configuration value.
+#[derive(Clone, Debug, Eq, PartialEq, Hash)]
+pub struct XkbKeycode(u32);
+impl XkbKeycode {
+    /// Construct a value after checking its local invariants.
+    pub fn new(value: u32) -> Result<Self> {
+        ensure!(
+            (9..=4294967294).contains(&value),
+            "XkbKeycode is outside its allowed range"
+        );
+        Ok(Self(value))
+    }
+    /// The validated value.
+    pub fn value(&self) -> u32 {
+        self.0
+    }
+}
+impl Word for XkbKeycode {
+    fn word(word: &str) -> Result<Self> {
+        Self::new(word.parse()?)
+    }
+}
 /// Alternatives in the Direction syntax.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 pub enum Direction {
@@ -236,8 +258,6 @@ impl Word for Direction {
             "up" => Self::Up,
             "down" => Self::Down,
             "scratchpad" => return Err(unsupported(format!("unsupported Direction {word}"))),
-            "tiling" => return Err(unsupported(format!("unsupported Direction {word}"))),
-            "floating" => return Err(unsupported(format!("unsupported Direction {word}"))),
             "next" => return Err(unsupported(format!("unsupported Direction {word}"))),
             "prev" => return Err(unsupported(format!("unsupported Direction {word}"))),
             _ => bail!("invalid Direction: {word}"),
@@ -567,20 +587,20 @@ impl Word for CriterionField {
 pub enum Modifier {
     /// Accepted spellings: Control, Ctrl.
     Control,
-    /// Accepted spellings: Mod1.
+    /// Accepted spellings: Mod1, Alt.
     Alt,
     /// Accepted spellings: Shift.
     Shift,
-    /// Accepted spellings: Mod4.
+    /// Accepted spellings: Mod4, Super.
     Super,
 }
 impl Word for Modifier {
     fn word(word: &str) -> Result<Self> {
         Ok(match word {
             "Control" | "Ctrl" => Self::Control,
-            "Mod1" => Self::Alt,
+            "Mod1" | "Alt" => Self::Alt,
             "Shift" => Self::Shift,
-            "Mod4" => Self::Super,
+            "Mod4" | "Super" => Self::Super,
             _ => return Err(unsupported(format!("unsupported Modifier {word}"))),
         })
     }
@@ -726,6 +746,100 @@ pub enum Key {
     F11,
     /// Accepted spellings: F12.
     F12,
+    /// Accepted spellings: BackSpace.
+    BackSpace,
+    /// Accepted spellings: Insert.
+    Insert,
+    /// Accepted spellings: Delete.
+    Delete,
+    /// Accepted spellings: Home.
+    Home,
+    /// Accepted spellings: End.
+    End,
+    /// Accepted spellings: Prior, Page_Up.
+    Prior,
+    /// Accepted spellings: Next, Page_Down.
+    Next,
+    /// Accepted spellings: Caps_Lock.
+    CapsLock,
+    /// Accepted spellings: Num_Lock.
+    NumLock,
+    /// Accepted spellings: Scroll_Lock.
+    ScrollLock,
+    /// Accepted spellings: grave.
+    Grave,
+    /// Accepted spellings: bracketleft.
+    BracketLeft,
+    /// Accepted spellings: bracketright.
+    BracketRight,
+    /// Accepted spellings: backslash.
+    Backslash,
+    /// Accepted spellings: semicolon.
+    Semicolon,
+    /// Accepted spellings: apostrophe.
+    Apostrophe,
+    /// Accepted spellings: comma.
+    Comma,
+    /// Accepted spellings: period.
+    Period,
+    /// Accepted spellings: slash.
+    Slash,
+    /// Accepted spellings: KP_Enter.
+    KPEnter,
+    /// Accepted spellings: KP_Add.
+    KPAdd,
+    /// Accepted spellings: KP_Subtract.
+    KPSubtract,
+    /// Accepted spellings: KP_Multiply.
+    KPMultiply,
+    /// Accepted spellings: KP_Divide.
+    KPDivide,
+    /// Accepted spellings: KP_Decimal.
+    KPDecimal,
+    /// Accepted spellings: KP_0.
+    KP0,
+    /// Accepted spellings: KP_1.
+    KP1,
+    /// Accepted spellings: KP_2.
+    KP2,
+    /// Accepted spellings: KP_3.
+    KP3,
+    /// Accepted spellings: KP_4.
+    KP4,
+    /// Accepted spellings: KP_5.
+    KP5,
+    /// Accepted spellings: KP_6.
+    KP6,
+    /// Accepted spellings: KP_7.
+    KP7,
+    /// Accepted spellings: KP_8.
+    KP8,
+    /// Accepted spellings: KP_9.
+    KP9,
+    /// Accepted spellings: F13.
+    F13,
+    /// Accepted spellings: F14.
+    F14,
+    /// Accepted spellings: F15.
+    F15,
+    /// Accepted spellings: F16.
+    F16,
+    /// Accepted spellings: F17.
+    F17,
+    /// Accepted spellings: F18.
+    F18,
+    /// Accepted spellings: F19.
+    F19,
+    /// Accepted spellings: F20.
+    F20,
+    /// Accepted spellings: F21.
+    F21,
+    /// Accepted spellings: F22.
+    F22,
+    /// Accepted spellings: F23.
+    F23,
+    /// Accepted spellings: F24.
+    F24,
 }
 impl Word for Key {
     fn word(word: &str) -> Result<Self> {
@@ -799,6 +913,53 @@ impl Word for Key {
             "F10" => Self::F10,
             "F11" => Self::F11,
             "F12" => Self::F12,
+            "BackSpace" => Self::BackSpace,
+            "Insert" => Self::Insert,
+            "Delete" => Self::Delete,
+            "Home" => Self::Home,
+            "End" => Self::End,
+            "Prior" | "Page_Up" => Self::Prior,
+            "Next" | "Page_Down" => Self::Next,
+            "Caps_Lock" => Self::CapsLock,
+            "Num_Lock" => Self::NumLock,
+            "Scroll_Lock" => Self::ScrollLock,
+            "grave" => Self::Grave,
+            "bracketleft" => Self::BracketLeft,
+            "bracketright" => Self::BracketRight,
+            "backslash" => Self::Backslash,
+            "semicolon" => Self::Semicolon,
+            "apostrophe" => Self::Apostrophe,
+            "comma" => Self::Comma,
+            "period" => Self::Period,
+            "slash" => Self::Slash,
+            "KP_Enter" => Self::KPEnter,
+            "KP_Add" => Self::KPAdd,
+            "KP_Subtract" => Self::KPSubtract,
+            "KP_Multiply" => Self::KPMultiply,
+            "KP_Divide" => Self::KPDivide,
+            "KP_Decimal" => Self::KPDecimal,
+            "KP_0" => Self::KP0,
+            "KP_1" => Self::KP1,
+            "KP_2" => Self::KP2,
+            "KP_3" => Self::KP3,
+            "KP_4" => Self::KP4,
+            "KP_5" => Self::KP5,
+            "KP_6" => Self::KP6,
+            "KP_7" => Self::KP7,
+            "KP_8" => Self::KP8,
+            "KP_9" => Self::KP9,
+            "F13" => Self::F13,
+            "F14" => Self::F14,
+            "F15" => Self::F15,
+            "F16" => Self::F16,
+            "F17" => Self::F17,
+            "F18" => Self::F18,
+            "F19" => Self::F19,
+            "F20" => Self::F20,
+            "F21" => Self::F21,
+            "F22" => Self::F22,
+            "F23" => Self::F23,
+            "F24" => Self::F24,
             _ => return Err(unsupported(format!("unsupported Key {word}"))),
         })
     }
@@ -832,6 +993,8 @@ pub enum Header {
     Include,
     /// Accepted spellings: swaybar_command.
     BarCommand,
+    /// Accepted spellings: bindcode.
+    BindingCode,
 }
 impl Word for Header {
     fn word(word: &str) -> Result<Self> {
@@ -849,6 +1012,7 @@ impl Word for Header {
             "no_focus" => Self::NoFocus,
             "include" => Self::Include,
             "swaybar_command" => Self::BarCommand,
+            "bindcode" => Self::BindingCode,
             _ => return Err(unsupported(format!("unsupported Header {word}"))),
         })
     }
@@ -868,6 +1032,26 @@ impl Word for Orientation {
             "vertical" => Self::Vertical,
             "auto" => return Err(unsupported(format!("unsupported Orientation {word}"))),
             _ => bail!("invalid Orientation: {word}"),
+        })
+    }
+}
+/// Alternatives in the FocusPlane syntax.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+pub enum FocusPlane {
+    /// Accepted spellings: tiling.
+    Tiled,
+    /// Accepted spellings: floating.
+    Floating,
+    /// Accepted spellings: mode_toggle.
+    Toggle,
+}
+impl Word for FocusPlane {
+    fn word(word: &str) -> Result<Self> {
+        Ok(match word {
+            "tiling" => Self::Tiled,
+            "floating" => Self::Floating,
+            "mode_toggle" => Self::Toggle,
+            _ => bail!("invalid FocusPlane: {word}"),
         })
     }
 }
@@ -1041,8 +1225,6 @@ pub enum Command {
     Persistent(Persistence),
     /// The Fullscreen form.
     Fullscreen(Toggle),
-    /// The FocusModeToggle form.
-    FocusModeToggle,
     /// The FocusParent form.
     FocusParent,
     /// The FocusChild form.
@@ -1067,6 +1249,8 @@ pub enum Command {
     Weld(WeldCommand),
     /// The MoveWorkspaceToOutput form.
     MoveWorkspaceToOutput(Vec<Literal>),
+    /// The FocusPlane form.
+    FocusPlane(FocusPlane),
 }
 impl Words for Command {
     fn words(words: &[&str]) -> Result<Self> {
@@ -1195,9 +1379,11 @@ impl Words for Command {
                 let toggle = Toggle::word(toggle)?;
                 Self::Fullscreen(toggle)
             }
-            ["focus", "mode_toggle"] => Self::FocusModeToggle,
             ["focus", "parent"] => Self::FocusParent,
             ["focus", "child"] => Self::FocusChild,
+            ["focus", "tiling"] => Self::FocusPlane(FocusPlane::Tiled),
+            ["focus", "floating"] => Self::FocusPlane(FocusPlane::Floating),
+            ["focus", "mode_toggle"] => Self::FocusPlane(FocusPlane::Toggle),
             ["focus", direction] => {
                 let direction = Direction::word(direction)?;
                 Self::Focus(direction)

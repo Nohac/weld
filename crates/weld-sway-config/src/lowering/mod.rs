@@ -5,7 +5,9 @@
 //! before weldwm publishes any settings or queues startup effects.
 
 use weld_ssd_config::BorderStyle;
-use weld_tile_config::{FocusHierarchy, FocusWrapping, LayoutChoice, LayoutRequest, ResizeRequest};
+use weld_tile_config::{
+    FocusHierarchy, FocusPlaneRequest, FocusWrapping, LayoutChoice, LayoutRequest, ResizeRequest,
+};
 use weld_window_config::{
     RuleDefinition, RuleEffect, WindowMatchField, WorkspaceAssignment, WorkspaceCommand,
     WorkspaceNavigation, WorkspaceTarget,
@@ -196,7 +198,11 @@ fn lower_binding<E>(
 ) -> Result<(Shortcut, Action<E>)> {
     let modifiers = modifiers(binding.chord.modifiers);
     let shortcut = Shortcut {
-        trigger: binding.chord.key.map(key),
+        trigger: binding.chord.key.map(|value| match value {
+            syntax::BindingKey::Named(value) => key(value),
+            // XKB codes are evdev codes plus eight, for both Wayland and X11.
+            syntax::BindingKey::Code(value) => value.value() - 8,
+        }),
         modifiers,
     };
     Ok((shortcut, action(binding.command, extension)?))
@@ -348,12 +354,12 @@ fn action<E>(
         syntax::Command::BorderToggle => Action::Border(None),
         syntax::Command::Border(value) => Action::Border(Some(border(value))),
         syntax::Command::Persistent(value) => Action::Persistent(persistence(value)),
-        syntax::Command::Fullscreen(value) => Action::Fullscreen(match value {
-            syntax::Toggle::Enable => FullscreenAction::Enable(FullscreenMode::Normal),
-            syntax::Toggle::Disable => FullscreenAction::Disable,
-            syntax::Toggle::Toggle => FullscreenAction::Toggle(FullscreenMode::Normal),
+        syntax::Command::Fullscreen(value) => Action::Fullscreen(fullscreen(value)),
+        syntax::Command::FocusPlane(plane) => Action::FocusPlane(match plane {
+            syntax::FocusPlane::Tiled => FocusPlaneRequest::Tiled,
+            syntax::FocusPlane::Floating => FocusPlaneRequest::Floating,
+            syntax::FocusPlane::Toggle => FocusPlaneRequest::Toggle,
         }),
-        syntax::Command::FocusModeToggle => Action::FocusModeToggle,
         syntax::Command::FocusParent => Action::FocusHierarchy(FocusHierarchy::Parent),
         syntax::Command::FocusChild => Action::FocusHierarchy(FocusHierarchy::Child),
         syntax::Command::Focus(value) => Action::Focus(direction(value)),
@@ -386,11 +392,7 @@ fn action<E>(
         }
         syntax::Command::Kill => Action::Tile(TileOperation::Close),
         syntax::Command::Reload => Action::Reload,
-        syntax::Command::Position(_) => {
-            return Err(unsupported(
-                "absolute positions currently require a window rule",
-            ));
-        }
+        syntax::Command::Position(value) => Action::Position(position(value)?),
         syntax::Command::Weld(command) => Action::Extension(extension(&command)?),
     })
 }
@@ -573,20 +575,17 @@ fn lower_rule(rule: syntax::WindowRule) -> Result<RuleDefinition<RuleAction>> {
                             RuleAction::Persistent(action)
                         }
                         syntax::Command::Border(value) => RuleAction::Border(border(value)),
+                        syntax::Command::Fullscreen(value) => {
+                            RuleAction::Fullscreen(fullscreen(value))
+                        }
+                        syntax::Command::Sticky(value) => RuleAction::Sticky(toggle(value)),
                         syntax::Command::Floating(value) if value != syntax::Toggle::Toggle => {
                             RuleAction::Floating(value == syntax::Toggle::Enable)
                         }
                         syntax::Command::MoveWorkspace(value) => {
                             RuleAction::Workspace(named_workspace(value)?)
                         }
-                        syntax::Command::Position(value) => {
-                            let position = [value.x as f32, value.y as f32];
-                            ensure!(
-                                position.iter().all(|value| value.is_finite()),
-                                "window position must be finite"
-                            );
-                            RuleAction::Position(position)
-                        }
+                        syntax::Command::Position(value) => RuleAction::Position(position(value)?),
                         _ => return Err(unsupported("unsupported window-rule action")),
                     })
                 })
@@ -594,6 +593,23 @@ fn lower_rule(rule: syntax::WindowRule) -> Result<RuleDefinition<RuleAction>> {
         ),
     };
     Ok(RuleDefinition { criteria, effect })
+}
+
+fn fullscreen(value: syntax::Toggle) -> FullscreenAction {
+    match value {
+        syntax::Toggle::Enable => FullscreenAction::Enable(FullscreenMode::Normal),
+        syntax::Toggle::Disable => FullscreenAction::Disable,
+        syntax::Toggle::Toggle => FullscreenAction::Toggle(FullscreenMode::Normal),
+    }
+}
+
+fn position(value: syntax::Position) -> Result<[f32; 2]> {
+    let position = [value.x as f32, value.y as f32];
+    ensure!(
+        position.iter().all(|value| value.is_finite()),
+        "window position must be finite"
+    );
+    Ok(position)
 }
 
 mod keys;

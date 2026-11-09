@@ -196,13 +196,15 @@
         "Ctrl"
       ],
       "Alt": [
-        "Mod1"
+        "Mod1",
+        "Alt"
       ],
       "Shift": [
         "Shift"
       ],
       "Super": [
-        "Mod4"
+        "Mod4",
+        "Super"
       ]
     },
     "Key": {
@@ -412,6 +414,149 @@
       ],
       "F12": [
         "F12"
+      ],
+      "BackSpace": [
+        "BackSpace"
+      ],
+      "Insert": [
+        "Insert"
+      ],
+      "Delete": [
+        "Delete"
+      ],
+      "Home": [
+        "Home"
+      ],
+      "End": [
+        "End"
+      ],
+      "Prior": [
+        "Prior",
+        "Page_Up"
+      ],
+      "Next": [
+        "Next",
+        "Page_Down"
+      ],
+      "CapsLock": [
+        "Caps_Lock"
+      ],
+      "NumLock": [
+        "Num_Lock"
+      ],
+      "ScrollLock": [
+        "Scroll_Lock"
+      ],
+      "Grave": [
+        "grave"
+      ],
+      "BracketLeft": [
+        "bracketleft"
+      ],
+      "BracketRight": [
+        "bracketright"
+      ],
+      "Backslash": [
+        "backslash"
+      ],
+      "Semicolon": [
+        "semicolon"
+      ],
+      "Apostrophe": [
+        "apostrophe"
+      ],
+      "Comma": [
+        "comma"
+      ],
+      "Period": [
+        "period"
+      ],
+      "Slash": [
+        "slash"
+      ],
+      "KPEnter": [
+        "KP_Enter"
+      ],
+      "KPAdd": [
+        "KP_Add"
+      ],
+      "KPSubtract": [
+        "KP_Subtract"
+      ],
+      "KPMultiply": [
+        "KP_Multiply"
+      ],
+      "KPDivide": [
+        "KP_Divide"
+      ],
+      "KPDecimal": [
+        "KP_Decimal"
+      ],
+      "KP0": [
+        "KP_0"
+      ],
+      "KP1": [
+        "KP_1"
+      ],
+      "KP2": [
+        "KP_2"
+      ],
+      "KP3": [
+        "KP_3"
+      ],
+      "KP4": [
+        "KP_4"
+      ],
+      "KP5": [
+        "KP_5"
+      ],
+      "KP6": [
+        "KP_6"
+      ],
+      "KP7": [
+        "KP_7"
+      ],
+      "KP8": [
+        "KP_8"
+      ],
+      "KP9": [
+        "KP_9"
+      ],
+      "F13": [
+        "F13"
+      ],
+      "F14": [
+        "F14"
+      ],
+      "F15": [
+        "F15"
+      ],
+      "F16": [
+        "F16"
+      ],
+      "F17": [
+        "F17"
+      ],
+      "F18": [
+        "F18"
+      ],
+      "F19": [
+        "F19"
+      ],
+      "F20": [
+        "F20"
+      ],
+      "F21": [
+        "F21"
+      ],
+      "F22": [
+        "F22"
+      ],
+      "F23": [
+        "F23"
+      ],
+      "F24": [
+        "F24"
       ]
     },
     "Header": {
@@ -453,6 +598,9 @@
       ],
       "BarCommand": [
         "swaybar_command"
+      ],
+      "BindingCode": [
+        "bindcode"
       ]
     },
     "Orientation": {
@@ -461,6 +609,17 @@
       ],
       "Vertical": [
         "vertical"
+      ]
+    },
+    "FocusPlane": {
+      "Tiled": [
+        "tiling"
+      ],
+      "Floating": [
+        "floating"
+      ],
+      "Toggle": [
+        "mode_toggle"
       ]
     }
   },
@@ -487,6 +646,11 @@
       "kind": "u16",
       "min": 0,
       "max": 64
+    },
+    "XkbKeycode": {
+      "kind": "u32",
+      "min": 9,
+      "max": 4294967294
     }
   },
   "productions": {
@@ -658,7 +822,6 @@
         "Border": "Border",
         "Persistent": "Persistence",
         "Fullscreen": "Toggle",
-        "FocusModeToggle": null,
         "FocusParent": null,
         "FocusChild": null,
         "Focus": "Direction",
@@ -670,7 +833,8 @@
         "Reload": null,
         "Position": "Position",
         "Weld": "WeldCommand",
-        "MoveWorkspaceToOutput": "Vec<Literal>"
+        "MoveWorkspaceToOutput": "Vec<Literal>",
+        "FocusPlane": "FocusPlane"
       },
       "rules": [
         {
@@ -889,13 +1053,6 @@
         {
           "pattern": [
             "focus",
-            "mode_toggle"
-          ],
-          "value": "Self::FocusModeToggle"
-        },
-        {
-          "pattern": [
-            "focus",
             "parent"
           ],
           "value": "Self::FocusParent"
@@ -906,6 +1063,27 @@
             "child"
           ],
           "value": "Self::FocusChild"
+        },
+        {
+          "pattern": [
+            "focus",
+            "tiling"
+          ],
+          "value": "Self::FocusPlane(FocusPlane::Tiled)"
+        },
+        {
+          "pattern": [
+            "focus",
+            "floating"
+          ],
+          "value": "Self::FocusPlane(FocusPlane::Floating)"
+        },
+        {
+          "pattern": [
+            "focus",
+            "mode_toggle"
+          ],
+          "value": "Self::FocusPlane(FocusPlane::Toggle)"
         },
         {
           "pattern": [
@@ -1373,7 +1551,54 @@
     "F9": 67,
     "F10": 68,
     "F11": 87,
-    "F12": 88
+    "F12": 88,
+    "BackSpace": 14,
+    "Insert": 110,
+    "Delete": 111,
+    "Home": 102,
+    "End": 107,
+    "Prior": 104,
+    "Next": 109,
+    "CapsLock": 58,
+    "NumLock": 69,
+    "ScrollLock": 70,
+    "Grave": 41,
+    "BracketLeft": 26,
+    "BracketRight": 27,
+    "Backslash": 43,
+    "Semicolon": 39,
+    "Apostrophe": 40,
+    "Comma": 51,
+    "Period": 52,
+    "Slash": 53,
+    "KPEnter": 96,
+    "KPAdd": 78,
+    "KPSubtract": 74,
+    "KPMultiply": 55,
+    "KPDivide": 98,
+    "KPDecimal": 83,
+    "KP0": 82,
+    "KP1": 79,
+    "KP2": 80,
+    "KP3": 81,
+    "KP4": 75,
+    "KP5": 76,
+    "KP6": 77,
+    "KP7": 71,
+    "KP8": 72,
+    "KP9": 73,
+    "F13": 183,
+    "F14": 184,
+    "F15": 185,
+    "F16": 186,
+    "F17": 187,
+    "F18": 188,
+    "F19": 189,
+    "F20": 190,
+    "F21": 191,
+    "F22": 192,
+    "F23": 193,
+    "F24": 194
   },
   "structs": {
     "ModeDefinition": {
@@ -1410,8 +1635,8 @@
           "description": "Required modifiers in declaration order."
         },
         "key": {
-          "type": "Option<Key>",
-          "description": "Trigger key; absence denotes a held modifier chord."
+          "type": "Option<BindingKey>",
+          "description": "Named physical position or XKB keycode; absent only for held modifier chords."
         }
       }
     },
@@ -1575,8 +1800,6 @@
     ],
     "Direction": [
       "scratchpad",
-      "tiling",
-      "floating",
       "next",
       "prev"
     ],

@@ -468,11 +468,20 @@ fn dispatch_action(
             window: None,
             enabled,
         }),
-        Action::FocusModeToggle => effects.commands.trigger(weld_i3_quirks::I3FocusModeToggle),
+        Action::FocusPlane(request) => effects.commands.trigger(request),
         Action::FocusHierarchy(request) => effects.commands.trigger(request),
-        Action::Sticky(enabled) => effects
-            .commands
-            .trigger(weld_i3_quirks::I3StickyRequest(enabled)),
+        Action::Sticky(enabled) => effects.commands.trigger(weld_i3_quirks::I3StickyRequest {
+            window: None,
+            enabled,
+        }),
+        Action::Position(position) => {
+            if let Some(window) = effects.focus.entity() {
+                effects.commands.trigger(rules::ExecuteAction {
+                    window,
+                    action: weldwm_config::RuleAction::Position(position),
+                });
+            }
+        }
         Action::Border(style) => effects.commands.trigger(BorderRequest(style)),
         Action::Persistent(action) => {
             effects
@@ -899,9 +908,9 @@ mod tests {
         let mut app = App::new();
         app.add_plugins(ConfigPlugin {
             path: example_path(),
-            initial: prepare::parse("keys", "bindsym XF86MonBrightnessDown exec lower\nbindsym XF86MonBrightnessUp exec raise\nbindsym XF86AudioPause exec pause").expect("bindings"),
+            initial: prepare::parse("keys", "bindsym XF86MonBrightnessDown exec lower\nbindsym XF86MonBrightnessUp exec raise\nbindsym XF86AudioPause exec pause\nbindsym BackSpace exec back\nbindsym KP_Enter exec keypad\nbindsym F24 exec extended").expect("bindings"),
         });
-        for keycode in [224, 225, 201] {
+        for keycode in [224, 225, 201, 14, 96, 194] {
             for state in [KeyboardKeyState::Pressed, KeyboardKeyState::Released] {
                 let event = RawSeatEvent::new(
                     RawSeatEventKind::Keyboard {
@@ -919,7 +928,7 @@ mod tests {
                 .resource_mut::<Messages<GlobalShortcutPressed>>()
                 .drain()
                 .count(),
-            3
+            6
         );
     }
 

@@ -15,11 +15,12 @@ use weld_app::{
     surface::{SurfaceAction, SurfaceActionQueue, take_surface_actions},
 };
 use weld_float::{FloatBehaviorPlugin, FloatManagement};
-use weld_i3_quirks::{I3FocusModeToggle, I3FocusRequest, I3QuirksPlugin};
+use weld_i3_quirks::{I3FocusRequest, I3QuirksPlugin};
 use weld_tile::{
     TileCommand, TileContainer, TileFloatingRequest, TileFocusHistory, TileParent, TilePlugin,
     TileRequest, TileSystems, TileWorkspace,
 };
+use weld_tile_config::FocusPlaneRequest;
 use weld_tile_config::FocusWrapping;
 use weld_tile_config::{Direction, SplitAxis, TileOperation, TileSettings};
 use weld_window::{
@@ -48,10 +49,10 @@ fn floating_plane_focus_and_workspace_roundtrip_preserve_selection() {
         enabled: Some(true),
     });
     app.update();
-    app.world_mut().trigger(I3FocusModeToggle);
+    app.world_mut().trigger(FocusPlaneRequest::Toggle);
     app.update();
     assert_eq!(selected(&app), tiled);
-    app.world_mut().trigger(I3FocusModeToggle);
+    app.world_mut().trigger(FocusPlaneRequest::Toggle);
     app.update();
     assert_eq!(selected(&app), floating);
     app.world_mut()

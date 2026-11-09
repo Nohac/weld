@@ -19,6 +19,7 @@ use weld_ssd::WindowBorderStyle;
 use weld_ssd_config::BorderStyle;
 use weld_tile::TileFloatingRequest;
 use weld_tile::TileSystems;
+use weld_window::fullscreen::FullscreenRequest;
 use weld_window::persistence::WindowPersistenceRequest;
 use weld_window::{
     FloatingWindow, ManagedBy, ManagedWindow, WindowAdmissionPreferences, WindowClientResolver,
@@ -69,8 +70,8 @@ pub(crate) struct PendingActions {
 
 #[derive(Event)]
 pub(crate) struct ExecuteAction {
-    window: Entity,
-    action: RuleAction,
+    pub(super) window: Entity,
+    pub(super) action: RuleAction,
 }
 
 #[derive(QueryData)]
@@ -230,6 +231,14 @@ pub(crate) fn execute(
 ) {
     let window = event.window;
     match &event.action {
+        RuleAction::Fullscreen(action) => commands.trigger(FullscreenRequest {
+            window: Some(window),
+            action: *action,
+        }),
+        RuleAction::Sticky(enabled) => commands.trigger(weld_i3_quirks::I3StickyRequest {
+            window: Some(window),
+            enabled: *enabled,
+        }),
         RuleAction::Persistent(action) => commands.trigger(WindowPersistenceRequest {
             window: Some(window),
             action: *action,

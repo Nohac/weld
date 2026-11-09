@@ -56,6 +56,10 @@ spelling tree retains the information needed for source-ordered variables,
 quoting, blocks, and opaque shell payloads. Generated productions recognize
 keywords and argument structure; consumers match enums rather than strings.
 
+Numeric `bindcode` chords retain a validated XKB code until lowering converts
+them to Linux physical identities. Named keys use the generated mapping; both
+forms share duplicate checks, mode handling, and runtime press/release ownership.
+
 A mode declaration produces a `ModeDefinition` with a typed header and bindings.
 The bound `mode NAME` command produces a distinct command variant. `ModeName`,
 border widths, radii, and gap values have generated private representations and
@@ -119,3 +123,9 @@ quoted XKB lists, output-property skipping, shell payload preservation, and
 typed window-rule sequences. Lowering tests cover existing setting/action
 translation. Runtime tests cover native preparation failure, mode changes,
 reload, startup ordering, admission rules, workspaces, tiling, and decorations.
+
+## Remaining coverage
+
+The current capability audit and proposed implementation order are recorded in
+[Configuration coverage and next steps](configuration-roadmap.md). Its planned
+work is separate from the implemented behavior described above.

@@ -29,10 +29,6 @@ pub struct I3FocusRequest(pub Direction);
 #[derive(Event, Clone, Copy, Debug)]
 pub struct I3MoveRequest(pub Direction);
 
-/// Select the most recently focused window in the other layout plane.
-#[derive(Event, Clone, Copy, Debug)]
-pub struct I3FocusModeToggle;
-
 /// Installs i3 navigation and close-focus restoration over the shared tree.
 pub struct I3QuirksPlugin;
 
@@ -55,7 +51,7 @@ impl Plugin for I3QuirksPlugin {
             .add_observer(focus::navigate)
             .add_observer(layout::request)
             .add_observer(resize::request)
-            .add_observer(focus::mode_toggle)
+            .add_observer(focus::select_plane)
             .add_observer(focus::hierarchy)
             .add_observer(focus::remember_focus)
             .add_observer(focus::tree_changed)

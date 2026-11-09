@@ -330,7 +330,6 @@ mod interpretation {
             "bar bar-0 {\n swaybar_command should-not-start\n}",
             "bindsym Mod4+x move scratchpad",
             "bindsym Mod4+x focus output right",
-            "bindsym Mod4+x focus tiling",
             "bindsym Mod4+x fullscreen toggle global",
             "bindsym Mod4+x resize shrink width 10px",
             "bindsym --to-code Mod4+x exec foot",
@@ -351,7 +350,7 @@ mod interpretation {
                 assert!(
                     config.warnings[0]
                         .message
-                        .contains("unsupported bindsym flag --to-code")
+                        .contains("unsupported binding flag --to-code")
                 );
             }
         }
@@ -576,7 +575,10 @@ mod interpretation {
             })
         );
         assert_eq!(config.bindings[0].1, Action::Floating(None));
-        assert_eq!(config.bindings[1].1, Action::FocusModeToggle);
+        assert_eq!(
+            config.bindings[1].1,
+            Action::FocusPlane(FocusPlaneRequest::Toggle)
+        );
         assert!(parse("float", "floating_modifier Mod1+Mod1").is_err());
     }
 
@@ -601,7 +603,7 @@ mod interpretation {
         assert_eq!(
             actions,
             [
-                Action::FocusModeToggle,
+                Action::FocusPlane(FocusPlaneRequest::Toggle),
                 Action::Sticky(None),
                 Action::FocusHierarchy(weld_tile_config::FocusHierarchy::Parent),
                 Action::FocusHierarchy(weld_tile_config::FocusHierarchy::Child)
@@ -707,4 +709,97 @@ mod interpretation {
             assert!(parse("bad", bad).is_err(), "{bad}");
         }
     }
+}
+
+#[test]
+fn keycodes_names_aliases_and_modes_share_physical_identities() {
+    let config = parse_with_extensions::<()>(
+        "keys",
+        r#"
+        bindcode Alt+22 exec backspace
+        bindsym Super+Prior exec pageup
+        bindsym Ctrl+KP_Enter exec keypad
+        bindsym F24 exec extended
+        mode resize {
+            bindcode 36 mode default
+            bindsym BackSpace exec backspace
+        }
+    "#,
+        |_| bail!("extension"),
+    )
+    .expect("bindings");
+    assert_eq!(
+        config
+            .bindings
+            .iter()
+            .map(|(chord, _)| chord.trigger)
+            .collect::<Vec<_>>(),
+        [Some(14), Some(104), Some(96), Some(194)]
+    );
+    assert!(config.bindings[0].0.modifiers.alt);
+    assert!(config.bindings[1].0.modifiers.super_key);
+    assert!(config.bindings[2].0.modifiers.control);
+    assert_eq!(config.modes[0].bindings[0].0.trigger, Some(28));
+    assert_eq!(config.modes[0].bindings[1].0.trigger, Some(14));
+    for source in [
+        "bindcode Mod4+36 exec a\nbindsym Super+Return exec b",
+        "mode resize {\n bindcode 22 exec a\n bindsym BackSpace exec b\n}",
+    ] {
+        let error = parse_with_extensions::<()>("duplicate", source, |_| bail!("extension"))
+            .expect_err("same physical identity");
+        assert!(format!("{error:#}").contains("duplicate key binding"));
+    }
+}
+
+#[test]
+fn positions_and_window_actions_lower_without_losing_the_target_policy() {
+    let config = parse_with_extensions::<()>(
+        "actions",
+        r#"
+        bindsym Home move absolute position -120 64
+        for_window [app_id=tool] floating enable, fullscreen enable, sticky toggle
+    "#,
+        |_| bail!("extension"),
+    )
+    .expect("actions");
+    assert_eq!(config.bindings[0].1, Action::Position([-120.0, 64.0]));
+    let RuleEffect::Commands(actions) = &config.window_rules[0].value.effect else {
+        panic!("expected actions");
+    };
+    assert_eq!(
+        actions,
+        &[
+            RuleAction::Floating(true),
+            RuleAction::Fullscreen(FullscreenAction::Enable(FullscreenMode::Normal)),
+            RuleAction::Sticky(None),
+        ]
+    );
+    for source in [
+        "bindsym Home move absolute position 1e300 0",
+        "for_window [all] move absolute position 1e300 0",
+    ] {
+        assert!(parse_with_extensions::<()>("overflow", source, |_| bail!("extension")).is_err());
+    }
+}
+
+#[test]
+fn explicit_plane_selection_preserves_set_versus_toggle() {
+    let config = parse_with_extensions::<()>(
+        "planes",
+        "bindsym a focus tiling\nbindsym b focus floating\nbindsym c focus mode_toggle",
+        |_| bail!("extension"),
+    )
+    .expect("planes");
+    assert_eq!(
+        config
+            .bindings
+            .into_iter()
+            .map(|(_, action)| action)
+            .collect::<Vec<_>>(),
+        [
+            Action::FocusPlane(FocusPlaneRequest::Tiled),
+            Action::FocusPlane(FocusPlaneRequest::Floating),
+            Action::FocusPlane(FocusPlaneRequest::Toggle),
+        ]
+    );
 }

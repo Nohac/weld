@@ -12,6 +12,7 @@ use bevy::{
     window::RequestRedraw,
 };
 use weld_tile::{TileCommands, TileParent, TileSelect, TileSelection, TileTreeChanged};
+use weld_tile_config::FocusPlaneRequest;
 use weld_tile_config::{Direction, SplitAxis};
 use weld_window::{
     FloatingWindow, FocusedWindow, ManagedWindow, WindowCommand, WindowCommandKind,
@@ -47,8 +48,8 @@ pub(crate) fn hierarchy(
     }
 }
 
-pub(crate) fn mode_toggle(
-    _: On<crate::I3FocusModeToggle>,
+pub(crate) fn select_plane(
+    event: On<FocusPlaneRequest>,
     focus: Res<FocusedWindow>,
     selected: Res<FocusedWorkspace>,
     workspaces: Query<&Workspace>,
@@ -66,9 +67,14 @@ pub(crate) fn mode_toggle(
         .entity()
         .and_then(|window| windows.get(window).ok())
         .is_some_and(|(_, floating)| floating.is_some());
+    let target_floating = match *event {
+        FocusPlaneRequest::Tiled => false,
+        FocusPlaneRequest::Floating => true,
+        FocusPlaneRequest::Toggle => !is_floating,
+    };
     if let Some(window) = state.recent().find(|window| {
         windows.get(*window).is_ok_and(|(member, floating)| {
-            member.0 == workspace && floating.is_some() != is_floating
+            member.0 == workspace && floating.is_some() == target_floating
         })
     }) {
         commands.trigger(WindowCommand {

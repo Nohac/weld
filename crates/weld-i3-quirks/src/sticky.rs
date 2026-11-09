@@ -11,9 +11,13 @@ use weld_window::{
     FloatingWindow, FocusedWindow, ManagedWindow, StickyWindow, workspace::WorkspaceMember,
 };
 
-/// Set or toggle the focused window's retained sticky preference.
+/// Set or toggle a window's retained sticky preference.
 #[derive(Event, Clone, Copy, Debug)]
-pub struct I3StickyRequest(pub Option<bool>);
+pub struct I3StickyRequest {
+    /// Absence selects the focused window.
+    pub window: Option<Entity>,
+    pub enabled: Option<bool>,
+}
 
 pub(crate) fn request(
     event: On<I3StickyRequest>,
@@ -21,11 +25,13 @@ pub(crate) fn request(
     windows: Query<Option<&StickyWindow>, With<ManagedWindow>>,
     mut commands: Commands,
 ) {
-    let Some(window) = focus.entity() else { return };
+    let Some(window) = event.window.or(focus.entity()) else {
+        return;
+    };
     let Ok(sticky) = windows.get(window) else {
         return;
     };
-    if event.0.unwrap_or(sticky.is_none()) {
+    if event.enabled.unwrap_or(sticky.is_none()) {
         commands.entity(window).insert(StickyWindow);
     } else {
         commands.entity(window).remove::<StickyWindow>();

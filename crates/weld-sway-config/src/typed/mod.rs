@@ -172,8 +172,28 @@ impl Word for Modifiers {
         Ok(Self(values))
     }
 }
+/// Binding spelling retained until lowering normalizes Linux physical identity.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BindingKey {
+    /// A supported key name, using Weld's existing physical-position semantics.
+    Named(Key),
+    /// An XKB keycode (Linux evdev code plus eight).
+    Code(XkbKeycode),
+}
+
+#[derive(Clone, Copy)]
+enum BindingKind {
+    Named,
+    Code,
+}
+
 impl Word for Chord {
     fn word(word: &str) -> Result<Self> {
+        Self::parse(word, BindingKind::Named)
+    }
+}
+impl Chord {
+    fn parse(word: &str, kind: BindingKind) -> Result<Self> {
         ensure!(
             !word.is_empty() && !word.chars().any(char::is_whitespace),
             "invalid binding chord"
@@ -189,7 +209,9 @@ impl Word for Chord {
             .map(Modifiers::word)
             .transpose()?
             .unwrap_or(Modifiers(Vec::new()));
-        let key = if let Ok(modifier) = Modifier::word(trigger) {
+        let key = if matches!(kind, BindingKind::Code) {
+            Some(BindingKey::Code(XkbKeycode::word(trigger)?))
+        } else if let Ok(modifier) = Modifier::word(trigger) {
             ensure!(
                 !modifiers.0.contains(&modifier),
                 "duplicate binding modifier"
@@ -197,7 +219,7 @@ impl Word for Chord {
             modifiers.0.push(modifier);
             None
         } else {
-            Some(Key::word(trigger)?)
+            Some(BindingKey::Named(Key::word(trigger)?))
         };
         Ok(Self { modifiers, key })
     }
@@ -494,10 +516,10 @@ fn location(statement: &Statement, name: &str, source: &str) -> Result<Location>
         range: start..end,
     })
 }
-fn binding(statement: &Statement) -> Result<Binding> {
+fn binding(statement: &Statement, kind: BindingKind) -> Result<Binding> {
     ensure!(
         statement.block().is_none(),
-        "bindsym requires a command, not a block"
+        "binding requires a command, not a block"
     );
     let words = statement
         .arguments()
@@ -509,12 +531,12 @@ fn binding(statement: &Statement) -> Result<Binding> {
     };
     if chord.starts_with("--") {
         return Err(unsupported(format!(
-            "unsupported bindsym flag {chord}; binding skipped"
+            "unsupported binding flag {chord}; binding skipped"
         )));
     }
     ensure!(!command.is_empty(), "missing binding command");
     Ok(Binding {
-        chord: Chord::word(chord)?,
+        chord: Chord::parse(chord, kind)?,
         command: Command::words(command)?,
     })
 }
@@ -558,7 +580,8 @@ fn statement_nodes(
         Ok(Header::Include) => {
             bail!("include is not supported yet; load a combined configuration file")
         }
-        Ok(Header::Binding) => Directive::Binding(binding(statement)?),
+        Ok(Header::Binding) => Directive::Binding(binding(statement, BindingKind::Named)?),
+        Ok(Header::BindingCode) => Directive::Binding(binding(statement, BindingKind::Code)?),
         Ok(Header::Mode) if statement.block().is_some() => {
             let header = ModeHeader::words(&words)?;
             let mut bindings = Vec::new();
@@ -566,7 +589,8 @@ fn statement_nodes(
                 for child in block.statements() {
                     let child_origin = location(child, name, source)?;
                     let result = match Header::word(child.name().text()) {
-                        Ok(Header::Binding) => binding(child),
+                        Ok(Header::Binding) => binding(child, BindingKind::Named),
+                        Ok(Header::BindingCode) => binding(child, BindingKind::Code),
                         _ => Err(unsupported("unsupported mode directive")),
                     };
                     match result {

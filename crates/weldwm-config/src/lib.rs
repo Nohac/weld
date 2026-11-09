@@ -8,8 +8,8 @@ use weld_input_config::{CursorThemeSettings, KeymapConfig, PointerDeviceSettings
 use weld_output::OutputSettings;
 use weld_ssd_config::{BorderStyle, DecorationSettings};
 use weld_tile_config::{
-    Direction, FocusHierarchy, FocusWrapping, LayoutRequest, ResizeRequest, TileOperation,
-    TileSettings,
+    Direction, FocusHierarchy, FocusPlaneRequest, FocusWrapping, LayoutRequest, ResizeRequest,
+    TileOperation, TileSettings,
 };
 use weld_window_config::{
     FullscreenAction, PersistenceAction, RuleDefinition, WindowPointerSettings, WorkspaceCommand,
@@ -24,7 +24,8 @@ pub enum Action<Extension = ()> {
     Tile(TileOperation),
     Layout(LayoutRequest),
     Floating(Option<bool>),
-    FocusModeToggle,
+    Position([f32; 2]),
+    FocusPlane(FocusPlaneRequest),
     FocusHierarchy(FocusHierarchy),
     Sticky(Option<bool>),
     Border(Option<BorderStyle>),
@@ -102,4 +103,6 @@ pub enum RuleAction {
     Floating(bool),
     Workspace(WorkspaceTarget),
     Position([f32; 2]),
+    Fullscreen(FullscreenAction),
+    Sticky(Option<bool>),
 }

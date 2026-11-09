@@ -145,8 +145,10 @@ fn sticky_window_stays_on_its_output_when_focus_moves_to_another_monitor() {
         window: Some(sticky),
         enabled: Some(true),
     });
-    app.world_mut()
-        .trigger(weld_i3_quirks::I3StickyRequest(Some(true)));
+    app.world_mut().trigger(weld_i3_quirks::I3StickyRequest {
+        window: None,
+        enabled: Some(true),
+    });
     app.update();
     let home = app.world().get::<WorkspaceMember>(sticky).expect("home").0;
     assert_eq!(selected(&app), sticky);

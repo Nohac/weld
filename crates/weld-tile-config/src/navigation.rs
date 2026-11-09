@@ -10,6 +10,15 @@ pub enum FocusHierarchy {
     Child,
 }
 
+/// Select the most recently focused member of a layout plane in the active workspace.
+#[cfg_attr(feature = "ecs", derive(bevy_ecs::event::Event))]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum FocusPlaneRequest {
+    Tiled,
+    Floating,
+    Toggle,
+}
+
 /// Where directional navigation may wrap after reaching a split edge.
 #[cfg_attr(feature = "ecs", derive(bevy_ecs::resource::Resource))]
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]

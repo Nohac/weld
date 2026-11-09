@@ -7,6 +7,7 @@ use bevy::{
     math::{UVec2, Vec2},
 };
 use indoc::indoc;
+use weld_app::output::OutputPosition;
 use weld_app::{
     output::{OutputGeometry, OutputId, PrimaryOutput, WeldOutput},
     surface::{
@@ -17,6 +18,9 @@ use weld_app::{
 use weld_client::{ClientId, ClientSourceId, ClientSurfaceMetadata, ToplevelHints, ToplevelKind};
 use weld_float::FloatBehaviorPlugin;
 use weld_i3_quirks::I3QuirksPlugin;
+use weld_input::{
+    KeyboardKeyState, LinuxKeycode, RawSeatEvent, RawSeatEventKind, filter_global_shortcut_event,
+};
 use weld_ssd::WindowBorderStyle;
 use weld_ssd_config::BorderStyle;
 use weld_tile::{TileParent, TilePlugin};
@@ -26,6 +30,10 @@ use weld_window::{
     FloatingWindow, FocusedWindow, OccupiesWindow, WindowCommand, WindowCommandKind,
     WindowGeometry, WindowPlugin, WindowVisibility,
     workspace::{FocusedWorkspace, Workspace, WorkspaceMember},
+};
+use weld_window::{
+    StickyWindow,
+    fullscreen::{FullscreenPlugin, WindowFullscreen},
 };
 use weld_window_config::{PersistenceAction, PersistenceMatch};
 use weld_window_config::{WorkspaceCommand, WorkspaceTarget};
@@ -566,13 +574,15 @@ fn focus_mode_toggle_finds_a_floating_window_that_has_never_been_focused() {
     app.update();
     let utility = window(&app, utility_client);
     assert_eq!(app.world().resource::<FocusedWindow>().entity(), Some(main));
-    app.world_mut().trigger(weld_i3_quirks::I3FocusModeToggle);
+    app.world_mut()
+        .trigger(weld_tile_config::FocusPlaneRequest::Toggle);
     app.update();
     assert_eq!(
         app.world().resource::<FocusedWindow>().entity(),
         Some(utility)
     );
-    app.world_mut().trigger(weld_i3_quirks::I3FocusModeToggle);
+    app.world_mut()
+        .trigger(weld_tile_config::FocusPlaneRequest::Toggle);
     app.update();
     assert_eq!(app.world().resource::<FocusedWindow>().entity(), Some(main));
 }
@@ -725,4 +735,117 @@ fn prepared_rules(source: &str) -> ConfiguredRules {
         rules.add(rule.value).expect("native rule");
     }
     rules
+}
+
+#[test]
+fn fullscreen_and_sticky_rules_target_the_matching_window_and_reapply_only_on_reload() {
+    let source = "for_window [app_id=tool] floating enable\nfor_window [app_id=tool title=Ready] fullscreen toggle, sticky toggle";
+    let mut app = app(source);
+    app.add_plugins(FullscreenPlugin);
+    let tool_client = client(&mut app, 801, "tool", "Starting", ToplevelKind::Normal);
+    app.update();
+    let tool = window(&app, tool_client);
+    let editor_client = client(&mut app, 802, "editor", "Editor", ToplevelKind::Normal);
+    app.update();
+    let editor = window(&app, editor_client);
+    assert_eq!(
+        app.world().resource::<FocusedWindow>().entity(),
+        Some(editor)
+    );
+    app.world_mut()
+        .entity_mut(tool_client)
+        .insert(metadata("tool", "Ready"));
+    app.update();
+    app.update(); // Fullscreen consumes the request at its next presentation boundary.
+    assert!(app.world().get::<WindowFullscreen>(tool).is_some());
+    assert!(app.world().get::<StickyWindow>(tool).is_some());
+    assert!(app.world().get::<WindowFullscreen>(editor).is_none());
+    assert!(app.world().get::<StickyWindow>(editor).is_none());
+    app.world_mut()
+        .entity_mut(tool_client)
+        .insert(metadata("tool", "Ready again"));
+    app.update();
+    app.update();
+    assert!(app.world().get::<WindowFullscreen>(tool).is_some());
+    assert!(app.world().get::<StickyWindow>(tool).is_some());
+    app.insert_resource(prepared_rules(source));
+    app.update();
+    app.update();
+    assert!(app.world().get::<WindowFullscreen>(tool).is_none());
+    assert!(app.world().get::<StickyWindow>(tool).is_none());
+}
+
+#[test]
+fn numeric_shortcut_positions_the_focused_float_in_global_coordinates() {
+    let mut app = app("");
+    let source =
+        "for_window [app_id=tool] floating enable\nbindcode 22 move absolute position 140 260";
+    app.add_plugins(super::ConfigPlugin {
+        path: "unused.conf".into(),
+        initial: super::prepare::parse("position", source).expect("configuration"),
+    });
+    let output = app
+        .world_mut()
+        .query_filtered::<Entity, bevy::ecs::query::With<WeldOutput>>()
+        .single(app.world())
+        .expect("output");
+    app.world_mut()
+        .entity_mut(output)
+        .insert(OutputPosition(Vec2::new(100.0, 200.0)));
+    let tool_client = client(&mut app, 803, "tool", "Tool", ToplevelKind::Normal);
+    app.update();
+    let tool = window(&app, tool_client);
+    for state in [KeyboardKeyState::Pressed, KeyboardKeyState::Released] {
+        assert!(filter_global_shortcut_event(
+            app.world_mut(),
+            &RawSeatEvent::new(
+                RawSeatEventKind::Keyboard {
+                    keycode: LinuxKeycode(14),
+                    logical_key: None,
+                    state
+                },
+                0,
+            )
+        ));
+    }
+    app.update();
+    assert_eq!(
+        app.world()
+            .get::<WindowGeometry>(tool)
+            .expect("geometry")
+            .position,
+        Vec2::new(40.0, 60.0)
+    );
+}
+
+#[test]
+fn explicit_plane_focus_uses_history_and_leaves_an_empty_plane_unchanged() {
+    let mut app = app("for_window [app_id=tool] floating enable");
+    let editor_client = client(&mut app, 804, "editor", "Editor", ToplevelKind::Normal);
+    app.update();
+    let editor = window(&app, editor_client);
+    app.world_mut()
+        .trigger(weld_tile_config::FocusPlaneRequest::Floating);
+    app.update();
+    assert_eq!(
+        app.world().resource::<FocusedWindow>().entity(),
+        Some(editor)
+    );
+    let tool_client = client(&mut app, 805, "tool", "Tool", ToplevelKind::Normal);
+    app.update();
+    let tool = window(&app, tool_client);
+    for (request, expected) in [
+        (weld_tile_config::FocusPlaneRequest::Tiled, editor),
+        (weld_tile_config::FocusPlaneRequest::Tiled, editor),
+        (weld_tile_config::FocusPlaneRequest::Floating, tool),
+        (weld_tile_config::FocusPlaneRequest::Floating, tool),
+        (weld_tile_config::FocusPlaneRequest::Toggle, editor),
+    ] {
+        app.world_mut().trigger(request);
+        app.update();
+        assert_eq!(
+            app.world().resource::<FocusedWindow>().entity(),
+            Some(expected)
+        );
+    }
 }
