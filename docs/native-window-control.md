@@ -57,6 +57,10 @@ weldctl --session weld-0 window control --id WINDOW_ID --enabled
 weldctl --session weld-0 window list --json
 ```
 
+Plain `window list` output includes `control=CONTROL_ID` beside each window ID;
+`control=-` means the window has no active control grant. Copy the control ID into
+`weldctl window peek --control CONTROL_ID` to show its local peek.
+
 Controlled windows keep a header with View, Keyboard, Pointer, Resize, Interact,
 Fit, Copy ID and Take back controls. Copy ID copies the stable shorthand for a
 persistent slot and the incarnation ID for an ordinary window. It remains

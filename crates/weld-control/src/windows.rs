@@ -74,8 +74,9 @@ impl fmt::Display for WindowInfo {
     fn fmt(&self, output: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             output,
-            "{}\t{}\t{}",
+            "{}\tcontrol={}\t{}\t{}",
             self.id,
+            self.control.as_deref().unwrap_or("-"),
             self.app_id.as_deref().unwrap_or("-"),
             self.title.as_deref().unwrap_or("(empty)")
         )
