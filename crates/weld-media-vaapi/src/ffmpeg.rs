@@ -1,15 +1,14 @@
+mod frames;
+use frames::Frame;
+
 use std::{
     ffi::{CStr, CString, c_void},
-    mem,
-    os::fd::{AsRawFd, FromRawFd, OwnedFd},
     path::Path,
     ptr,
     time::{Duration, Instant},
 };
 
-use crate::{
-    VaapiDmabuf, VaapiDmabufObject, VaapiDmabufPlane, VaapiEncodeGeometry, VppConverter, VppOutput,
-};
+use crate::{VaapiDmabuf, VaapiEncodeGeometry, VppConverter, VppOutput};
 use anyhow::{Context, Result, bail, ensure};
 use ffmpeg_next::{Error as FfmpegError, ffi};
 use weld_media::{EncodedFrameKind, VideoCodec};
@@ -250,6 +249,25 @@ impl FfmpegEncoder {
     pub fn encode(&mut self, input: VaapiDmabuf, timestamp_micros: u64) -> Result<EncodedPacket> {
         let presentation_time = i64::try_from(timestamp_micros)?;
         let input = self.filter.input_frame(input, presentation_time)?;
+        self.encode_frame(input)
+    }
+
+    /// Upload CPU-backed pixels through FFmpeg while retaining the hardware frame
+    /// in the mapped input's reference chain until the filter releases it.
+    pub fn encode_bgra(
+        &mut self,
+        width: u32,
+        height: u32,
+        pixels: Vec<u8>,
+        timestamp_micros: u64,
+    ) -> Result<EncodedPacket> {
+        let input =
+            self.filter
+                .input_bgra(width, height, pixels, i64::try_from(timestamp_micros)?)?;
+        self.encode_frame(input)
+    }
+
+    fn encode_frame(&mut self, input: Frame) -> Result<EncodedPacket> {
         self.filter.push(input)?;
         let mut encoded = None;
         while let Some(frame) = self.filter.pull()? {
@@ -299,6 +317,7 @@ pub struct DecodedPacket {
 /// Wall time inside the native finish path, not GPU execution counters.
 #[derive(Clone, Copy, Debug)]
 pub struct DecodeConversionTiming {
+    /// Wall time mapping the decoded frame for GPU reading, including synchronization/export.
     pub decode_sync: Duration,
     pub conversion_setup: Duration,
     pub conversion_sync: Duration,
@@ -320,9 +339,9 @@ impl PendingDecodedFrame {
         vpp: &VppConverter,
     ) -> Result<DecodedPacket> {
         let sync_started = Instant::now();
-        self.frame.sync_vaapi()?;
+        let mapped = self.frame.map_drm()?;
         let decode_sync = sync_started.elapsed();
-        let source = self.frame.export_vaapi_dmabuf()?;
+        let source = mapped.dmabuf()?;
         ensure!(
             visible_width <= source.width && visible_height <= source.height,
             "decoded extent is smaller than its transported visible extent"
@@ -492,8 +511,10 @@ struct FilterPipeline {
     source: *mut ffi::AVFilterContext,
     sink: *mut ffi::AVFilterContext,
     _drm_device: BufferRef,
-    _vaapi_device: BufferRef,
+    vaapi_device: BufferRef,
     drm_frames: BufferRef,
+    upload_frames: Option<BufferRef>,
+    source_extent: (i32, i32),
 }
 
 impl FilterPipeline {
@@ -558,8 +579,10 @@ impl FilterPipeline {
                 source,
                 sink,
                 _drm_device: drm_device,
-                _vaapi_device: vaapi_device,
+                vaapi_device,
                 drm_frames,
+                upload_frames: None,
+                source_extent: (source_width, source_height),
             }),
             Err(error) => {
                 let mut graph = graph;
@@ -582,6 +605,28 @@ impl FilterPipeline {
 
     fn input_frame(&self, input: VaapiDmabuf, pts: i64) -> Result<Frame> {
         Frame::from_dmabuf(input, &self.drm_frames, pts)
+    }
+
+    fn input_bgra(&mut self, width: u32, height: u32, pixels: Vec<u8>, pts: i64) -> Result<Frame> {
+        ensure!(
+            (i32::try_from(width)?, i32::try_from(height)?) == self.source_extent,
+            "BGRA extent differs from encoder generation"
+        );
+        let cpu = Frame::packed_bgra(width, height, pixels)?;
+        if self.upload_frames.is_none() {
+            self.upload_frames = Some(BufferRef::vaapi_upload_frames(
+                &self.vaapi_device,
+                self.source_extent,
+            )?);
+        }
+        let pool = self
+            .upload_frames
+            .as_ref()
+            .context("missing FFmpeg upload pool")?;
+        let uploaded = cpu.upload(pool)?;
+        let mut mapped = uploaded.map_drm()?;
+        mapped.set_drm_input(&self.drm_frames, pts)?;
+        Ok(mapped)
     }
 
     fn push(&mut self, mut frame: Frame) -> Result<()> {
@@ -781,271 +826,28 @@ impl Drop for Packet {
     }
 }
 
-struct Frame(*mut ffi::AVFrame);
-
-impl Frame {
-    fn new() -> Result<Self> {
-        // SAFETY: frame allocation has no caller-side preconditions.
-        let frame = unsafe { ffi::av_frame_alloc() };
-        ensure!(!frame.is_null(), "could not allocate FFmpeg frame");
-        Ok(Self(frame))
-    }
-
-    fn from_dmabuf(input: VaapiDmabuf, frames: &BufferRef, pts: i64) -> Result<Self> {
-        ensure!(
-            input.objects.len() <= 4 && input.planes.len() <= 4,
-            "DMA-BUF exceeds FFmpeg DRM descriptor limits"
-        );
-        let width = i32::try_from(input.width)?;
-        let height = i32::try_from(input.height)?;
-        let frame = Self::new()?;
-        let owner = Box::new(DrmDescriptorOwner::new(
-            input.objects,
-            input.planes,
-            input.fourcc,
-        )?);
-        let owner = Box::into_raw(owner);
-        // SAFETY: owner is a unique Box allocation retained by the callback on success.
-        let buffer = unsafe {
-            ffi::av_buffer_create(
-                owner.cast::<u8>(),
-                mem::size_of::<DrmDescriptorOwner>(),
-                Some(free_drm_descriptor),
-                ptr::null_mut(),
-                0,
-            )
-        };
-        if buffer.is_null() {
-            // SAFETY: FFmpeg did not accept owner, so this reconstructs its unique Box.
-            unsafe { drop(Box::from_raw(owner)) };
-            bail!("could not create FFmpeg-owned DRM descriptor");
-        }
-
-        // SAFETY: frame.0 is uniquely owned and initialized by av_frame_alloc.
-        let frame_ref = unsafe { &mut *frame.0 };
-        frame_ref.format = ffi::AVPixelFormat::AV_PIX_FMT_DRM_PRIME as i32;
-        frame_ref.width = width;
-        frame_ref.height = height;
-        frame_ref.pts = pts;
-        frame_ref.time_base = ffi::AVRational {
-            num: 1,
-            den: 1_000_000,
-        };
-        frame_ref.sample_aspect_ratio = ffi::AVRational { num: 1, den: 1 };
-        frame_ref.color_range = ffi::AVColorRange::AVCOL_RANGE_JPEG;
-        frame_ref.colorspace = ffi::AVColorSpace::AVCOL_SPC_RGB;
-        frame_ref.color_primaries = ffi::AVColorPrimaries::AVCOL_PRI_BT709;
-        frame_ref.color_trc = ffi::AVColorTransferCharacteristic::AVCOL_TRC_IEC61966_2_1;
-        frame_ref.buf[0] = buffer;
-        frame_ref.data[0] = owner.cast::<u8>();
-        frame_ref.hw_frames_ctx = frames.try_clone()?.into_raw();
-        Ok(frame)
-    }
-
-    fn as_ptr(&self) -> *const ffi::AVFrame {
-        self.0
-    }
-
-    fn as_mut_ptr(&mut self) -> *mut ffi::AVFrame {
-        self.0
-    }
-
-    fn timestamp(&self) -> Result<u64> {
-        // SAFETY: self.0 is a live AVFrame.
-        let frame = unsafe { &*self.0 };
-        let timestamp = if frame.pts != i64::MIN {
-            frame.pts
-        } else {
-            frame.best_effort_timestamp
-        };
-        ensure!(timestamp != i64::MIN, "decoded frame has no timestamp");
-        Ok(u64::try_from(timestamp)?)
-    }
-
-    fn vaapi_surface(&self) -> Result<(cros_libva::VADisplay, cros_libva::VASurfaceID)> {
-        // SAFETY: self.0 is a live decoded frame while this method runs.
-        let frame = unsafe { &*self.0 };
-        ensure!(
-            frame.format == ffi::AVPixelFormat::AV_PIX_FMT_VAAPI as i32,
-            "FFmpeg decoder did not produce a VA-API frame (format={})",
-            frame.format,
-        );
-        ensure!(
-            !frame.hw_frames_ctx.is_null(),
-            "VA-API frame has no frames context"
-        );
-        // SAFETY: the non-null AVBufferRef belongs to this live frame.
-        let frames_data = unsafe { (*frame.hw_frames_ctx).data };
-        ensure!(!frames_data.is_null(), "VA-API frame context has no data");
-        // SAFETY: hw_frames_ctx.data is AVHWFramesContext for hardware frames.
-        let frames = unsafe { &*(frames_data.cast::<ffi::AVHWFramesContext>()) };
-        ensure!(
-            !frames.device_ctx.is_null(),
-            "VA-API frame has no device context"
-        );
-        // SAFETY: the non-null device context belongs to the live frames context.
-        let device = unsafe { &*frames.device_ctx };
-        ensure!(
-            device.type_ == ffi::AVHWDeviceType::AV_HWDEVICE_TYPE_VAAPI,
-            "decoded frame device is not VA-API"
-        );
-        ensure!(
-            !device.hwctx.is_null(),
-            "VA-API device has no native context"
-        );
-        // SAFETY: VA-API AVHWDeviceContext.hwctx is AVVAAPIDeviceContext.
-        let vaapi = unsafe { &*(device.hwctx.cast::<ffi::AVVAAPIDeviceContext>()) };
-        ensure!(!vaapi.display.is_null(), "FFmpeg VA-API display is null");
-        ensure!(!frame.data[3].is_null(), "VA-API frame has no surface ID");
-        // FFmpeg stores the VASurfaceID value itself in the data[3] pointer slot.
-        let surface = cros_libva::VASurfaceID::try_from(frame.data[3] as usize)?;
-        Ok((vaapi.display, surface))
-    }
-
-    fn sync_vaapi(&self) -> Result<()> {
-        let (display, surface) = self.vaapi_surface()?;
-        // SAFETY: display and surface belong to this live decoded frame.
-        let status = unsafe { cros_libva::vaSyncSurface(display, surface) };
-        ensure!(
-            status as u32 == cros_libva::VA_STATUS_SUCCESS,
-            "could not synchronize decoded VA surface"
-        );
-        Ok(())
-    }
-
-    // Only called after sync_vaapi, while this AVFrame still owns the surface.
-    fn export_vaapi_dmabuf(&self) -> Result<VaapiDmabuf> {
-        let (display, surface) = self.vaapi_surface()?;
-        let mut descriptor = cros_libva::VADRMPRIMESurfaceDescriptor::default();
-        // SAFETY: descriptor is writable, display and surface are live, and
-        // libva transfers ownership of exported file descriptors on success.
-        let status = unsafe {
-            cros_libva::vaExportSurfaceHandle(
-                display,
-                surface,
-                cros_libva::VA_SURFACE_ATTRIB_MEM_TYPE_DRM_PRIME_2,
-                cros_libva::VA_EXPORT_SURFACE_READ_ONLY
-                    | cros_libva::VA_EXPORT_SURFACE_COMPOSED_LAYERS,
-                (&mut descriptor as *mut cros_libva::VADRMPRIMESurfaceDescriptor).cast(),
-            )
-        };
-        ensure!(
-            status as u32 == cros_libva::VA_STATUS_SUCCESS,
-            "could not export decoded VA surface"
-        );
-        prime_descriptor_from_libva(descriptor)
-    }
-}
-
-impl Drop for Frame {
-    fn drop(&mut self) {
-        // SAFETY: self.0 is uniquely owned and may be nullified by FFmpeg.
-        unsafe { ffi::av_frame_free(&mut self.0) };
-    }
-}
-
-fn prime_descriptor_from_libva(
-    descriptor: cros_libva::VADRMPRIMESurfaceDescriptor,
-) -> Result<VaapiDmabuf> {
-    let object_count = usize::try_from(descriptor.num_objects)?;
-    ensure!(
-        (1..=4).contains(&object_count),
-        "libva exported an invalid object count"
-    );
-    let objects = descriptor.objects[..object_count]
-        .iter()
-        .map(|object| {
-            ensure!(
-                object.fd >= 0,
-                "libva exported an invalid DMA-BUF descriptor"
-            );
-            Ok(VaapiDmabufObject {
-                // SAFETY: successful vaExportSurfaceHandle transfers ownership
-                // of each returned descriptor to the caller exactly once.
-                file_descriptor: unsafe { OwnedFd::from_raw_fd(object.fd) },
-                size: object.size,
-                modifier: object.drm_format_modifier,
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    ensure!(
-        descriptor.num_layers == 1,
-        "libva did not export composed layers"
-    );
-    let layer = &descriptor.layers[0];
-    let plane_count = usize::try_from(layer.num_planes)?;
-    ensure!(
-        (1..=4).contains(&plane_count),
-        "libva exported an invalid plane count"
-    );
-    let planes = (0..plane_count)
-        .map(|index| {
-            Ok(VaapiDmabufPlane {
-                object_index: u8::try_from(layer.object_index[index])?,
-                offset: layer.offset[index],
-                stride: layer.pitch[index],
-            })
-        })
-        .collect::<Result<Vec<_>>>()?;
-    VaapiDmabuf::try_new(
-        descriptor.width,
-        descriptor.height,
-        layer.drm_format,
-        objects,
-        planes,
-    )
-}
-
-#[repr(C)]
-struct DrmDescriptorOwner {
-    descriptor: ffi::AVDRMFrameDescriptor,
-    file_descriptors: Vec<OwnedFd>,
-}
-
-impl DrmDescriptorOwner {
-    fn new(
-        objects: Vec<VaapiDmabufObject>,
-        planes: Vec<VaapiDmabufPlane>,
-        fourcc: u32,
-    ) -> Result<Self> {
-        let mut descriptor = empty_drm_descriptor();
-        descriptor.nb_objects = i32::try_from(objects.len())?;
-        descriptor.nb_layers = 1;
-        descriptor.layers[0].format = fourcc;
-        descriptor.layers[0].nb_planes = i32::try_from(planes.len())?;
-        let mut file_descriptors = Vec::with_capacity(objects.len());
-        for (index, object) in objects.into_iter().enumerate() {
-            descriptor.objects[index] = ffi::AVDRMObjectDescriptor {
-                fd: object.file_descriptor.as_raw_fd(),
-                size: usize::try_from(object.size)?,
-                format_modifier: object.modifier,
-            };
-            file_descriptors.push(object.file_descriptor);
-        }
-        for (index, plane) in planes.into_iter().enumerate() {
-            descriptor.layers[0].planes[index] = ffi::AVDRMPlaneDescriptor {
-                object_index: i32::from(plane.object_index),
-                offset: isize::try_from(plane.offset)?,
-                pitch: isize::try_from(plane.stride)?,
-            };
-        }
-        Ok(Self {
-            descriptor,
-            file_descriptors,
-        })
-    }
-}
-
-unsafe extern "C" fn free_drm_descriptor(_opaque: *mut c_void, data: *mut u8) {
-    if !data.is_null() {
-        // SAFETY: data was created by Box::into_raw in Frame::from_dmabuf and FFmpeg calls this once.
-        unsafe { drop(Box::from_raw(data.cast::<DrmDescriptorOwner>())) };
-    }
-}
-
 struct BufferRef(*mut ffi::AVBufferRef);
 
 impl BufferRef {
+    fn vaapi_upload_frames(device: &Self, extent: (i32, i32)) -> Result<Self> {
+        // SAFETY: device owns an initialized VA-API hardware device.
+        let pointer = unsafe { ffi::av_hwframe_ctx_alloc(device.0) };
+        ensure!(!pointer.is_null(), "could not allocate FFmpeg upload pool");
+        let owned = Self(pointer);
+        // SAFETY: av_hwframe_ctx_alloc returns a unique AVHWFramesContext in data.
+        let context = unsafe { &mut *(*pointer).data.cast::<ffi::AVHWFramesContext>() };
+        context.format = ffi::AVPixelFormat::AV_PIX_FMT_VAAPI;
+        context.sw_format = ffi::AVPixelFormat::AV_PIX_FMT_BGR0;
+        context.width = extent.0;
+        context.height = extent.1;
+        // SAFETY: the pool's parameters are initialized before its first allocation.
+        check(
+            unsafe { ffi::av_hwframe_ctx_init(pointer) },
+            "could not initialize FFmpeg upload pool",
+        )?;
+        Ok(owned)
+    }
+
     fn hardware_device(kind: ffi::AVHWDeviceType, path: &CStr) -> Result<Self> {
         let mut pointer = ptr::null_mut();
         // SAFETY: pointer is writable and path is a terminated device path for the call duration.
@@ -1236,30 +1038,6 @@ fn set_option(target: *mut c_void, name: &CStr, value: &CStr) -> Result<()> {
     check(result, "could not set FFmpeg encoder option")
 }
 
-fn empty_drm_descriptor() -> ffi::AVDRMFrameDescriptor {
-    let object = ffi::AVDRMObjectDescriptor {
-        fd: -1,
-        size: 0,
-        format_modifier: 0,
-    };
-    let plane = ffi::AVDRMPlaneDescriptor {
-        object_index: 0,
-        offset: 0,
-        pitch: 0,
-    };
-    let layer = ffi::AVDRMLayerDescriptor {
-        format: 0,
-        nb_planes: 0,
-        planes: [plane; 4],
-    };
-    ffi::AVDRMFrameDescriptor {
-        nb_objects: 0,
-        objects: [object; 4],
-        nb_layers: 0,
-        layers: [layer; 4],
-    }
-}
-
 enum CallStatus {
     Ready,
     Again,
@@ -1362,3 +1140,6 @@ mod settings_tests {
         assert!(VaapiEncoderSettings::try_new(VideoCodec::H264, 8_000_000, 60, 0).is_err());
     }
 }
+
+#[cfg(test)]
+mod hardware_tests;

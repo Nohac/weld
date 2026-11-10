@@ -652,9 +652,10 @@ codec lifecycle.
 The old cros-codecs H.264 implementation and its local patches remain available
 only through the crate's `diagnostic` feature so the independent GStreamer
 comparison stays reproducible; a default Weld build does not link it.
-cros-libva remains a direct dependency for capability queries, DMA-BUF import,
-and VPP because its surface ownership API is useful independently of its codec
-stack.
+cros-libva remains a direct dependency for capability queries and
+modifier-constrained VPP output. FFmpeg owns CPU uploads and decoded-frame
+synchronization/DRM mapping. The remaining allocation boundary and hardware
+evidence are recorded in [FFmpeg consolidation](ffmpeg-consolidation.md).
 
 FFmpeg owns a DRM hardware-frame context for source DMA-BUFs, derives one
 VA-API device per encoder worker, supplies it to `hwmap`, and converts RGB into
@@ -667,6 +668,12 @@ emit exactly one packet for each submitted frame. This lets Weld retain the
 source client-buffer lease until its matching packet exists without an
 unbounded delayed-frame table. The CBR reservoir controls rate accounting; it
 does not add a software frame queue or frame reordering.
+
+Packed CPU input transfers its existing pixel vector into a read-only FFmpeg
+buffer, uploads through a persistent VA-API frame pool, and maps into the same
+DRM input graph. The mapping retains the uploaded frame through filter use;
+there is no additional CPU staging copy. An encoder worker creates a direct VPP
+context only when source-image diagnostic dumps are enabled.
 
 Encoded source admission is paced in `weld-hoist-encoded`, independently of
 local composition and identically for local and Iroh transports. A presenter's
@@ -773,9 +780,11 @@ validation does not build the Bevy distribution dependency closure.
 
 The decoder selects FFmpeg's native H.264 or AV1 parser so its `get_format`
 callback can require VA-API output. A decoded AVFrame stays alive while Weld
-exports its VASurface as a composed PRIME descriptor and synchronously
-VPP-converts it into fresh XRGB storage at the authoritative transported
-visible extent. Duplicating an exported descriptor alone is not considered
+maps it through FFmpeg to a synchronized DRM PRIME descriptor and synchronously
+VPP-converts it into modifier-constrained XRGB storage at the authoritative
+transported visible extent. Separate NV12 R8/GR88 layers normalize to Weld's
+two-plane NV12 import without changing offsets or object references. Duplicating
+an exported descriptor alone is not considered
 sufficient lifetime because FFmpeg may recycle the underlying decode surface.
 Only the fresh XRGB allocation escapes the media worker.
 

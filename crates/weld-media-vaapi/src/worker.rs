@@ -183,7 +183,10 @@ fn encode_worker_loop(
     dump_directory: Option<PathBuf>,
 ) {
     let runtime = VaapiDevice::open(&render_node).and_then(|device| {
-        let vpp = device.vpp_converter()?;
+        let vpp = dump_directory
+            .as_ref()
+            .map(|_| device.vpp_converter())
+            .transpose()?;
         let ffmpeg = FfmpegEncodeDevice::open(&render_node)?;
         Ok((device, vpp, ffmpeg))
     });
@@ -198,7 +201,7 @@ fn encode_worker_loop(
             .and_then(|(device, vpp, ffmpeg_device)| {
                 encode_one(
                     device,
-                    vpp,
+                    vpp.as_ref(),
                     ffmpeg_device,
                     &mut geometries,
                     &mut sessions,
@@ -218,7 +221,7 @@ fn encode_worker_loop(
 
 fn encode_one(
     device: &VaapiDevice,
-    vpp: &VppConverter,
+    vpp: Option<&VppConverter>,
     ffmpeg_device: &FfmpegEncodeDevice,
     geometries: &mut EncodeGeometryCache,
     sessions: &mut HashMap<GenerationKey, EncoderSession>,
@@ -256,14 +259,6 @@ fn encode_one(
             },
         );
     }
-    let input = match request.input {
-        VaapiEncodeInput::Dmabuf(frame) => frame,
-        VaapiEncodeInput::PackedBgra {
-            width,
-            height,
-            pixels,
-        } => vpp.upload_bgra(width, height, &pixels)?,
-    };
     let active_sessions = sessions.len();
     let result = {
         let session = sessions
@@ -275,13 +270,37 @@ fn encode_one(
         );
         if should_dump_stages(request.frame)
             && let Some(directory) = dump_directory
-            && let Err(error) =
-                dump_encode_source(vpp, directory, request.frame, &input, visible_size)
+            && let Some(vpp) = vpp
         {
-            tracing::warn!(%error, frame = ?request.frame, "could not record VA-API encode stages");
+            let dumped = match &request.input {
+                VaapiEncodeInput::Dmabuf(input) => {
+                    dump_encode_source(vpp, directory, request.frame, input, visible_size)
+                }
+                VaapiEncodeInput::PackedBgra {
+                    width,
+                    height,
+                    pixels,
+                } => vpp.upload_bgra(*width, *height, pixels).and_then(|input| {
+                    dump_encode_source(vpp, directory, request.frame, &input, visible_size)
+                }),
+            };
+            if let Err(error) = dumped {
+                tracing::warn!(%error, frame = ?request.frame, "could not record VA-API encode stages");
+            }
         }
         let started_at = Instant::now();
-        let packet = session.encoder.encode(input, request.timestamp_micros)?;
+        let packet = match request.input {
+            VaapiEncodeInput::Dmabuf(input) => {
+                session.encoder.encode(input, request.timestamp_micros)?
+            }
+            VaapiEncodeInput::PackedBgra {
+                width,
+                height,
+                pixels,
+            } => session
+                .encoder
+                .encode_bgra(width, height, pixels, request.timestamp_micros)?,
+        };
         tracing::trace!(
             stream = request.frame.stream.raw(),
             generation = request.frame.generation.raw(),
