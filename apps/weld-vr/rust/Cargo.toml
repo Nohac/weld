@@ -40,7 +40,6 @@ pkg-config = "0.3"
 # Reusable Weld crates can still be added as explicit path dependencies.
 [workspace]
 
-# Reuse the compositor's libva-header compatibility fixes in this isolated workspace.
 [profile.dev]
 opt-level = 3
 debug = 1

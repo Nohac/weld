@@ -1,5 +1,10 @@
 # Receiver decoder pooling
 
+> Tooling status (2026-11-11): the historical launchers/probes referenced below
+> were retired during repository cleanup. Their commands are preserved here as
+> experiment history, not current instructions. Use the root uv commands listed
+> in `docs/development-tools.md` for maintained tooling.
+
 Status: implemented with GPU-free validation and a successful user WAN stress
 run. The measurements do not establish the hardware decoder's capacity or a
 controlled before/after speedup.

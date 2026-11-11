@@ -202,7 +202,7 @@ leased targets, cursor position/scale/hiding and on-demand snapshots. No
 capture-specific CPU reduction is claimed without an equivalent before/after
 capture benchmark.
 
-`scripts/check-output-capture --portal --kooha-window --xwayland` passed using
+`uv run check-output-capture --portal --kooha-window --xwayland` passed using
 a private headless Weston parent. Evidence is in
 `target/validation/output-capture-z3vpk9e3/` and
 `capture-opt-integration-final.log`: output and window DMA-BUF/SHM pixel equality,

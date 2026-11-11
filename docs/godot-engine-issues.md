@@ -1,5 +1,10 @@
 # Godot engine issues and preview validation
 
+> Tooling status (2026-11-11): the historical launchers/probes referenced below
+> were retired during repository cleanup. Their commands are preserved here as
+> experiment history, not current instructions. Use the root uv commands listed
+> in `docs/development-tools.md` for maintained tooling.
+
 Status: observed behavior and development workarounds, recorded 2026-09-21.
 The XR project currently targets **Godot 4.8-dev6**, engine commit
 `8898c2b3db32adf6f92c694ffb6dac19af672e5f`, with matching Android templates.
@@ -26,7 +31,7 @@ Weld does not carry a Godot engine patch.
 
 ### Isolated reproduction and remaining errors
 
-`scripts/run-godot-xr-teardown` exercises native window creation and retirement
+`uv run run-godot-xr-teardown` exercises native window creation and retirement
 without a decoder, application stream, or network connection. It creates two
 colored windows per cycle for 20 cycles, letting swapchain images rotate before
 each retirement. It uses the normal device/preparation locks and shared ADB
@@ -34,8 +39,8 @@ server, bounds playback to 60 seconds and captured logs to 4 MiB, and removes
 its one-shot app-private startup flag during cleanup.
 
 ```sh
-scripts/run-godot-xr-teardown --serial PICO_SERIAL --mode legacy
-scripts/run-godot-xr-teardown --serial PICO_SERIAL --mode delayed --skip-build
+uv run run-godot-xr-teardown --serial PICO_SERIAL --mode legacy
+uv run run-godot-xr-teardown --serial PICO_SERIAL --mode delayed --skip-build
 ```
 
 `legacy` means the ordinary window deletion path, not an old engine selection.
@@ -87,7 +92,7 @@ extension startup and shader checks were validated with the preview.
 
 ## Launching the preview on NixOS
 
-`scripts/run-godot` selects `WELD_GODOT_BIN`, otherwise an executable
+`uv run run-godot` selects `WELD_GODOT_BIN`, otherwise an executable
 `~/.local/bin/godot`, and runs that local binary through `steam-run`. Without a
 local selection it falls back to packaged `godot`; that fallback does not imply
 the packaged version contains the teardown fix. All Weld Godot launchers and

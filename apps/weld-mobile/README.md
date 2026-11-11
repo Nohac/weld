@@ -1,5 +1,10 @@
 # Weld Mobile receiver proof
 
+> Tooling status (2026-11-11): the historical launchers/probes referenced below
+> were retired during repository cleanup. Their commands are preserved here as
+> experiment history, not current instructions. Use the root uv commands listed
+> in `docs/development-tools.md` for maintained tooling.
+
 An Android ARM64 Bevy shell presenting one streamed application. It reuses
 `weld-hoist-iroh`, `weld-hoist-encoded`, `weld-client`, the shared decode-worker
 pool, and `weld-media-android`. The Android activity and presentation adapter
@@ -36,9 +41,9 @@ requires stopping the first one. Tests and lint checks are separate from launch.
 Build/install only:
 
 ```sh
-scripts/build-mobile
-scripts/build-mobile --install --serial DEVICE
-scripts/build-mobile --clippy
+uv run build-mobile
+uv run build-mobile --install --serial DEVICE
+uv run build-mobile --clippy
 ```
 
 Rust builds use `cargo-ndk`. A pinned Gradle wrapper packages the small Android

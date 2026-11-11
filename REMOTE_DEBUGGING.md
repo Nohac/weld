@@ -54,9 +54,9 @@ future event-loop changes must preserve that progress or BRP latency will grow.
 The standard-library-only `uv` project turns routine calls into stable commands:
 
 ```text
-uv run --project tools/remote-debug weld-debug discover
-uv run --project tools/remote-debug weld-debug status
-uv run --project tools/remote-debug weld-debug screenshot target/weld-remote.png
+uv run weld-debug discover
+uv run weld-debug status
+uv run weld-debug screenshot target/weld-remote.png
 ```
 
 Screenshots contain the completed client-plus-shell composition. Nested and DRM

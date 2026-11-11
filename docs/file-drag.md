@@ -43,7 +43,7 @@ and after reactivation. The session-lock regression checks drag retirement and
 rejection while locked. Unit tests cover URI preparation, cancellation of a
 stalled transfer and native-control RPC dispatch.
 
-For an end-to-end hidden nested run, launch `scripts/check-control-launch
+For an end-to-end hidden nested run, launch `uv run check-control-launch
 --nested --no-build --file-drag-parent SOCKET --file-drag-owner OWNER` through
 the parent session's `weldctl launch --headless --control --owner OWNER`.
 The runner verifies the nested window's owner, PID and hidden state before

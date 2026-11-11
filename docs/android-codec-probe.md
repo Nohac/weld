@@ -1,5 +1,10 @@
 # Android native-buffer codec qualification
 
+> Tooling status (2026-11-11): the historical launchers/probes referenced below
+> were retired during repository cleanup. Their commands are preserved here as
+> experiment history, not current instructions. Use the root uv commands listed
+> in `docs/development-tools.md` for maintained tooling.
+
 Implemented diagnostic, now using the reusable `weld-media-android` backend.
 The portable receiver/worker extraction remains unchanged. This probe answers
 whether the selected FFmpeg MediaCodec decoder can produce independently
@@ -39,7 +44,7 @@ behavior.
 - FFmpeg 8.1.2 is pinned to commit
   `38b88335f99e76ed89ff3c93f877fdefce736c13`, with archive SHA-256
   `2ae7e42343cfffb811d15cfe98b6d005f082595fcdf034d30a4ff90cfed9f9c6`.
-  `scripts/build-android-ffmpeg` builds minimal ARM64/API28 shared libraries
+  `uv run build-android-ffmpeg` builds minimal ARM64/API28 shared libraries
   with two jobs. It checks enabled components, license configuration,
   SONAMEs and Android dependencies before publishing a completed cache entry.
   Failed/intermediate build directories are retained, not recursively cleaned.

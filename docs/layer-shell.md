@@ -43,9 +43,9 @@ Run the isolated nested smoke test with installed `foot`, `htop`, `waybar` and
 Wayland-enabled `rofi`:
 
 ```sh
-python3 scripts/check-layer-shell
-python3 scripts/check-layer-shell --no-build --interactive
-python3 scripts/check-layer-shell --no-build --workspaces --interactive
+uv run check-layer-shell
+uv run check-layer-shell --no-build --interactive
+uv run check-layer-shell --no-build --workspaces --interactive
 ```
 
 The runner uses private Waybar settings, retains before/panel/launcher/after

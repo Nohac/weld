@@ -98,7 +98,7 @@ pub(super) fn run_session(
     );
     let profile_path = directory.join("source.profile");
     shared.message(format!(
-        "Pair device {} with scripts/run-godot-hoist",
+        "Waiting for a source.profile pairing configuration for device {}",
         identity.public_id().as_str()
     ));
     while !profile_path.try_exists()? {

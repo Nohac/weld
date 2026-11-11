@@ -1,5 +1,10 @@
 # Master daily-driver milestones
 
+> Tooling status (2026-11-11): the historical launchers/probes referenced below
+> were retired during repository cleanup. Their commands are preserved here as
+> experiment history, not current instructions. Use the root uv commands listed
+> in `docs/development-tools.md` for maintained tooling.
+
 This phase extends the existing tiling-first Master distribution. The user's
 Sway config guides priorities; regression fixtures remain repository-local.
 
@@ -110,7 +115,7 @@ profile if an existing instance would redirect the launch to the host desktop.
   cross-workspace transfer, and pointer-binding replacement.
 - The existing resize fixture now simulates the client commit required to settle
   a configure. Its former failure was reproduced against the checkpoint source.
-- `scripts/check-layer-shell --no-build` completed Waybar/Rofi mapping, capture,
+- `uv run check-layer-shell --no-build` completed Waybar/Rofi mapping, capture,
   teardown and restored layout in `target/validation/layer-shell-hibj20lu`.
 - The existing X11 lifecycle probe completed dialog/popup map, unmap/remap and
   shutdown in `target/validation/floating-smoke-xhwx9itj`; its capture shows the

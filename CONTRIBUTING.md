@@ -35,7 +35,14 @@ or lifecycle boundaries.
 
 ## Running tools
 
-`scripts/check-host-runtime` is a bounded real-Wayland regression runner
+Repository Python tools use the root `pyproject.toml` and `uv.lock`.
+Run `uv sync --locked` once, then `uv run <command>` from the shared development
+shell. Entry points bind directly to Typer applications. One `FANCY_OUTPUT`
+setting in `tools/dev/cli.py` controls help, colors and tracebacks;
+plain output is the default. See [Development tools](docs/development-tools.md)
+for commands, tests and the cleanup inventory.
+
+`uv run check-host-runtime` is a bounded real-Wayland regression runner
 (Python 3, supplied by the development shell). Use `--shm-only` to exercise
 hosting without Vulkan, or `--nested` to check native screenshot capture with
 foot on an existing desktop. The default protocol fixture installs an explicit
@@ -55,7 +62,7 @@ check first, then widen as the change warrants:
 
 ```text
 cargo fmt --check
-scripts/check-desktop-build-graph
+uv run check-desktop-build-graph
 cargo check-desktop
 cargo test-desktop <test-name>
 cargo clippy-desktop -- -D warnings
@@ -92,7 +99,7 @@ feature additions. `test-desktop`, `check-desktop` and `clippy-desktop` select t
 desktop workspace together and exclude `weld-media-android`, whose media feature
 set belongs to the Android assembly.
 
-`scripts/check-desktop-build-graph` compares shared resolved dependency features
+`uv run check-desktop-build-graph` compares shared resolved dependency features
 for ordinary builds, focused tests/examples and the desktop aliases using Cargo
 tree. It requires cached dependencies and performs no compilation. Run it after
 manifest or workflow changes. Test harnesses and `cfg(test)` still produce their
@@ -104,7 +111,7 @@ profile overrides or `CARGO_TARGET_DIR` changes for routine desktop work.
 Explicit Tracy/perf investigations and Android/client assemblies retain their
 documented feature, compiler and target settings as separate build variants.
 
-Weld Station uses `scripts/run-connect` for its standalone client assembly.
+Weld Station uses `uv run run-connect` for its standalone client assembly.
 Use `--test`, `--check`, or `--clippy` for opt-in validation with the launcher's
 same environment, default features and development profile. Android supports
 `--android --check` and `--android --clippy`; tests execute on Linux. Keep all
@@ -146,13 +153,7 @@ directory under `/run/opengl-driver/lib/dri`; it deliberately does not force a
 vendor driver name. A missing FFmpeg or libva environment must be reported
 separately from a loaded driver that lacks a requested capability.
 
-For Android decoder investigations, read [Android codec evidence](docs/android-codec-probe.md)
-and query `MediaCodecInfo.isHardwareAccelerated()` / `isSoftwareOnly()` on the
-device before classifying the selected decoder. Names and prefixes are insufficient:
-the Pixel 8 Pro's `c2.google.av1.decoder` is a verified vendor hardware decoder.
-Use `scripts/run-android-codec-probe --serial DEVICE --codec-info CODEC_NAME`.
-
-`scripts/build-mobile` builds Rust through cargo-ndk and packages the Android
+`uv run build-mobile` builds Rust through cargo-ndk and packages the Android
 activity and Google Code Scanner with a pinned Gradle wrapper. Its first build
 downloads Gradle and Maven dependencies; later builds reuse their caches.
 Android Studio is unnecessary. The Android SDK/NDK and Java paths come from the
@@ -171,12 +172,10 @@ cargo run -- --backend nested --config examples/master.sway.config
 Backend selection defaults to `auto`. Use an explicit backend when validating
 host-specific behavior so the environment cannot change the target silently.
 
-`--backend headless` runs the presentation-free Wayland session host. It has
-configurable virtual output and initial window sizes. For a headless source
-streamed to a nested receiver, run `scripts/run-headless-iroh-hoist`; it starts
-foot/htop, Blender and a private-profile Firefox, with whole-session consent.
-See [Headless application hosting](docs/headless-host.md) for commands and limits.
-`auto` never selects it.
+`--backend headless` runs the presentation-free Wayland session host with
+configurable virtual outputs. `auto` never selects it. See
+[Headless application hosting](docs/headless-host.md) for the host contract;
+the old multi-application demo launchers have been retired.
 
 Pass a program and arguments to launch it against Weld's private Wayland
 socket. The verified smoke test uses foot:
@@ -241,71 +240,23 @@ Enable the restricted, loopback-only development protocol with:
 
 ```text
 cargo run -- --config examples/master.sway.config --remote-debug -- foot
-uv run --project tools/remote-debug weld-debug status
-uv run --project tools/remote-debug weld-debug screenshot target/weld-remote.png
+uv run weld-debug status
+uv run weld-debug screenshot target/weld-remote.png
 ```
 
 Read [REMOTE_DEBUGGING.md](REMOTE_DEBUGGING.md) before changing the protocol,
 capture completion, or exposed Bevy methods.
 
-### Tracy profiling
+### Profiling and DRM
 
-Use the opt-in Tracy integration and repeatable scenarios described in
-[Profiling](docs/profiling.md). Profiling is a measurement workflow, not a
-requirement for ordinary changes.
+The maintained paced compositor benchmark runs through `uv run paced-render`.
+It uses private headless presenters and records bounded measurement artifacts.
+Historical profiling scenario runners have been retired; their dated evidence
+remains under `docs/performance/`.
 
-When auto selects the nested target, it runs until its host window is closed.
-
-### DRM probes
-
-Use the Smithay output-compositor probe when changing the production DRM
-boundary:
-
-```text
-scripts/run-smithay-drm-compositor-probe
-```
-
-Run the production startup-output backend from a real TTY with:
-
-```text
-scripts/run-weld-drm --config examples/master.sway.config
-scripts/run-weld-drm --release --xwayland --config examples/master.sway.config
-scripts/run-weld-drm --seconds 30 --config examples/master.sway.config -- foot
-WELD_DRM_VALIDATE=1 scripts/run-weld-drm --config examples/master.sway.config -- foot
-WELD_DRM_PACING_TRACE=1 scripts/run-weld-drm --config examples/master.sway.config -- foot
-```
-
-`--release` selects Cargo's optimized release build and defaults validation,
-pacing tracing and render-state tracing to off. Explicit `WELD_DRM_VALIDATE=1`,
-`WELD_DRM_PACING_TRACE=1` and `WELD_DRM_RENDER_TRACE=1` enable those diagnostics.
-Place launcher options (`--release`, `--seconds`) before Weld's arguments.
-
-`--seconds` starts its watchdog after compilation and sends Weld `SIGTERM` when
-the interval expires, allowing its normal DRM shutdown to restore the console.
-The first command exercises ordinary validation. The environment flag enables
-the Khronos validation layer and synchronization validation for a focused GPU
-correctness run. The launcher enables DRM frame tracing by default, recording one diagnostic event per
-queued frame and vblank, including cursor-plane assignment, vblank sequence
-deltas, composition state, and GPU wait time. Use `WELD_DRM_PACING_TRACE=0` for
-performance comparisons because writing the trace can itself perturb frame timing. Output defaults
-to `target/validation/weld-drm.log`.
-
-The DRM test launcher defaults to `--wayland-socket weld-drm-test`, keeping its
-Wayland and native-control endpoints separate from the login session's `weld-0`.
-Pass `--wayland-socket NAME` to choose another test socket.
-
-The launcher also enables bounded `weld_render_state=debug` diagnostics for
-camera extraction, render-target matching, visible surface counts, pipelines,
-2D schedule execution and pending command buffers. It records the first eight
-frames, coalesces changes to once per second, and emits ten-second heartbeats
-on rendering activity. `WELD_DRM_RENDER_TRACE=0` disables these diagnostics;
-disable both render and pacing tracing for performance measurements.
-Preserve the log before launching another run when investigating startup failures.
-
-The probes and production DRM backend require a real TTY. See
-[Direct DRM presentation](docs/drm-presentation.md) and
-[Smithay integration validation](docs/smithay-integration-validation.md) for
-their scopes and acceptance evidence.
+Run a native DRM development session from a real TTY with
+`cargo run -- --backend drm --config examples/master.sway.config`. The old
+`run-weld-drm` wrapper and Smithay example launcher have been retired.
 
 For dependency changes, edit only the intended dependency. If an existing
 lockfile entry must move, use `cargo update -p <package> --precise <version>`;
@@ -313,11 +264,11 @@ never update the entire lockfile casually.
 
 ## Tests
 
-`scripts/check-screenshot-capture` validates Grim output/region capture and PNG
+`uv run check-screenshot-capture` validates Grim output/region capture and PNG
 clipboard delivery in a private nested session. See [Screenshots](docs/screenshots.md)
 for the asynchronous GPU snapshot regression and manual DRM checks.
 
-`scripts/check-output-capture` validates DMA-BUF/SHM pixel equality, repeated
+`uv run check-output-capture` validates DMA-BUF/SHM pixel equality, repeated
 capture, cursor inclusion and cancellation. It defaults to a GPU-backed headless
 Weston parent so tests do not open windows on the running Weld desktop. Set
 `WELD_TEST_WESTON` when Weston is not on PATH. A visible fallback is permitted on

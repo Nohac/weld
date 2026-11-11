@@ -1,5 +1,10 @@
 # Godot live-window tracer
 
+> Tooling status (2026-11-11): the historical launchers/probes referenced below
+> were retired during repository cleanup. Their commands are preserved here as
+> experiment history, not current instructions. Use the root uv commands listed
+> in `docs/development-tools.md` for maintained tooling.
+
 Godot can receive live AV1 window hierarchies from headless Weld on Linux or Android.
 This is a bounded multi-window viewer, with desktop input and a first
 [right-hand XR pointer](godot-xr.md#right-hand-input). The
@@ -18,7 +23,7 @@ mkdir -p apps/weld-vr/build
 godot --headless --path apps/weld-vr --export-debug 'Android Phone' \
   "$PWD/apps/weld-vr/build/weld-vr-debug.apk"
 adb -s DEVICE install -r apps/weld-vr/build/weld-vr-debug.apk
-scripts/run-godot-hoist --serial DEVICE
+uv run run-godot-hoist --serial DEVICE
 ```
 
 Use an ARM64/API28+ USB-debugging device. This uses development signing and

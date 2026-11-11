@@ -72,9 +72,9 @@ stage_library "$target_directory/x86_64-unknown-linux-gnu/debug/libweld_vr.so" \
   "$project_directory/bin/linux/debug/libweld_vr.so"
 
 if [[ "$mode" == android ]]; then
-  "$repository_directory/scripts/build-android-ffmpeg"
+  uv run --project "$repository_directory" build-android-ffmpeg
   export FFMPEG_DIR
-  FFMPEG_DIR=$("$repository_directory/scripts/build-android-ffmpeg" --print-prefix)
+  FFMPEG_DIR=$(uv run --project "$repository_directory" build-android-ffmpeg --print-prefix)
   export PKG_CONFIG_LIBDIR=
   ndk_directory=${ANDROID_NDK_HOME:-${ANDROID_NDK_ROOT:-}}
   export BINDGEN_EXTRA_CLANG_ARGS_aarch64_linux_android="--sysroot=$ndk_directory/toolchains/llvm/prebuilt/linux-x86_64/sysroot --target=aarch64-linux-android28"

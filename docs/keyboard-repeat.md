@@ -1,5 +1,10 @@
 # Explicit keyboard repeats
 
+> Tooling status (2026-11-11): the historical launchers/probes referenced below
+> were retired during repository cleanup. Their commands are preserved here as
+> experiment history, not current instructions. Use the root uv commands listed
+> in `docs/development-tools.md` for maintained tooling.
+
 Weld carries `KeyboardKeyState::{Pressed, Released, Repeated}` from nested
 Winit ingress through the client runtime and all hoist bindings. A repeat is
 not another physical press. Mouse buttons retain `ButtonState`. Both hoist

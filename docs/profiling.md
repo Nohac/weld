@@ -1,5 +1,10 @@
 # Profiling Weld
 
+> Tooling status (2026-11-11): the historical launchers/probes referenced below
+> were retired during repository cleanup. Their commands are preserved here as
+> experiment history, not current instructions. Use the root uv commands listed
+> in `docs/development-tools.md` for maintained tooling.
+
 Weld uses `tracing` throughout its host and Bevy boundaries. The optional
 `profiling-tracy` feature connects those spans to Tracy without scattering
 feature gates through call sites.
@@ -77,10 +82,10 @@ Compare diagnostic layers on the same production Wayland host and DMA-BUF
 lifecycle, with a separate animated EGL client:
 
 ```sh
-python3 scripts/profiling/paced-render --seconds 20 --width 2240 --height 1400
-python3 scripts/profiling/paced-render --no-build --repeat 2 --perf /path/to/perf
-python3 scripts/profiling/paced-render --no-build --executable /path/to/saved/benchmark --mode minimal
-python3 scripts/profiling/paced-render --no-build --mode minimal --windows 3 --producer-hz 240 --input-hz 1000
+uv run paced-render --seconds 20 --width 2240 --height 1400
+uv run paced-render --no-build --repeat 2 --perf /path/to/perf
+uv run paced-render --no-build --executable /path/to/saved/benchmark --mode minimal
+uv run paced-render --no-build --mode minimal --windows 3 --producer-hz 240 --input-hz 1000
 ```
 
 The launcher builds an optimized release benchmark and the small C producer.
@@ -186,8 +191,8 @@ before `MEASUREMENT_START`; the launcher rejects a run whose validation spills
 into measurement. Use at least four warmup seconds at 60 Hz.
 
 ```sh
-scripts/profiling/paced-render --mode minimal-retained --warmup 4 --seconds 10
-scripts/profiling/paced-render --no-build --mode master-retained --warmup 4 --seconds 10 --windows 3 --decorations server --input-hz 1000
+uv run paced-render --mode minimal-retained --warmup 4 --seconds 10
+uv run paced-render --no-build --mode master-retained --warmup 4 --seconds 10 --windows 3 --decorations server --input-hz 1000
 ```
 
 Use `minimal` and `master` as the corresponding controls. When using an explicit

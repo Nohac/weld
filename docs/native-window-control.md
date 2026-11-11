@@ -700,11 +700,11 @@ checkpoint supplies a bounded newer-frame observation for screenshot-based tests
 
 ```sh
 cargo test --locked -p weldwm -p weld-control -p weld-remote-control -p weld-accessibility --lib
-scripts/check-control-launch --nested
-scripts/check-control-launch --nested --accessibility-app /path/to/zenity
-scripts/check-control-launch --nested --xwayland
-scripts/check-control-launch --nested --xwayland --text-app /path/to/zenity
-scripts/check-window-recording
+uv run check-control-launch --nested
+uv run check-control-launch --nested --accessibility-app /path/to/zenity
+uv run check-control-launch --nested --xwayland
+uv run check-control-launch --nested --xwayland --text-app /path/to/zenity
+uv run check-window-recording
 cargo test --locked -p weldwm -p weld-recording --test recording
 cargo test --locked -p weldwm -p weld-recording --test media -- --ignored
 ```

@@ -1993,15 +1993,15 @@ expectations have stabilized.
 Build and launch Weld Station from the development shell:
 
 ```sh
-scripts/run-connect
-scripts/run-connect --android --serial DEVICE_SERIAL
+uv run run-connect
+uv run run-connect --android --serial DEVICE_SERIAL
 # Package without launching, or relaunch an existing build:
-scripts/run-connect --android --build-only
-scripts/run-connect --android --no-build --serial DEVICE_SERIAL
+uv run run-connect --android --build-only
+uv run run-connect --android --no-build --serial DEVICE_SERIAL
 # Opt-in checks with the same environment, profile and default features:
-scripts/run-connect --test
-scripts/run-connect --clippy
-scripts/run-connect --android --check
+uv run run-connect --test
+uv run run-connect --clippy
+uv run run-connect --android --check
 ```
 
 The launcher uses eight build jobs by default (`--jobs` overrides), packages CSS

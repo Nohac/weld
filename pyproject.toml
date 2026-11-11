@@ -1,0 +1,48 @@
+[project]
+name = "weld-tools"
+version = "0.1.0"
+description = "Weld repository build and validation commands"
+requires-python = ">=3.12"
+dependencies = ["typer>=0.16,<1"]
+
+[project.scripts]
+check-config-generation = "dev.check_config_generation:app"
+check-desktop-build-graph = "dev.check_desktop_build_graph:app"
+check-host-runtime = "dev.check_host_runtime:app"
+check-control-launch = "dev.check_control_launch:app"
+check-layer-shell = "dev.check_layer_shell:app"
+check-output-capture = "dev.check_output_capture:app"
+check-screenshot-capture = "dev.check_screenshot_capture:app"
+check-window-recording = "dev.check_window_recording:app"
+check-xwayland = "dev.check_xwayland:app"
+build-mobile = "dev.build_mobile:app"
+run-connect = "dev.run_connect:app"
+run-godot = "dev.run_godot:app"
+build-android-ffmpeg = "dev.build_android_ffmpeg:app"
+paced-render = "dev.paced_render:app"
+generate-config = "dev.config_codegen.generate:app"
+import-i3-config = "dev.config_codegen.import_i3:app"
+weld-debug = "dev.remote.cli:app"
+
+[dependency-groups]
+dev = ["ruff>=0.14,<1", "ty>=0.0.1,<1"]
+
+[build-system]
+requires = ["uv_build>=0.13,<0.14"]
+build-backend = "uv_build"
+
+[tool.uv.build-backend]
+module-root = "tools"
+module-name = "dev"
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I"]
+
+[tool.ty.src]
+include = ["tools/dev"]
+
+[tool.ty.environment]
+root = ["tools"]

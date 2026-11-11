@@ -6,11 +6,11 @@ constrained scalar constructors, complete argument productions, and the mapping
 from accepted key names to the existing physical Linux key identities.
 
 ```sh
-direnv exec /home/jonas/Development/Rust python3 tools/config-codegen/generate.py
-direnv exec /home/jonas/Development/Rust python3 scripts/check-config-generation
+direnv exec /home/jonas/Development/Rust uv run generate-config
+direnv exec /home/jonas/Development/Rust uv run check-config-generation
 ```
 
-Generation uses Python's standard library and rustfmt. Normal Cargo builds use
+Generation uses the root uv environment and rustfmt. Normal Cargo builds use
 the checked-in output and perform no generation or network access. Keep grammar
 changes, generated output, native lowering, and tests in the same commit.
 
@@ -42,7 +42,7 @@ accepts raw argument arrays.
 ## Initial i3 import
 
 `upstream/sources.json` pins the existing i3 behavioral-reference revision and
-checksums the two parser specifications and BSD license. `import_i3.py` converts
+checksums the two parser specifications and BSD license. `uv run import-i3-config` converts
 every state and production into `i3.json`, retaining patterns, transitions, and
 callback names as data. Its explicit `--seed` option seeds directly reusable
 direction alternatives during the initial bootstrap. The remaining supported

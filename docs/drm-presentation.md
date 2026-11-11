@@ -1,5 +1,10 @@
 # Direct DRM presentation
 
+> Tooling status (2026-11-11): the historical launchers/probes referenced below
+> were retired during repository cleanup. Their commands are preserved here as
+> experiment history, not current instructions. Use the root uv commands listed
+> in `docs/development-tools.md` for maintained tooling.
+
 Weld has a production-shaped startup multi-output DRM backend built on
 Smithay's `DrmOutputManager` and `DrmOutput`. Its Weld-owned layout, pacing, and
 batching policies are covered by automated tests. Real-TTY multi-output

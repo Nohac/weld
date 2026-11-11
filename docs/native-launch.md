@@ -98,9 +98,9 @@ the outcome can be ambiguous; callers should inspect before retrying.
 Run from the normal development environment:
 
 ```sh
-scripts/check-control-launch
-scripts/check-control-launch --nested --xwayland
-scripts/check-control-launch --nested --attributed
+uv run check-control-launch
+uv run check-control-launch --nested --xwayland
+uv run check-control-launch --nested --attributed
 ```
 
 `--no-build` reuses existing binaries and probe examples. Run in the shared

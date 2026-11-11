@@ -152,7 +152,7 @@ and other GPU tests.
 
 Verification: 135 core tests passed, including new input cache invalidation and
 storage-reuse coverage; two hardware/socket tests remain ignored in this run.
-Core all-target clippy passes with warnings denied. `scripts/check-host-runtime
+Core all-target clippy passes with warnings denied. `uv run check-host-runtime
 --shm-only` passed with 61 frame callbacks and 61 buffer releases, unmap/remap,
 client exit, host shutdown, and socket cleanup (`host-runtime-z7eez8h2`).
 Fable approved the source change. No new multi-subsurface protocol fixture,

@@ -140,7 +140,6 @@ impl WindowRules {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::process::Command;
 
     fn rule() -> RuleInput {
         RuleInput {
@@ -155,15 +154,28 @@ mod tests {
     }
 
     #[test]
-    fn actual_launcher_json_parses_with_matching_roles_and_catchall_last() {
-        let launcher = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../scripts/run-azahar-xr");
+    fn json_parses_with_matching_roles_and_catchall_last() {
         for manager in [false, true] {
-            let output = Command::new("python3").args(["-I", "-c",
-                "import runpy,sys; print(runpy.run_path(sys.argv[1])['rules'](sys.argv[2] == 'true'))"])
-                .arg(&launcher).arg(manager.to_string()).output().expect("launcher rules");
-            assert!(output.status.success());
-            let text = String::from_utf8(output.stdout).expect("JSON");
-            let rules = WindowRules::parse(&text).expect("parse actual Python output");
+            let mut entries = serde_json::json!([
+                {"app_id": "org.azahar_emu.Azahar", "title_suffix": " | Primary Window",
+                 "stereo": true, "width": 1600, "height": 480, "slot": 0,
+                 "bitrate": {"group": 1, "role": "primary"}},
+                {"app_id": "org.azahar_emu.Azahar", "title_suffix": " | Secondary Window",
+                 "stereo": false, "width": 640, "height": 480, "slot": 1,
+                 "bitrate": {"group": 1, "role": "companion"}}
+            ])
+            .as_array()
+            .expect("array")
+            .clone();
+            if manager {
+                entries.push(serde_json::json!({
+                    "app_id": "org.azahar_emu.Azahar", "title_suffix": "", "stereo": false,
+                    "width": 800, "height": 600, "slot": 2,
+                    "bitrate": {"group": 1, "role": "utility"}
+                }));
+            }
+            let text = serde_json::json!({"rules": entries}).to_string();
+            let rules = WindowRules::parse(&text).expect("parse JSON fixture");
             assert_eq!(rules.entries.len(), if manager { 3 } else { 2 });
             for (suffix, role, stereo, width) in [
                 (" | Primary Window", PresentationRole::Primary, true, 1600),

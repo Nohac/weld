@@ -109,8 +109,8 @@ rate is changed. Patch bytes are part of the Android build cache key, and a
 unique binary string verifies patch inclusion without relying on FFmpeg stderr
 being visible in Godot logcat. Recheck upstream support before updating FFmpeg.
 
-The opt-in `--decoder-low-latency` flag on `scripts/run-godot-xr` builds and
-deploys the experiment. `scripts/run-godot-hoist` accepts the same flag when the
+The opt-in `--decoder-low-latency` flag on `uv run run-godot-xr` builds and
+deploys the experiment. `uv run run-godot-hoist` accepts the same flag when the
 matching patched APK is already installed. Ordinary launches retain baseline
 behaviour. A private one-shot marker selects the request for the receiver
 session, including reconnects and new decoder generations; it is not a peer

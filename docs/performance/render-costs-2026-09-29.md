@@ -1,5 +1,10 @@
 # Post-fix compositor CPU costs — 2026-09-29
 
+> Tooling status (2026-11-11): the historical launchers/probes referenced below
+> were retired during repository cleanup. Their commands are preserved here as
+> experiment history, not current instructions. Use the root uv commands listed
+> in `docs/development-tools.md` for maintained tooling.
+
 Measured production revision: `d54b1504`. This investigation changes profiling
 tools, not compositor behavior. It follows the buffer-release and repaint fixes
 recorded in [the orbit investigation](blender-orbit-2026-09-28.md).

@@ -1,4 +1,4 @@
-//! Subprocess regression fixture for `scripts/check-host-runtime`.
+//! Subprocess regression fixture for `uv run check-host-runtime`.
 //! Real protocol traffic, independent of core's internal test helpers.
 
 use std::{

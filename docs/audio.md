@@ -122,7 +122,7 @@ cargo test -p weldwm -p weld-audio --lib
 cargo test -p weldwm -p weld-audio --test pipewire -- --ignored
 cargo test -p weldwm -p weld-recording --test media -- --ignored
 cargo test -p weldwm -p weld-hoist-iroh --lib direct_hosts_exchange_independent_control_and_media
-scripts/check-window-recording
+uv run check-window-recording
 ```
 
 The PipeWire tests use a private output for generated tones. The launch-routing

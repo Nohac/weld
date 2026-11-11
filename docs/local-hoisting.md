@@ -1,5 +1,10 @@
 # Local cross-process hoisting
 
+> Tooling status (2026-11-11): the historical launchers/probes referenced below
+> were retired during repository cleanup. Their commands are preserved here as
+> experiment history, not current instructions. Use the root uv commands listed
+> in `docs/development-tools.md` for maintained tooling.
+
 Weld has a same-machine validation transport for hoisting client surfaces
 between two sibling compositor processes. It exists to exercise the same
 client-adapter, input, configure, scale, reclaim, and buffer-lifetime contracts

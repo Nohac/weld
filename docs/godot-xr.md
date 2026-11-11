@@ -1,5 +1,10 @@
 # Godot XR presentation
 
+> Tooling status (2026-11-11): the historical launchers/probes referenced below
+> were retired during repository cleanup. Their commands are preserved here as
+> experiment history, not current instructions. Use the root uv commands listed
+> in `docs/development-tools.md` for maintained tooling.
+
 The startup scene selects `xr.tscn` when OpenXR initializes, otherwise the flat
 viewer. Both use the same [Iroh receiver and native decoder](godot-hoisting.md).
 XR renders each layer's mono GPU SubViewport into a native OpenXR quad
@@ -180,7 +185,7 @@ the final tilted ray, hit marker and clicked point still await user confirmation
 The original offset also reproduces in a standalone Godot 4.7.1 project without
 Weld, and with an explicit Pico 4 interaction profile. The precise Godot-versus-
 Pico cause remains unresolved; this is not a universal OpenXR calibration.
-The source-only [minimal reproduction](../tools/openxr-alignment-repro/README.md)
+The source-only minimal reproduction (retired; available in Git history)
 preserves the upstream investigation without room screenshots, device dumps or
 generated binaries. Related [Pico profile work](https://github.com/godotengine/godot/pull/112424)
 is not a confirmed fix. A Vulkan comparison crashed inside Pico's XR runtime
@@ -315,7 +320,7 @@ The current checkpoint uses Godot 4.8-dev6 and matching Android templates.
 See [engine issues and workarounds](godot-engine-issues.md) for preview selection,
 the Nix SDK compatibility view, native teardown evidence and remaining errors.
 
-From the shared development shell, `scripts/run-godot-xr` checks native build
+From the shared development shell, `uv run run-godot-xr` checks native build
 freshness, exports the Pico APK when needed, installs it and launches Blender
 for three minutes. Launching does not run tests, formatting, Clippy or scene
 probes. Run `scripts/check-godot-xr` separately for those checks; it builds the
@@ -366,10 +371,10 @@ setting also removes that declaration. No vendor SDK or camera-feed permission
 is needed for alpha-blend passthrough.
 
 ```sh
-scripts/run-godot --headless --path apps/weld-vr --install-android-build-template \
+uv run run-godot --headless --path apps/weld-vr --install-android-build-template \
   --export-debug 'Android Pico' "$PWD/apps/weld-vr/build/weld-vr-pico-debug.apk"
 adb -s PICO_SERIAL install -r apps/weld-vr/build/weld-vr-pico-debug.apk
-scripts/run-godot-hoist --serial PICO_SERIAL --app blender
+uv run run-godot-hoist --serial PICO_SERIAL --app blender
 ```
 
 Preserve app data when reinstalling so pairing remains stable. Gradle may
@@ -459,8 +464,8 @@ The independent local-decoder stress scene uses the existing native provider
 and texture presentation, without Iroh or the live shared decode pool:
 
 ```sh
-scripts/run-godot-video-stress --case mixed-latest --case mixed-smooth --seconds 25
-scripts/run-godot-video-stress --case mixed-heavy --seconds 25
+uv run run-godot-video-stress --case mixed-latest --case mixed-smooth --seconds 25
+uv run run-godot-video-stress --case mixed-heavy --seconds 25
 ```
 
 Use `--adb`/`--serial` to select the shared device connection, `--desktop` for
@@ -489,13 +494,13 @@ Pico playback passed; optimization did not eliminate frame replacements.
 For an opt-in half-rate live comparison, keeping the same bitrate:
 
 ```sh
-scripts/run-godot-xr --half-rate --bitrate-mbps 16
+uv run run-godot-xr --half-rate --bitrate-mbps 16
 # Full-rate comparison:
-scripts/run-godot-xr --bitrate-mbps 16
+uv run run-godot-xr --bitrate-mbps 16
 ```
 
 The separate Android decoder experiment is selected with
-`scripts/run-godot-xr --decoder-low-latency --bitrate-mbps 16`. Omit the flag
+`uv run run-godot-xr --decoder-low-latency --bitrate-mbps 16`. Omit the flag
 for baseline, or combine it with `--half-rate` for a matched half-rate comparison.
 See [receiver efficiency](receiver-efficiency.md) for the audit, FFmpeg patch,
 ownership constraints and limits of what the request establishes.
@@ -534,7 +539,7 @@ the run. Check viewer logs and Android exit information when assessing success.
 For a repeatable live motion and window-lifecycle exercise:
 
 ```sh
-scripts/run-godot-hoist --app blender \
+uv run run-godot-hoist --app blender \
   --blender-script apps/weld-vr/tests/blender_motion.py --seconds 75
 ```
 

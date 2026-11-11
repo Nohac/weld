@@ -104,7 +104,6 @@ use popup::PopupStore;
 use resize::{PendingResize, PendingResizeRequests};
 use toplevel::ToplevelStore;
 
-// Keep this stable name in sync with scripts/run-app.
 const WELD_SOCKET_NAME: &str = "weld-0";
 
 /// Smithay state kept outside Bevy's ECS world.

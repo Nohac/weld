@@ -91,7 +91,7 @@ fn main() -> Result<()> {
     let args = Args::parse_from(std::env::args_os().filter(|arg| arg != "--bench"));
     let Some(producer) = args.producer else {
         println!(
-            "SKIP paced_render: use python3 scripts/profiling/paced-render to build the EGL producer and run the benchmark"
+            "SKIP paced_render: use uv run paced-render to build the EGL producer and run the benchmark"
         );
         return Ok(());
     };

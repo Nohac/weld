@@ -62,7 +62,7 @@ apps/weld-vr/scripts/build-gdextension
 # Linux editor library plus Android ARM64 library:
 apps/weld-vr/scripts/build-gdextension android
 
-scripts/run-godot --editor --display-driver wayland --rendering-driver opengl3_es --path apps/weld-vr
+uv run run-godot --editor --display-driver wayland --rendering-driver opengl3_es --path apps/weld-vr
 ```
 
 Build before opening a fresh checkout, so Godot can register the native class.
@@ -123,7 +123,7 @@ Godot can use its existing default debug keystore; no new manual key setup is
 needed. Never use that development key for production releases.
 
 The normal scene now shows only video, automatically connecting to its saved
-source. Use `scripts/run-godot-hoist --serial DEVICE` for pairing and a bounded
+source. Use `uv run run-godot-hoist --serial DEVICE` for pairing and a bounded
 source session; see [live hoisting](../../docs/godot-hoisting.md). Backgrounding
 stops playback; restart the viewer and test source afterward.
 Fixture playback remains available with `-- --video-fixture` in the export's

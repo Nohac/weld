@@ -113,9 +113,9 @@ diagnostic classification, not execution support.
 
 ## Validation
 
-`scripts/check-config-generation` verifies generated files, imported checksums,
+`uv run check-config-generation` verifies generated files, imported checksums,
 generator rejection of invalid definitions, complete physical-key mappings,
-and frontend/IR dependency isolation. `scripts/check-desktop-build-graph`
+and frontend/IR dependency isolation. `uv run check-desktop-build-graph`
 checks the shared runtime feature graph after contract extraction.
 
 Parser tests cover constrained values, source locations, mode definitions,

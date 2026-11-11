@@ -1,5 +1,10 @@
 # Rootless XWayland
 
+> Tooling status (2026-11-11): the historical launchers/probes referenced below
+> were retired during repository cleanup. Their commands are preserved here as
+> experiment history, not current instructions. Use the root uv commands listed
+> in `docs/development-tools.md` for maintained tooling.
+
 Weld can host X11 windows in its ordinary nested, DRM and headless sessions.
 Enable it explicitly for this initial slice:
 
@@ -77,10 +82,10 @@ session, captures settled content and cleans up its process groups. It disables
 core dumps and keeps logs under `target/validation/xwayland-*`.
 
 ```sh
-python3 scripts/check-xwayland
-python3 scripts/check-xwayland --no-build --hoist
-python3 scripts/check-xwayland --no-build --hoist --lifecycle
-python3 scripts/check-xwayland --no-build --hoist --interactive
+uv run check-xwayland
+uv run check-xwayland --no-build --hoist
+uv run check-xwayland --no-build --hoist --lifecycle
+uv run check-xwayland --no-build --hoist --interactive
 ```
 
 `--hoist` uses headless source, nested receiver and the existing H.264/Iroh path
@@ -95,7 +100,7 @@ Accelerated example, with an unavailable Wayland endpoint to select Blender's
 X11 backend:
 
 ```sh
-python3 scripts/check-xwayland --no-build --hoist -- \
+uv run check-xwayland --no-build --hoist -- \
   env WAYLAND_DISPLAY=weld-intentionally-unavailable blender --factory-startup -noaudio
 ```
 

@@ -14,7 +14,7 @@ laptop; USB is needed only for installing this development APK.
 
    ```sh
    cargo build -p weldwm -p weld-control -j 8
-   scripts/build-mobile --install --serial 38171FDJG009S5
+   uv run build-mobile --install --serial 38171FDJG009S5
    ```
 
    Substitute the serial shown by `adb devices` for another phone. Installation

@@ -43,7 +43,7 @@ its report can be fetched; the desktop does not wake or launch a remote app.
 
 ## Phone and peer evidence
 
-Build/install the updated APK with `scripts/build-mobile`. In the application
+Build/install the updated APK with `uv run build-mobile`. In the application
 browser, **Session diagnostics** shows the latest saved session, or the current
 session when no completed report has been saved. Reports are paginated; Android
 Back closes the report view. The phone's last completed report survives app

@@ -1,5 +1,10 @@
 # First cross-network hoist validation
 
+> Tooling status (2026-11-11): the historical launchers/probes referenced below
+> were retired during repository cleanup. Their commands are preserved here as
+> experiment history, not current instructions. Use the root uv commands listed
+> in `docs/development-tools.md` for maintained tooling.
+
 ## Status
 
 The read-only inventory helper, intended-peer admission, opt-in path diagnostics,

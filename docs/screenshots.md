@@ -141,7 +141,7 @@ worker; PNG encoding and filesystem writes also run there.
 Run from the normal Rust development environment on an existing desktop:
 
 ```sh
-scripts/check-screenshot-capture
+uv run check-screenshot-capture
 cargo test -p weldwm -p weld-core --lib \
   async_capture_keeps_each_snapshot -- --ignored
 cargo test -p weldwm -p weld-core --lib \
@@ -163,9 +163,9 @@ capture also needs a physical test with differently scaled outputs.
 ## Recording and DMA-BUF validation
 
 ```sh
-scripts/check-output-capture
-scripts/check-output-capture --portal
-scripts/check-output-capture --kooha
+uv run check-output-capture
+uv run check-output-capture --portal
+uv run check-output-capture --kooha
 cargo test -p weldwm -p weld-core --lib capture_snapshot_survives -- --ignored
 cargo test -p weldwm -p weld-core --lib dmabuf_capture_preserves -- --ignored
 ```

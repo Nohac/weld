@@ -1,5 +1,10 @@
 # Client cursor feedback
 
+> Tooling status (2026-11-11): the historical launchers/probes referenced below
+> were retired during repository cleanup. Their commands are preserved here as
+> experiment history, not current instructions. Use the root uv commands listed
+> in `docs/development-tools.md` for maintained tooling.
+
 Local Wayland, loopback, native Unix hoisting, and encoded Unix/Iroh hoisting use
 the same runtime cursor feedback contract. The source supplies a named shape,
 hidden state, or a bounded lossless RGBA image and hotspot. The destination owns

@@ -1,5 +1,10 @@
 # Headless application hosting
 
+> Tooling status (2026-11-11): the historical launchers/probes referenced below
+> were retired during repository cleanup. Their commands are preserved here as
+> experiment history, not current instructions. Use the root uv commands listed
+> in `docs/development-tools.md` for maintained tooling.
+
 Headless is now an entrypoint assembly of the common native host, not a separate
 runtime. See the [shared native runtime plan](native-host-runtime-plan.md) for
 remaining output-demand and reconnect work.
@@ -189,7 +194,7 @@ for the phone/Godot and OpenXR sequence.
 
 ## Native-runtime foundation validation — 2026-09-12
 
-`scripts/check-host-runtime --policy-only --shm-only` also exercises a non-Bevy
+`uv run check-host-runtime --policy-only --shm-only` also exercises a non-Bevy
 policy owner with no native presenter: events and main advances are serviced,
 no rendering occurs, and a capture request fails explicitly.
 
@@ -200,7 +205,7 @@ no rendering occurs, and a capture request fails explicitly.
 - `cargo test -p weldwm --lib -j2`: 10 tests passed.
 - `cargo clippy -p weld-core -p weldwm --all-targets --features weld-core/test-support -j2 -- -D warnings`
   and formatting/whitespace checks passed.
-- The tracked `scripts/check-host-runtime` subprocess fixture runs in a private
+- The tracked `uv run check-host-runtime` subprocess fixture runs in a private
   `XDG_RUNTIME_DIR`, with inherited display variables removed and an external
   timeout. Run it normally and with `--shm-only`. GPU-backed startup advertised
   native imports; forced no-Vulkan startup continued without them. Both configured
@@ -211,7 +216,7 @@ no rendering occurs, and a capture request fails explicitly.
   for fractional scale 1.5, without constraining the larger window. After
   unmapping and clearing client constraints, the next configure was 0×0
   (client choice), not the startup default.
-- `scripts/check-host-runtime --nested` checks a bounded nested/foot screenshot
+- `uv run check-host-runtime --nested` checks a bounded nested/foot screenshot
   (explicitly skipped without a parent display or foot). The baseline run exited
   successfully and produced a client frame and shell. It still logged the Vulkan
   acquire-fence validation message also present in the earlier user reports;
@@ -230,7 +235,7 @@ DRM scanout, remote input, encoded hoisting or reconnect.
   pre-ready port isolation and failure while configuring an admitted port.
 - VA-API's 8 policy tests and the distribution's 12 tests passed, including
   independent source/receiver capability gates and explicit session consent.
-- Core's 122 existing tests passed. Both `scripts/check-host-runtime --shm-only`
+- Core's 122 existing tests passed. Both `uv run check-host-runtime --shm-only`
   and `--policy-only --shm-only` passed again: 60 callbacks/releases in about
   0.99 seconds, remap behavior, host lifetime, signal shutdown and socket removal.
 - `python3 scripts/test-headless-iroh-launcher.py` uses subprocess fixtures, not
@@ -265,7 +270,7 @@ timeout alone does not prove a driver-only defect.
   with no presentation consumer and with one holding every input lease. Final
   buffer release still waits for all consumers. This tests the ownership
   contract, not real GPU synchronization or performance.
-- `scripts/check-host-runtime --shm-only --frame-timings` records separate
+- `uv run check-host-runtime --shm-only --frame-timings` records separate
   producer-clock delays for each of 60 callbacks and `wl_buffer.release` events.
   Run `host-runtime-_1lbjv51` completed 60 frames in 988 ms: after startup,
   callbacks were roughly 16.6–17.3 ms after commit, while SHM releases were
@@ -294,7 +299,7 @@ commit or a UI redraw. Re-claim in the same turn cancels that local demand.
 The CPU-only `presentation_host_probe` installs an explicit test consumer. The
 `--stalled-presenter` variant stages callbacks in a native driver that never
 completes presentation, while the same protocol producer must keep progressing.
-`scripts/check-host-runtime --dormant --shm-only` instead uses the production
+`uv run check-host-runtime --dormant --shm-only` instead uses the production
 headless entrypoint and verifies zero callbacks with normal buffer releases.
 These fixtures do not establish GPU correctness or subjective latency. The
 repeated headless AV1 VCN resets and H.264 input-to-frame lag still require

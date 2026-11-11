@@ -1,5 +1,10 @@
 # Iroh hoisting
 
+> Tooling status (2026-11-11): the historical launchers/probes referenced below
+> were retired during repository cleanup. Their commands are preserved here as
+> experiment history, not current instructions. Use the root uv commands listed
+> in `docs/development-tools.md` for maintained tooling.
+
 Weld can carry opaque encoded client surfaces between two compositor processes
 over an authenticated and encrypted Iroh connection. The source and
 destination use the same transport-neutral relay and encoded scheduling as the
@@ -92,10 +97,10 @@ the application's responsibility.
 ### Opt-in ADB byte-stream transport
 
 ```sh
-scripts/run-godot-xr --transport adb --bitrate-mbps 16
+uv run run-godot-xr --transport adb --bitrate-mbps 16
 scripts/run-azahar-xr --transport adb --bitrate-mbps 24
 # Exercise the same custom transport locally, without USB:
-scripts/run-godot-hoist --desktop --transport adb --app foot
+uv run run-godot-hoist --desktop --transport adb --app foot
 ```
 
 The default remains `--transport n0`. Each launcher invocation explicitly
@@ -129,7 +134,7 @@ resource use, but this is not protection against all local denial-of-service.
 The launcher owns one verified, explicit `adb reverse --no-rebind` mapping;
 it never resets the shared ADB server or removes unrelated mappings. Explicit
 ports avoid the observed ADB 37 `tcp:0` bookkeeping bug described in the
-[probe](../tools/iroh-adb-probe/README.md). `--restart-after` is rejected for
+probe (retired; available in Git history). `--restart-after` is rejected for
 ADB because source restart changes its ephemeral host port; repointing the
 existing device tunnel is not implemented. Normal teardown and Ctrl-C stop
 the viewer/source before removing the owned mapping.

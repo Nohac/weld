@@ -1,5 +1,10 @@
 # Shared hoist diagnostics
 
+> Tooling status (2026-11-11): the historical launchers/probes referenced below
+> were retired during repository cleanup. Their commands are preserved here as
+> experiment history, not current instructions. Use the root uv commands listed
+> in `docs/development-tools.md` for maintained tooling.
+
 `scripts/plot-hoist` generates an HTML/uPlot report for encoded Weld-to-Weld,
 headless-to-Weld and Godot (desktop or XR) runs. It uses the same existing
 source, transport and decoder records; it does not add a second telemetry path.
