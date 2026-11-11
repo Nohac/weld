@@ -9,9 +9,9 @@ default = []
 native = ["dep:weld-core"]
 
 [dependencies]
-weld-session = { path = "../weld-session" }
+weld-session.workspace = true
 async-channel = "2.5"
-weld-access = { path = "../weld-access" }
+weld-access.workspace = true
 anyhow.workspace = true
 base64 = "0.22.1"
 getrandom = "0.3.4"
@@ -28,13 +28,13 @@ serde.workspace = true
 tokio = { workspace = true, features = ["macros"] }
 tracing.workspace = true
 zeroize.workspace = true
-weld-client = { path = "../weld-client" }
-weld-diagnostics = { path = "../weld-diagnostics" }
-weld-core = { path = "../weld-core", optional = true }
-weld-hoist-core = { path = "../weld-hoist-core" }
-weld-hoist-encoded = { path = "../weld-hoist-encoded" }
-weld-hoist-protocol = { path = "../weld-hoist-protocol" }
-weld-media = { path = "../weld-media", features = ["serde"] }
+weld-client.workspace = true
+weld-diagnostics.workspace = true
+weld-core = { workspace = true, optional = true }
+weld-hoist-core.workspace = true
+weld-hoist-encoded.workspace = true
+weld-hoist-protocol.workspace = true
+weld-media = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros"] }

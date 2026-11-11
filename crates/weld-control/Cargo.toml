@@ -5,11 +5,11 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-weld-hoist-core = { path = "../weld-hoist-core" }
-weld-hoist-protocol = { path = "../weld-hoist-protocol" }
-weld-access = { path = "../weld-access" }
-weld-accessibility = { path = "../weld-accessibility" }
-weld-remote-control = { path = "../weld-remote-control" }
+weld-hoist-core.workspace = true
+weld-hoist-protocol.workspace = true
+weld-access.workspace = true
+weld-accessibility.workspace = true
+weld-remote-control.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 qrcode = { version = "0.14.1", default-features = false }
@@ -28,12 +28,12 @@ server-less = { git = "https://github.com/rhi-zone/server-less", rev = "885c740e
 rmcp = { version = "3", default-features = false, features = ["server", "transport-io"] }
 tokio = { workspace = true, features = ["rt", "time", "sync"] }
 xdg = "3.0.0"
-weld-hoist-iroh = { path = "../weld-hoist-iroh" }
-weld-diagnostics = { path = "../weld-diagnostics" }
+weld-hoist-iroh.workspace = true
+weld-diagnostics.workspace = true
 
 [[bin]]
 name = "weldctl"
 path = "src/main.rs"
 
 [dev-dependencies]
-weld-media = { path = "../weld-media" }
+weld-media.workspace = true

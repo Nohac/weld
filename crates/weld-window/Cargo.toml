@@ -7,13 +7,13 @@ publish.workspace = true
 [dependencies]
 regex.workspace = true
 anyhow.workspace = true
-weld-window-config = { path = "../weld-window-config", features = ["ecs"] }
-weld-client = { path = "../weld-client" }
+weld-window-config = { workspace = true, features = ["ecs"] }
+weld-client.workspace = true
 bevy.workspace = true
 tracing.workspace = true
-weld-app = { path = "../weld-app" }
-weld-input = { path = "../weld-input", features = ["bevy"] }
+weld-app.workspace = true
+weld-input = { workspace = true, features = ["bevy"] }
 
 [dev-dependencies]
-weld-core = { path = "../weld-core", features = ["test-support"] }
-weld-app = { path = "../weld-app", features = ["test-support"] }
+weld-core = { workspace = true, features = ["test-support"] }
+weld-app = { workspace = true, features = ["test-support"] }

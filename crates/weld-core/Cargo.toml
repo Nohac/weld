@@ -9,8 +9,8 @@ profiling-tracy = []
 test-support = ["weld-client/test-support"]
 
 [dependencies]
-weld-input-config = { path = "../weld-input-config" }
-weld-audio = { path = "../weld-audio" }
+weld-input-config.workspace = true
+weld-audio.workspace = true
 anyhow.workspace = true
 # Match Smithay's DRM bindings; the safe slice API creates variable-sized LUT blobs.
 drm-ffi = "=0.8.0"
@@ -35,9 +35,9 @@ tempfile = "3"
 tracing.workspace = true
 url = "2.5"
 wayland-sys = { version = "0.31.11", features = ["client", "dlopen"] }
-weld-client = { path = "../weld-client" }
-weld-input = { path = "../weld-input" }
-weld-output = { path = "../weld-output" }
+weld-client.workspace = true
+weld-input.workspace = true
+weld-output.workspace = true
 wgpu = { workspace = true, features = ["drm", "naga-ir", "vulkan", "wgsl"] }
 winit = { workspace = true, features = ["rwh_06", "wayland", "wayland-dlopen", "x11"] }
 x11-dl.workspace = true

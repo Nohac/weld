@@ -6,6 +6,6 @@ publish.workspace = true
 
 [dependencies]
 bevy.workspace = true
-weld-app = { path = "../weld-app" }
-weld-window = { path = "../weld-window" }
-weld-ssd = { path = "../weld-ssd" }
+weld-app.workspace = true
+weld-window.workspace = true
+weld-ssd.workspace = true

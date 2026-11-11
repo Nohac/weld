@@ -842,7 +842,7 @@ mod tests {
     }
 
     fn example_path() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("examples/master.sway.config")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../examples/master.sway.config")
     }
 
     #[test]

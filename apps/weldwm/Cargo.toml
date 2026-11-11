@@ -1,0 +1,81 @@
+[package]
+name = "weldwm"
+default-run = "weldwm"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[features]
+# Keep normal runs, policy tests and benchmarks on the same desktop graph.
+default = ["test-support"]
+profiling-tracy = [
+  "bevy/trace_tracy",
+  "dep:tracing-tracy",
+  "weld-core/profiling-tracy",
+]
+test-support = ["weld-app/test-support"]
+
+[dependencies]
+weld-sway-config.workspace = true
+weldwm-config.workspace = true
+weld-config.workspace = true
+weld-window-config = { workspace = true, features = ["ecs"] }
+weld-tile-config = { workspace = true, features = ["ecs"] }
+weld-input-config = { workspace = true, features = ["ecs"] }
+weld-audio.workspace = true
+uuid = { version = "1", features = ["v4"] }
+weld-hoist-protocol.workspace = true
+weld-remote-control-ui.workspace = true
+base64 = "0.22.1"
+weld-access.workspace = true
+weld-remote-control.workspace = true
+anyhow.workspace = true
+bevy.workspace = true
+clap.workspace = true
+weld-app.workspace = true
+weld-input = { workspace = true, features = ["bevy"] }
+weld-client.workspace = true
+weld-core.workspace = true
+weld-control.workspace = true
+weld-window.workspace = true
+weld-window-ui.workspace = true
+weld-ssd.workspace = true
+weld-tile.workspace = true
+weld-tile-ui.workspace = true
+weld-float.workspace = true
+weld-i3-quirks.workspace = true
+weld-sway-ipc.workspace = true
+weld-gamepad.workspace = true
+weld-hoist.workspace = true
+weld-hoist-core.workspace = true
+weld-hoist-iroh = { workspace = true, features = ["native"] }
+weld-hoist-encoded = { workspace = true, features = ["vaapi"] }
+weld-hoist-local = { workspace = true, features = ["encoded-vaapi"] }
+weld-media.workspace = true
+weld-media-vaapi.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-tracy = { workspace = true, optional = true }
+
+[dev-dependencies]
+indoc.workspace = true
+weld-ssd-config.workspace = true
+tokio.workspace = true
+weld-app = { workspace = true, features = ["test-support"] }
+pollster.workspace = true
+wgpu = { workspace = true, features = ["vulkan"] }
+
+[[bench]]
+name = "shell_main"
+harness = false
+required-features = ["test-support"]
+
+[[bench]]
+name = "shell_render"
+harness = false
+required-features = ["test-support"]
+
+[[bench]]
+name = "paced_render"
+harness = false
+required-features = ["test-support"]

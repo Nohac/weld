@@ -5,9 +5,9 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-weld-config = { path = "../weld-config" }
-weld-input-config = { path = "../weld-input-config" }
-weld-output = { path = "../weld-output" }
-weld-tile-config = { path = "../weld-tile-config" }
-weld-window-config = { path = "../weld-window-config" }
-weld-ssd-config = { path = "../weld-ssd-config" }
+weld-config.workspace = true
+weld-input-config.workspace = true
+weld-output.workspace = true
+weld-tile-config.workspace = true
+weld-window-config.workspace = true
+weld-ssd-config.workspace = true

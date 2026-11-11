@@ -9,9 +9,9 @@ default = ["sessions"]
 sessions = ["dep:weld-session", "dep:tokio", "dep:getrandom", "dep:postcard", "dep:serde"]
 
 [dependencies]
-weld-session = { path = "../weld-session", optional = true }
+weld-session = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["macros"], optional = true }
-weld-media = { path = "../weld-media" }
+weld-media.workspace = true
 anyhow.workspace = true
 async-channel = "2.5"
 async-io = "2.6"
@@ -19,8 +19,8 @@ futures-lite.workspace = true
 getrandom = { version = "0.3.4", optional = true }
 postcard = { workspace = true, optional = true }
 serde = { workspace = true, optional = true }
-weld-access = { path = "../weld-access" }
+weld-access.workspace = true
 tracing.workspace = true
-weld-client = { path = "../weld-client" }
-weld-diagnostics = { path = "../weld-diagnostics" }
-weld-hoist-protocol = { path = "../weld-hoist-protocol" }
+weld-client.workspace = true
+weld-diagnostics.workspace = true
+weld-hoist-protocol.workspace = true

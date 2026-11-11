@@ -5,19 +5,19 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-weld-window-config = { path = "../weld-window-config", features = ["ecs"] }
-weld-tile-config = { path = "../weld-tile-config", features = ["ecs"] }
-weld-float = { path = "../weld-float" }
+weld-window-config = { workspace = true, features = ["ecs"] }
+weld-tile-config = { workspace = true, features = ["ecs"] }
+weld-float.workspace = true
 bevy.workspace = true
-weld-app = { path = "../weld-app" }
-weld-tile = { path = "../weld-tile" }
-weld-window = { path = "../weld-window" }
+weld-app.workspace = true
+weld-tile.workspace = true
+weld-window.workspace = true
 
 [dev-dependencies]
 anyhow.workspace = true
 
-weldwm-config = { path = "../weldwm-config" }
-weld-sway-config = { path = "../weld-sway-config" }
-weld-client = { path = "../weld-client" }
+weldwm-config.workspace = true
+weld-sway-config.workspace = true
+weld-client.workspace = true
 indoc.workspace = true
-weld-app = { path = "../weld-app", features = ["test-support"] }
+weld-app = { workspace = true, features = ["test-support"] }

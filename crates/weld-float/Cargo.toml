@@ -5,12 +5,12 @@ edition.workspace = true
 publish.workspace = true
 
 [dependencies]
-weld-window-config = { path = "../weld-window-config", features = ["ecs"] }
-weld-input-config = { path = "../weld-input-config", features = ["ecs"] }
+weld-window-config = { workspace = true, features = ["ecs"] }
+weld-input-config = { workspace = true, features = ["ecs"] }
 bevy.workspace = true
-weld-app = { path = "../weld-app" }
-weld-window = { path = "../weld-window" }
+weld-app.workspace = true
+weld-window.workspace = true
 
 [dev-dependencies]
-weld-input = { path = "../weld-input", features = ["bevy"] }
-weld-app = { path = "../weld-app", features = ["test-support"] }
+weld-input = { workspace = true, features = ["bevy"] }
+weld-app = { workspace = true, features = ["test-support"] }

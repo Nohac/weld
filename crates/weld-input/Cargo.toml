@@ -8,11 +8,11 @@ publish.workspace = true
 bevy = ["dep:bevy", "dep:bevy_winit", "weld-input-config/ecs"]
 
 [dependencies]
-weld-input-config = { path = "../weld-input-config" }
+weld-input-config.workspace = true
 anyhow.workspace = true
 bevy = { workspace = true, optional = true }
 bevy_winit = { workspace = true, optional = true }
-weld-client = { path = "../weld-client" }
+weld-client.workspace = true
 winit = { workspace = true, features = ["rwh_06", "wayland", "wayland-dlopen", "x11"] }
 xkbcommon = "=0.9.0"
 

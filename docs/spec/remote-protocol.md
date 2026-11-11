@@ -120,7 +120,7 @@ hoist-family IDs and diagnostic correlation IDs distinct.
 - Audit Iroh admission and Unix `bootstrap.rs`, `source.rs`, `destination.rs`
   and `encoded_transport.rs` together. Common negotiation and lifecycle policy
   belongs in shared sessions; socket/descriptor mechanics belong in the binding.
-- `src/devices.rs` republishes catalogues from `PostUpdate`; shells consume the
+- `apps/weldwm/src/devices.rs` republishes catalogues from `PostUpdate`; shells consume the
   Iroh-specific `DeviceSession` API and poll catalogues. Replace these with shared
   service publication and change notifications.
 

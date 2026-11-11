@@ -1,21 +1,6 @@
-[package]
-name = "weldwm"
-version.workspace = true
-edition.workspace = true
-publish.workspace = true
-
-[features]
-# Keep normal runs, policy tests and benchmarks on the same desktop graph.
-default = ["test-support"]
-profiling-tracy = [
-  "bevy/trace_tracy",
-  "dep:tracing-tracy",
-  "weld-core/profiling-tracy",
-]
-test-support = ["weld-app/test-support"]
-
 [workspace]
 members = [
+  "apps/weldwm",
   "crates/weldwm-config",
   "crates/weld-config",
   "crates/weld-ssd-config",
@@ -61,6 +46,7 @@ members = [
   "crates/weld-window-ui",
 ]
 exclude = ["vendor/smithay", "vendor/smithay/smithay-drm-extras"]
+default-members = ["apps/weldwm"]
 resolver = "3"
 
 [workspace.package]
@@ -69,6 +55,51 @@ edition = "2024"
 publish = false
 
 [workspace.dependencies]
+# Paths are shared; each consumer selects its own features and optionality.
+weld-access = { path = "crates/weld-access" }
+weld-accessibility = { path = "crates/weld-accessibility" }
+weld-app = { path = "crates/weld-app" }
+weld-audio = { path = "crates/weld-audio" }
+weld-client = { path = "crates/weld-client" }
+weld-config = { path = "crates/weld-config" }
+weld-control = { path = "crates/weld-control" }
+weld-core = { path = "crates/weld-core" }
+weld-diagnostics = { path = "crates/weld-diagnostics" }
+weld-float = { path = "crates/weld-float" }
+weld-gamepad = { path = "crates/weld-gamepad" }
+weld-hoist = { path = "crates/weld-hoist" }
+weld-hoist-core = { path = "crates/weld-hoist-core" }
+weld-hoist-encoded = { path = "crates/weld-hoist-encoded" }
+weld-hoist-iroh = { path = "crates/weld-hoist-iroh" }
+weld-hoist-local = { path = "crates/weld-hoist-local" }
+weld-hoist-protocol = { path = "crates/weld-hoist-protocol" }
+weld-hoist-ui = { path = "crates/weld-hoist-ui" }
+weld-i3-quirks = { path = "crates/weld-i3-quirks" }
+weld-input = { path = "crates/weld-input" }
+weld-input-config = { path = "crates/weld-input-config" }
+weld-media = { path = "crates/weld-media" }
+weld-media-android = { path = "crates/weld-media-android" }
+weld-media-vaapi = { path = "crates/weld-media-vaapi" }
+weld-output = { path = "crates/weld-output" }
+weld-presenter = { path = "crates/weld-presenter" }
+weld-recording = { path = "crates/weld-recording" }
+weld-remote-control = { path = "crates/weld-remote-control" }
+weld-remote-control-ui = { path = "crates/weld-remote-control-ui" }
+weld-session = { path = "crates/weld-session" }
+weld-ssd = { path = "crates/weld-ssd" }
+weld-ssd-config = { path = "crates/weld-ssd-config" }
+weld-svg = { path = "crates/weld-svg" }
+weld-sway-config = { path = "crates/weld-sway-config" }
+weld-sway-ipc = { path = "crates/weld-sway-ipc" }
+weld-tile = { path = "crates/weld-tile" }
+weld-tile-config = { path = "crates/weld-tile-config" }
+weld-tile-ui = { path = "crates/weld-tile-ui" }
+weld-vaapi = { path = "crates/weld-vaapi" }
+weld-window = { path = "crates/weld-window" }
+weld-window-config = { path = "crates/weld-window-config" }
+weld-window-ui = { path = "crates/weld-window-ui" }
+weldwm-config = { path = "crates/weldwm-config" }
+
 zeroize = "1"
 anyhow = "1.0.100"
 ash = "0.38.0"
@@ -119,56 +150,6 @@ winnow = { version = "1.0.4", default-features = false, features = ["std", "pars
 x11-dl = "2.21.0"
 xcursor = "0.3.11"
 
-[dependencies]
-weld-sway-config = { path = "crates/weld-sway-config" }
-weldwm-config = { path = "crates/weldwm-config" }
-weld-config = { path = "crates/weld-config" }
-weld-window-config = { path = "crates/weld-window-config", features = ["ecs"] }
-weld-tile-config = { path = "crates/weld-tile-config", features = ["ecs"] }
-weld-input-config = { path = "crates/weld-input-config", features = ["ecs"] }
-weld-audio = { path = "crates/weld-audio" }
-uuid = { version = "1", features = ["v4"] }
-weld-hoist-protocol = { path = "crates/weld-hoist-protocol" }
-weld-remote-control-ui = { path = "crates/weld-remote-control-ui" }
-base64 = "0.22.1"
-weld-access = { path = "crates/weld-access" }
-weld-remote-control = { path = "crates/weld-remote-control" }
-anyhow.workspace = true
-bevy.workspace = true
-clap.workspace = true
-weld-app = { path = "crates/weld-app" }
-weld-input = { path = "crates/weld-input", features = ["bevy"] }
-weld-client = { path = "crates/weld-client" }
-weld-core = { path = "crates/weld-core" }
-weld-control = { path = "crates/weld-control" }
-weld-window = { path = "crates/weld-window" }
-weld-window-ui = { path = "crates/weld-window-ui" }
-weld-ssd = { path = "crates/weld-ssd" }
-weld-tile = { path = "crates/weld-tile" }
-weld-tile-ui = { path = "crates/weld-tile-ui" }
-weld-float = { path = "crates/weld-float" }
-weld-i3-quirks = { path = "crates/weld-i3-quirks" }
-weld-sway-ipc = { path = "crates/weld-sway-ipc" }
-weld-gamepad = { path = "crates/weld-gamepad" }
-weld-hoist = { path = "crates/weld-hoist" }
-weld-hoist-core = { path = "crates/weld-hoist-core" }
-weld-hoist-iroh = { path = "crates/weld-hoist-iroh", features = ["native"] }
-weld-hoist-encoded = { path = "crates/weld-hoist-encoded", features = ["vaapi"] }
-weld-hoist-local = { path = "crates/weld-hoist-local", features = ["encoded-vaapi"] }
-weld-media = { path = "crates/weld-media" }
-weld-media-vaapi = { path = "crates/weld-media-vaapi" }
-tracing.workspace = true
-tracing-subscriber.workspace = true
-tracing-tracy = { workspace = true, optional = true }
-
-[dev-dependencies]
-indoc.workspace = true
-weld-ssd-config = { path = "crates/weld-ssd-config" }
-tokio.workspace = true
-weld-app = { path = "crates/weld-app", features = ["test-support"] }
-pollster.workspace = true
-wgpu = { workspace = true, features = ["vulkan"] }
-
 # Keep Weld's code quick to rebuild while giving Bevy, Smithay, wgpu, and other
 # dependencies enough optimization for a usable compositor development build.
 [profile.dev]
@@ -195,18 +176,3 @@ strip = "none"
 [patch.crates-io]
 bevy_render = { path = "vendor/bevy-render" }
 bevy_ui = { path = "vendor/bevy-ui" }
-
-[[bench]]
-name = "shell_main"
-harness = false
-required-features = ["test-support"]
-
-[[bench]]
-name = "shell_render"
-harness = false
-required-features = ["test-support"]
-
-[[bench]]
-name = "paced_render"
-harness = false
-required-features = ["test-support"]

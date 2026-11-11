@@ -42,7 +42,7 @@ resources are not part of the configuration IR. The native decoration layer
 converts those preferences into its renderer-facing representation.
 
 `weld-window::rules` compiles metadata predicates independently of the action type.
-`src/config/rules.rs` installs weldwm's rule evaluation and cross-feature execution;
+`apps/weldwm/src/config/rules.rs` installs weldwm's rule evaluation and cross-feature execution;
 `weld-i3-quirks` remains the selected tree/workspace behavior implementation.
 The combined IR has no i3 crate dependency. Layout toggles lower to explicit
 cycles containing fixed layouts or remembered/alternate split choices. Numbered

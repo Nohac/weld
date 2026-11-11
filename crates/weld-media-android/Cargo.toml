@@ -6,7 +6,7 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-weld-media = { path = "../weld-media", features = ["config"] }
+weld-media = { workspace = true, features = ["config"] }
 
 [target.'cfg(target_os = "android")'.dependencies]
 ffmpeg-next.workspace = true

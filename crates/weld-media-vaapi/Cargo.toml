@@ -6,8 +6,8 @@ publish.workspace = true
 
 [dependencies]
 anyhow.workspace = true
-weld-vaapi = { path = "../weld-vaapi" }
+weld-vaapi.workspace = true
 ffmpeg-next = { workspace = true, features = ["filter"] }
 libc.workspace = true
-weld-media = { path = "../weld-media", features = ["decode"] }
+weld-media = { workspace = true, features = ["decode"] }
 tracing.workspace = true

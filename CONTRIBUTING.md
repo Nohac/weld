@@ -33,6 +33,20 @@ reusable implementation guidance belong under `.agents/skills/`.
 Read [Architecture](docs/architecture.md) before changing subsystem ownership
 or lifecycle boundaries.
 
+## Workspace layout
+
+The root `Cargo.toml` is a virtual workspace. `apps/weldwm` owns the standard
+compositor application, its integration tests, benchmarks and Rust examples.
+It is the sole `default-members` entry, with `default-run = "weldwm"`, so plain
+`cargo build`, `cargo run`, and `cargo test` from the repository root continue to
+select that application. Shared profiles, patches, the lockfile and build output
+remain at the root. Example configuration paths still start at `examples/`.
+
+Declare reusable Weld crate paths in `[workspace.dependencies]`, then inherit
+with `workspace = true`. Keep consumer-specific features and `optional = true`
+in the consuming manifest. The standalone Connect, Mobile, VR and video-GLES
+workspaces retain their own dependency declarations.
+
 ## Running tools
 
 Repository Python tools use the root `pyproject.toml` and `uv.lock`.

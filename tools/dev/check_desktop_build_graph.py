@@ -1,5 +1,6 @@
 """Check desktop dependency-feature parity without compiling any targets."""
 
+import json
 import subprocess
 import tomllib
 
@@ -43,6 +44,29 @@ def graph(target, packages, edges):
 
 
 def main():
+    metadata = json.loads(
+        subprocess.check_output(
+            [
+                "cargo",
+                "metadata",
+                "--locked",
+                "--offline",
+                "--no-deps",
+                "--format-version",
+                "1",
+            ],
+            cwd=ROOT,
+            text=True,
+        )
+    )
+    application = next(
+        package for package in metadata["packages"] if package["name"] == "weldwm"
+    )
+    if metadata["workspace_default_members"] != [application["id"]]:
+        raise RuntimeError("plain Cargo commands must select only weldwm")
+    if application["default_run"] != "weldwm":
+        raise RuntimeError("cargo run must select the weldwm binary")
+    print("PASS default Cargo package and binary: weldwm")
     with (ROOT / ".cargo/config.toml").open("rb") as source:
         aliases = tomllib.load(source)["alias"]
     compiler = subprocess.check_output(["rustc", "-vV"], text=True)
@@ -55,6 +79,7 @@ def main():
     if any(package.startswith("bevy_dylib ") for package in baseline):
         raise RuntimeError("desktop graph includes bevy_dylib")
     scenarios = {
+        "default build": [],
         "application tests": ["-p", "weldwm"],
         "core tests/examples": ["-p", "weldwm", "-p", "weld-core"],
         "application bridge tests": ["-p", "weldwm", "-p", "weld-app"],

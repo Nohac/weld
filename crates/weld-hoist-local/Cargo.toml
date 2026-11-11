@@ -15,9 +15,9 @@ rustix.workspace = true
 serde.workspace = true
 tracing.workspace = true
 smithay = { workspace = true, features = ["wayland_frontend"] }
-weld-client = { path = "../weld-client", features = ["serde"] }
-weld-core = { path = "../weld-core" }
-weld-hoist-core = { path = "../weld-hoist-core" }
-weld-hoist-encoded = { path = "../weld-hoist-encoded", features = ["native"] }
-weld-hoist-protocol = { path = "../weld-hoist-protocol" }
-weld-media = { path = "../weld-media", features = ["serde"] }
+weld-client = { workspace = true, features = ["serde"] }
+weld-core.workspace = true
+weld-hoist-core.workspace = true
+weld-hoist-encoded = { workspace = true, features = ["native"] }
+weld-hoist-protocol.workspace = true
+weld-media = { workspace = true, features = ["serde"] }

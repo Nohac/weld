@@ -7,8 +7,8 @@ publish.workspace = true
 [dependencies]
 anyhow.workspace = true
 bevy.workspace = true
-weld-svg = { path = "../weld-svg" }
-weld-app = { path = "../weld-app" }
-weld-remote-control = { path = "../weld-remote-control" }
-weld-ssd = { path = "../weld-ssd" }
-weld-window = { path = "../weld-window" }
+weld-svg.workspace = true
+weld-app.workspace = true
+weld-remote-control.workspace = true
+weld-ssd.workspace = true
+weld-window.workspace = true

@@ -9,4 +9,4 @@ ecs = ["dep:bevy_ecs"]
 
 [dependencies]
 bevy_ecs = { workspace = true, optional = true }
-weld-input-config = { path = "../weld-input-config" }
+weld-input-config.workspace = true

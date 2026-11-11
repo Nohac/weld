@@ -107,9 +107,12 @@ mod tests {
 
     #[test]
     fn default_navigation_uses_letters_without_a_launch_conflict() {
-        let config = parse("default", include_str!("../../examples/master.sway.config"))
-            .expect("config")
-            .settings;
+        let config = parse(
+            "default",
+            include_str!("../../../../examples/master.sway.config"),
+        )
+        .expect("config")
+        .settings;
         for (key, direction) in [
             (KeyCode::KeyD, Direction::Left),
             (KeyCode::KeyF, Direction::Right),

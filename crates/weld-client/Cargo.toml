@@ -11,6 +11,6 @@ test-support = []
 [dependencies]
 anyhow.workspace = true
 tracing.workspace = true
-weld-diagnostics = { path = "../weld-diagnostics" }
+weld-diagnostics.workspace = true
 cursor-icon.workspace = true
 serde = { workspace = true, optional = true }

@@ -23,7 +23,7 @@ configuration. `--help` is available without opening devices or starting builds.
 | Commands | Responsibility |
 | --- | --- |
 | `generate-config`, `import-i3-config`, `check-config-generation` | Grammar import, Rust generation and ownership checks |
-| `check-desktop-build-graph` | Cargo dependency-feature parity without compilation |
+| `check-desktop-build-graph` | Default Cargo application selection and dependency-feature parity without compilation |
 | `check-host-runtime`, `check-control-launch` | Isolated host and control regression fixtures |
 | `check-output-capture`, `check-screenshot-capture`, `check-window-recording` | Capture and recording regression fixtures |
 | `check-layer-shell`, `check-xwayland` | Focused shell/X11 integration checks |

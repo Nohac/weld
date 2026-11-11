@@ -6,9 +6,9 @@ publish.workspace = true
 
 [dependencies]
 serde.workspace = true
-weld-diagnostics = { path = "../weld-diagnostics" }
-weld-client = { path = "../weld-client", features = ["serde"] }
-weld-media = { path = "../weld-media", features = ["serde"] }
+weld-diagnostics.workspace = true
+weld-client = { workspace = true, features = ["serde"] }
+weld-media = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]
 postcard.workspace = true

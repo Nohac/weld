@@ -4,7 +4,13 @@ This document records the repository's implemented ownership and lifecycle
 boundaries. The subject-oriented [Weld specifications](spec/README.md) preserve
 project intent and future direction without presenting it as current behavior.
 
-Weld is a workspace of reusable layers and one standard distribution:
+Weld is a workspace of reusable layers and one standard distribution.
+The root manifest owns dependency paths, build profiles and patches;
+`apps/weldwm` owns the standard application and its tests/benchmarks. It is the
+workspace's default member, preserving plain `cargo run` from the root.
+Consumer-specific dependency features remain in each package manifest.
+
+The runtime responsibilities are:
 
 - `weld-audio` owns native PipeWire routing, discovery, shared application capture
   subscriptions, and receiver playback on independent worker loops. Launch owners
@@ -144,9 +150,9 @@ Weld is a workspace of reusable layers and one standard distribution:
   `weld-output`, `weld-tile-config`, `weld-window-config`, and `weld-ssd-config`.
   Their normal frontend graph has no Bevy, Smithay, wgpu, or native-host dependency.
   Opt-in ECS derives adapt the same owned values to runtime resources/events.
-  `weld-window::rules` owns generic compiled matching; `src/config/rules.rs`
+  `weld-window::rules` owns generic compiled matching; `apps/weldwm/src/config/rules.rs`
   evaluates rules and executes the distribution's cross-feature actions.
-  `src/config` prepares keymaps, matchers, and decoration resources before
+  `apps/weldwm/src/config` prepares keymaps, matchers, and decoration resources before
   publication and queues startup effects only after successful activation.
   See [Typed configuration](configuration.md) for generation, ownership, and scope.
 - `weld-sway-ipc` serves desktop tree/output queries and binding-mode subscriptions on a private
