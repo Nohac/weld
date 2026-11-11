@@ -5,6 +5,11 @@ For windowless file offers using the local pointer, see
 
 `weldctl` can start applications through an existing Weld host:
 
+Nested graphical Weld instances default to `weld-nested-PID`; their startup log
+prints the name. Pass that name to `--session` when launching from the parent
+desktop, or select a stable name when starting Weld with `--wayland-socket`.
+Applications launched inside that instance inherit its matching `WELD_SESSION`.
+
 ```sh
 weldctl --session weld-0 run -- foot
 weldctl --session weld-0 run --cwd /path/to/project -- ./target/debug/my-app

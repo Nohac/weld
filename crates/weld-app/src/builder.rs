@@ -171,7 +171,7 @@ impl WeldAppBuilder {
         }
 
         let requested_backend = self.backend;
-        let backend = requested_backend.resolve(BackendEnvironment::detect());
+        let backend = requested_backend.resolve();
         info!(?requested_backend, ?backend, "selected Weld backend");
         let mut host = HostBuilder::new()
             .xwayland(self.xwayland)
@@ -326,11 +326,22 @@ impl WeldApp {
 }
 
 impl Backend {
-    fn resolve(self, environment: BackendEnvironment) -> ActiveBackend {
+    /// Resolve automatic selection from the current display and console environment.
+    /// Distributions can use this before preparing backend-specific session defaults.
+    pub fn resolve(self) -> ActiveBackend {
         match self {
             Self::Nested => ActiveBackend::Nested,
             Self::Drm => ActiveBackend::Drm,
-            Self::Auto => resolve_auto_backend(environment),
+            Self::Auto => resolve_auto_backend(BackendEnvironment::detect()),
+        }
+    }
+}
+
+impl From<ActiveBackend> for Backend {
+    fn from(backend: ActiveBackend) -> Self {
+        match backend {
+            ActiveBackend::Nested => Self::Nested,
+            ActiveBackend::Drm => Self::Drm,
         }
     }
 }

@@ -58,6 +58,7 @@ tracing-subscriber.workspace = true
 tracing-tracy = { workspace = true, optional = true }
 
 [dev-dependencies]
+tempfile = "3"
 indoc.workspace = true
 weld-ssd-config.workspace = true
 tokio.workspace = true

@@ -177,6 +177,19 @@ Run Weld inside a development shell whose glibc is compatible with the running
 NixOS graphics drivers. The shared Rust shell is located at
 `/home/jonas/Dotfiles/nixos/envs/rust`; reload it after its lock file changes.
 
+From a graphical terminal, `cargo run` automatically selects a nested host and
+finds configuration in this order: `--config`, `WELD_CONFIG`, the XDG Weld config
+(`$XDG_CONFIG_HOME/weld/config` or `~/.config/weld/config`, then
+`$XDG_CONFIG_DIRS/weld/config`, defaulting to `/etc/xdg/weld/config`), and
+`examples/master.sway.config` in the working directory. Missing explicit files
+and invalid selected files fail instead of silently falling back. On a bare TTY,
+automatic backend selection uses DRM.
+
+Nested graphical launches default to `weld-nested-PID`; DRM and headless hosts
+keep `weld-0`. The selected name is shared by Wayland, controls and launched
+clients and is printed at startup. Use `--wayland-socket NAME` for a stable test
+session; an occupied explicit name is an error.
+
 Launch Weld's nested development host without a client:
 
 ```text

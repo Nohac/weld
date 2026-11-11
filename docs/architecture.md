@@ -467,7 +467,8 @@ the layout tree or client occupancy. Invalid candidates leave the working state
 alone. This is not a generic config framework or full Sway compatibility; see
 [weldwm tiling](master-tiling.md) for the current subset and limitations. The
 session-only headless host remains separate from this graphical policy assembly.
-Graphical weldwm requires an explicit configuration path. Its development example
+Graphical weldwm resolves an explicit path, environment/XDG config, or the
+working directory's development example; see [configuration discovery](master-tiling.md). Its development example
 bindings live in `examples/master.sway.config`, including
 launch, exit, hoist and output diagnostics. Shortcut support installs no key
 defaults; hoisting and the overlay accept typed requests instead. `ShellCommands`

@@ -10156,6 +10156,7 @@ dependencies = [
  "clap",
  "indoc",
  "pollster",
+ "tempfile",
  "tokio",
  "tracing",
  "tracing-subscriber",

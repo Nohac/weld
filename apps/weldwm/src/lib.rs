@@ -41,19 +41,14 @@ use weld_window_ui::WindowUiPlugin;
 
 pub use arguments::{AppArguments, BackendKind};
 
-pub fn run(arguments: AppArguments) -> Result<()> {
+pub fn run(mut arguments: AppArguments) -> Result<()> {
     telemetry::initialize()?;
     if arguments.validate_config {
-        return config::validate_configuration(
-            arguments
-                .config
-                .as_deref()
-                .context("--validate-config requires --config PATH")?,
-        );
+        return config::validate_configuration(&config::discover(arguments.config.as_deref())?);
     }
     validate_session_arguments(&arguments)?;
     let backend = match arguments.backend.selection() {
-        arguments::HostSelection::Bevy(backend) => backend,
+        arguments::HostSelection::Bevy(backend) => backend.resolve(),
         arguments::HostSelection::Headless => {
             // Validation and construction are one path: no transport can bind
             // and no Bevy renderer can start before the session-only branch.
@@ -61,12 +56,16 @@ pub fn run(arguments: AppArguments) -> Result<()> {
         }
     };
     validate_hoist_arguments(&arguments)?;
-    let configuration = config::ConfigPlugin::load(
-        arguments
-            .config
-            .as_deref()
-            .context("graphical Weld requires --config PATH")?,
-    )?;
+    let configuration_path = config::discover(arguments.config.as_deref())?;
+    let configuration = config::ConfigPlugin::load(&configuration_path)?;
+    let session_name = arguments::graphical_socket_name(
+        arguments.wayland_socket.as_deref(),
+        backend,
+        std::process::id(),
+    );
+    // Device state, the native listener and local controls share one resolved identity.
+    arguments.wayland_socket = Some(session_name.clone());
+    tracing::info!(?backend, session = %session_name, config = %configuration_path.display(), "starting Weld session");
     let hoist_codec = arguments.hoist_codec.unwrap_or_default();
     let bitrate_budget = bitrate_budget::for_source(&arguments)?;
     let iroh_timeout = Duration::from_secs(arguments.hoist_iroh_timeout.unwrap_or(120));
@@ -120,10 +119,6 @@ pub fn run(arguments: AppArguments) -> Result<()> {
     };
 
     let ipc_service = weld_sway_ipc::PreparedIpcService::bind()?;
-    let session_name = arguments
-        .wayland_socket
-        .clone()
-        .unwrap_or_else(|| "weld-0".into());
     let (launcher, launch_requests) = weld_core::runtime::launch::launch_channel()?;
     let (drag, drag_requests) = weld_core::runtime::drag::drag_channel()?;
     let mut app = WeldApp::builder()
@@ -137,7 +132,7 @@ pub fn run(arguments: AppArguments) -> Result<()> {
             ("I3SOCK".into(), ipc_service.socket_path().into_os_string()),
         ])
         .xwayland(arguments.xwayland)
-        .backend(backend)
+        .backend(backend.into())
         .launch(arguments.client)
         .screenshot(arguments.screenshot)
         .remote_debug(arguments.remote_debug)
@@ -570,10 +565,39 @@ pub fn run_from_env() -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::arguments::graphical_socket_name;
+    use weld_app::ActiveBackend;
 
     fn arguments(values: &[&str]) -> AppArguments {
         AppArguments::try_parse_from(std::iter::once("weldwm").chain(values.iter().copied()))
             .expect("valid command line")
+    }
+
+    #[test]
+    fn graphical_session_defaults_isolate_nested_hosts_and_preserve_explicit_names() {
+        let first = graphical_socket_name(None, ActiveBackend::Nested, 123);
+        let second = graphical_socket_name(None, ActiveBackend::Nested, 456);
+        assert_eq!(first, "weld-nested-123");
+        assert_ne!(first, second);
+        assert_eq!(
+            graphical_socket_name(None, ActiveBackend::Drm, 123),
+            "weld-0"
+        );
+        for backend in [ActiveBackend::Nested, ActiveBackend::Drm] {
+            assert_eq!(
+                graphical_socket_name(Some("chosen"), backend, 123),
+                "chosen"
+            );
+            assert_eq!(
+                graphical_socket_name(Some("/tmp/private/wayland"), backend, 123),
+                "/tmp/private/wayland"
+            );
+        }
+        let mut args = arguments(&[]);
+        args.wayland_socket = Some(first.clone());
+        let options = devices::DeviceOptions::from_arguments(&args).expect("device options");
+        assert_eq!(options.session, first);
+        assert!(options.directory.ends_with(&first));
     }
 
     #[test]

@@ -112,17 +112,25 @@ Alt+1..9 and Alt+0 select workspaces 1..10. Add Shift to move the selected
 window without following it. These are logical Alt bindings; the example's
 keymap makes physical Windows produce that modifier.
 
-Graphical weldwm requires an explicit `--config` path. The repository's
-`examples/master.sway.config` is a development example, selected explicitly by
-the graphical hoist and profiling launchers. A supplied file may be a Sway
-config; unsupported features are skipped with source-located warnings. Malformed
-supported settings still reject the load. weldwm has no implicit config
-discovery or bundled fallback. Headless session hosting needs no config.
+Graphical weldwm selects configuration from `--config PATH`, then `WELD_CONFIG`,
+then `$XDG_CONFIG_HOME/weld/config` (or `~/.config/weld/config`), then the
+`weld/config` file in each absolute `$XDG_CONFIG_DIRS` entry (default `/etc/xdg`).
+Finally it tries `examples/master.sway.config` in the working directory, so
+`cargo run` from the repository root works without extra arguments. A missing
+explicit file or an invalid selected file fails; discovery does not hide load
+errors. A supplied file may be a Sway config; unsupported features are skipped
+with source-located warnings. Headless session hosting needs no config.
+
+Inside a graphical session, automatic backend selection uses a nested host.
+Implicit nested sessions use `weld-nested-PID`, keeping their Wayland listener,
+control endpoint and device state separate from the desktop's `weld-0`. The
+startup log prints the session name. `--wayland-socket NAME` overrides it and
+fails if occupied. Bare-TTY DRM selection and its `weld-0` default are unchanged.
 
 Alt+Shift+R reloads the selected file. The file replaces, rather than overlays,
 the configuration plugin's bindings; omitted settings return to their native
 defaults. Parse/translation failure leaves the old bindings and settings active.
-There is no file watcher yet; reload rereads the supplied path.
+There is no file watcher yet; reload rereads the selected path without repeating discovery.
 
 Check a file without opening a compositor, connecting a transport or running its
 startup commands:

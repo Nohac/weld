@@ -8,10 +8,13 @@ use weld_tile_config::TileSettings;
 use weld_window_config::{FullscreenAction, FullscreenMode};
 #[cfg(test)]
 mod decorations_tests;
+mod discovery;
 mod prepare;
 mod rules;
 #[cfg(test)]
 mod rules_tests;
+
+pub(crate) use discovery::discover;
 
 use self::rules::ConfiguredRules;
 use crate::overlay::ToggleOutputTopology;

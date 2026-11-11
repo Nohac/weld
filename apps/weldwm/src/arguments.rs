@@ -3,11 +3,25 @@
 use std::{ffi::OsString, net::SocketAddr, path::PathBuf};
 
 use clap::{ArgGroup, Parser, ValueEnum};
-use weld_app::{Backend, OutputScale};
+use weld_app::{ActiveBackend, Backend, OutputScale};
 use weld_hoist_local::LocalSurfaceMode;
 use weld_media::VideoCodec;
 
 const DEFAULT_REMOTE_ADDRESS: &str = "127.0.0.1:15702";
+
+pub(crate) fn graphical_socket_name(
+    explicit: Option<&str>,
+    backend: ActiveBackend,
+    process_id: u32,
+) -> String {
+    explicit.map_or_else(
+        || match backend {
+            ActiveBackend::Nested => format!("weld-nested-{process_id}"),
+            ActiveBackend::Drm => "weld-0".into(),
+        },
+        str::to_owned,
+    )
+}
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
 pub enum LegacyKeyRepeatArgument {
@@ -144,12 +158,12 @@ impl BackendKind {
     ]).multiple(false))
 )]
 pub struct AppArguments {
-    /// Required configuration file for graphical weldwm. Unsupported Sway features
-    /// warn and skip. Headless sessions do not use configuration.
+    /// Configuration file. Defaults to WELD_CONFIG, XDG Weld config, then
+    /// examples/master.sway.config in the working directory. Headless hosts need no config.
     #[arg(long, value_name = "PATH")]
     pub(crate) config: Option<PathBuf>,
     /// Validate configuration and report skipped features without starting Weld or applications.
-    #[arg(long, requires = "config")]
+    #[arg(long)]
     pub(crate) validate_config: bool,
     /// Legacy repeat fallback: client timers, disabled, or emulated key edges. Defaults to client;
     /// WELD_LEGACY_KEY_REPEAT supplies a default when this option is absent.
@@ -195,7 +209,8 @@ pub struct AppArguments {
     #[arg(long, value_name = "FACTOR")]
     pub(crate) scale: Option<OutputScale>,
 
-    /// Wayland socket name exposed by this compositor instance.
+    /// Wayland/control session name. Defaults to weld-nested-PID for nested
+    /// graphical hosts, weld-0 for DRM/headless. Explicit names must be available.
     #[arg(long, value_name = "NAME")]
     pub(crate) wayland_socket: Option<String>,
 
