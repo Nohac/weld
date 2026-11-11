@@ -136,7 +136,8 @@ PipeWire and WirePlumber must be running for the opt-in audio integration tests;
 those tests use private outputs and silent routing probes. See [Application audio](docs/audio.md).
 
 Hardware media work requires FFmpeg development/runtime libraries, libva
-development/runtime libraries, `libva-utils`, Clang, and bindgen. In
+development/runtime libraries (libva package 2.23 or newer), `libva-utils`, Clang,
+and bindgen. `weld-vaapi` generates its private ABI from those system headers. In
 particular, `libavcodec`, `libavfilter`, `libavformat`, and `libavutil` must be
 visible to `pkg-config`; they are required by ordinary workspace checks because
 the standard distribution includes encoded hoisting. On NixOS, the shared Rust

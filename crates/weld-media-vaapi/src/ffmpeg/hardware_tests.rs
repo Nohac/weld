@@ -20,7 +20,7 @@ fn ffmpeg_upload_decode_mapping_preserves_pixels_modifiers_and_lifetimes() -> Re
     let decoding = FfmpegVaapiDevice::open(&render_node)?;
     let (width, height) = (98, 74);
     for codec in [VideoCodec::H264, VideoCodec::Av1] {
-        let geometry = device.encode_geometry(codec)?;
+        let geometry = crate::probe::query_encode_geometry(&device, codec)?;
         let settings = VaapiEncoderSettings::try_new(codec, 2_000_000, 60, 32)?;
         let mut encoder = FfmpegEncoder::new(settings, geometry, &encoding, width, height)?;
         let mut decoder = FfmpegDecoder::new(codec, &decoding, 2)?;
@@ -58,8 +58,8 @@ fn ffmpeg_upload_decode_mapping_preserves_pixels_modifiers_and_lifetimes() -> Re
                     .all(|object| object.modifier == 0)
             );
             assert!(frame.coded_width >= width && frame.coded_height >= height);
-            let reference =
-                reference_encoder.encode(vpp.upload_bgra(width, height, &pixels)?, pts)?;
+            let uploaded = vpp.upload_bgra(width, height, &pixels)?;
+            let reference = reference_encoder.encode(uploaded, pts)?;
             let reference = reference_decoder.submit(&reference.payload, pts)?.finish(
                 width,
                 height,
@@ -75,10 +75,10 @@ fn ffmpeg_upload_decode_mapping_preserves_pixels_modifiers_and_lifetimes() -> Re
         // Earlier outputs remain readable after subsequent submissions and codec retirement.
         for (sequence, (frame, reference, bgra)) in retained.iter().enumerate() {
             let path = artifacts.join(format!("{codec:?}-{sequence}.ppm"));
-            vpp.write_xrgb_ppm(frame, width, height, &path)?;
+            crate::diagnostics::write_xrgb_ppm(&vpp, frame, width, height, &path)?;
             let bytes = fs::read(path)?;
             let reference_path = artifacts.join(format!("{codec:?}-{sequence}-reference.ppm"));
-            vpp.write_xrgb_ppm(reference, width, height, &reference_path)?;
+            crate::diagnostics::write_xrgb_ppm(&vpp, reference, width, height, &reference_path)?;
             let reference_bytes = fs::read(reference_path)?;
             let header = format!("P6\n{width} {height}\n255\n");
             assert!(bytes.starts_with(header.as_bytes()));

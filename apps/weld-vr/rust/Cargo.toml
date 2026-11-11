@@ -41,9 +41,6 @@ pkg-config = "0.3"
 [workspace]
 
 # Reuse the compositor's libva-header compatibility fixes in this isolated workspace.
-[patch.crates-io]
-cros-libva = { path = "../../../vendor/cros-libva" }
-
 [profile.dev]
 opt-level = 3
 debug = 1

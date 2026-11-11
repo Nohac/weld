@@ -230,16 +230,11 @@ a multi-stream peak by an unrelated whole-run decode average. No transport,
 encoder pacing, protocol revision, network ACK or dynamic bitrate change is
 part of this slice.
 
-For a bounded native comparison, run `scripts/run-vaapi-roundtrip-probe`. It
-pre-encodes eight identical inputs per codec, replays depths one, two, two, one
-with pass labels to compare both arm orders,
-then validates every output's timestamp, size, format and sampled pixels. The
-last prefetched frame is explicitly finished. Each frame reports submission,
-pending, decoded-surface sync, VPP setup/submission and VPP output-sync wall time.
-Pixel readback and printing are outside replay timing. Frame zero is marked as
-startup; this small, always-backlogged test is not a steady-state 60fps benchmark.
-Depth one reserves one extra hardware frame and is therefore not byte-identical
-to the previous binary. Repeat runs before interpreting small differences.
+The former round-trip probe compared depths one, two, two, one with pass labels
+and recorded per-stage wall time. That diagnostic was retired with the cros
+vendor cleanup; its observations below are historical. Current offscreen
+production-path validation is documented in [FFmpeg consolidation](ffmpeg-consolidation.md).
+Those correctness tests do not establish steady-state 60fps performance.
 
 The pipeline retains both explicit GPU waits, the separate VA displays, fresh
 XRGB allocations and per-frame VPP contexts. It changes when waits occur relative

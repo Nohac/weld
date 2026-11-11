@@ -813,9 +813,9 @@ so it can reconnect, reclaim, or fail visibly rather than freezing stale media.
 ## Codec and media implementation candidates — Exploration
 
 [FFmpeg](https://ffmpeg.org/ffmpeg.html) with VA-API is the selected initial
-Linux implementation for H.264 and AV1. cros-codecs remains useful as an
-independent diagnostic reference, and narrower native or Vulkan Video backends
-may implement the same contract later.
+Linux implementation for H.264 and AV1. The earlier cros-codecs diagnostic
+reference has been retired; narrower native or Vulkan Video backends may
+implement the same contract later.
 Android destinations should evaluate MediaCodec behind the same neutral media
 contract rather than expose an Android API through the wire protocol.
 

@@ -130,21 +130,19 @@ stages have not been isolated. The wider, edge-only assertion records this
 accepted quality limitation while still detecting substantially worse output.
 It does not establish pixel-perfect edges or validate chroma fidelity.
 
+Current offscreen validation (select a real render node in the development shell):
+
 ```sh
-cargo test -p weld-media-vaapi --lib -j2
-cargo test -p weld-hoist-encoded --features vaapi --lib -j2
-cargo build -p weld-media-vaapi --features diagnostic --example vaapi_roundtrip_probe -j2
-ulimit -c 0
-timeout --signal=TERM --kill-after=3s 30s cargo run --quiet \
-  -p weld-media-vaapi --features diagnostic --example vaapi_roundtrip_probe
-scripts/run-headless-iroh-hoist --codec av1 --app foot --seconds 20
+cargo test -p weldwm -p weld-media-vaapi -p weld-hoist-encoded --lib
+WELD_TEST_RENDER_NODE=/dev/dri/renderD128 cargo test \
+  -p weldwm -p weld-media-vaapi -p weld-vaapi --lib -- --ignored --nocapture
 ```
 
-Hardware tests require a compatible development shell and real render-node
-access. Even bounded tests can reset a faulty GPU and affect other processes;
-do not run them as unattended CI. These tests write no video dumps. A timeout
-is not proof that a GPU workload was cancelled. The headless launcher owns
-and cleans up its test processes and disables core dumps.
+The former diagnostic round-trip example was retired with the cros vendor
+cleanup. The dated evidence below describes that earlier probe, including cases
+beyond the current small-frame regression. Current tests write PPM comparisons
+under `target/validation/ffmpeg-consolidation`; see
+[FFmpeg consolidation](ffmpeg-consolidation.md) for scope and limitations.
 
 ### Workaround validation on 2026-09-12
 

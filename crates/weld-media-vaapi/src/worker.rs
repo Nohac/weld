@@ -168,7 +168,7 @@ impl EncodeGeometryCache {
         if let Some(geometry) = *cached {
             return Ok(geometry);
         }
-        let geometry = device.encode_geometry(codec)?;
+        let geometry = crate::probe::query_encode_geometry(device, codec)?;
         *cached = Some(geometry);
         Ok(geometry)
     }
@@ -358,7 +358,8 @@ fn dump_encode_source(
         frame.generation.raw(),
         frame.sequence
     );
-    vpp.write_xrgb_ppm(
+    crate::diagnostics::write_xrgb_ppm(
+        vpp,
         source,
         visible_size.0,
         visible_size.1,

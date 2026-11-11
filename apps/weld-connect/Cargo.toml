@@ -47,7 +47,6 @@ jni = "0.22.4"
 log = "0.4"
 
 [patch.crates-io]
-cros-libva = { path = "../../vendor/cros-libva" }
 anyrender_vello_hybrid = { path = "../../vendor/anyrender-vello-hybrid" }
 
 [profile.dev]

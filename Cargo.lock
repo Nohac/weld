@@ -2160,26 +2160,6 @@ dependencies = [
 
 [[package]]
 name = "bindgen"
-version = "0.70.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f49d8fed880d473ea71efb9bf597651e77201bdd4893efe54c9e5d65ae04ce6f"
-dependencies = [
- "bitflags 2.13.1",
- "cexpr",
- "clang-sys",
- "itertools 0.13.0",
- "log",
- "prettyplease",
- "proc-macro2",
- "quote",
- "regex",
- "rustc-hash 1.1.0",
- "shlex 1.3.0",
- "syn 2.0.119",
-]
-
-[[package]]
-name = "bindgen"
 version = "0.72.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "993776b509cfb49c750f11b8f07a46fa23e0a1386ffc01fb1e7d343efc387895"
@@ -2189,6 +2169,8 @@ dependencies = [
  "cexpr",
  "clang-sys",
  "itertools 0.13.0",
+ "log",
+ "prettyplease",
  "proc-macro2",
  "quote",
  "regex",
@@ -2440,12 +2422,6 @@ name = "cfg-if"
 version = "1.0.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9330f8b2ff13f34540b44e946ef35111825727b38d33286ef986142615121801"
-
-[[package]]
-name = "cfg_aliases"
-version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "fd16c4719339c4530435d38e511904438d07cce7950afa3718a84ac36c10e89e"
 
 [[package]]
 name = "cfg_aliases"
@@ -2809,36 +2785,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "790eea4361631c5e7d22598ecd5723ff611904e3344ce8720784c93e3d83d40b"
 
 [[package]]
-name = "cros-codecs"
-version = "0.0.6"
-dependencies = [
- "anyhow",
- "byteorder",
- "crc32fast",
- "cros-libva",
- "drm 0.12.0",
- "drm-fourcc",
- "gbm 0.15.0",
- "gbm-sys 0.3.1",
- "log",
- "nix 0.28.0",
- "thiserror 1.0.69",
- "zerocopy",
-]
-
-[[package]]
-name = "cros-libva"
-version = "0.0.12"
-dependencies = [
- "bindgen 0.70.1",
- "bitflags 2.13.1",
- "log",
- "pkg-config",
- "regex",
- "thiserror 1.0.69",
-]
-
-[[package]]
 name = "crossbeam-channel"
 version = "0.5.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3180,19 +3126,6 @@ name = "dpi"
 version = "0.1.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d8b14ccef22fc6f5a8f4d7d768562a182c04ce9a3b3157b91390b52ddfdf1a76"
-
-[[package]]
-name = "drm"
-version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "98888c4bbd601524c11a7ed63f814b8825f420514f78e96f752c437ae9cbb5d1"
-dependencies = [
- "bitflags 2.13.1",
- "bytemuck",
- "drm-ffi 0.8.0",
- "drm-fourcc",
- "rustix 0.38.44",
-]
 
 [[package]]
 name = "drm"
@@ -3553,7 +3486,7 @@ version = "9.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b939bf79dd5949412a4b81cfe21a07f48ea21b47fcbb5f57816c8c2de5ae30b"
 dependencies = [
- "bindgen 0.72.1",
+ "bindgen",
  "cc",
  "libc",
  "num_cpus",
@@ -3825,19 +3758,6 @@ dependencies = [
 
 [[package]]
 name = "gbm"
-version = "0.15.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "45bf55ba6dd53ad0ac115046ff999c5324c283444ee6e0be82454c4e8eb2f36a"
-dependencies = [
- "bitflags 2.13.1",
- "drm 0.12.0",
- "drm-fourcc",
- "gbm-sys 0.3.1",
- "libc",
-]
-
-[[package]]
-name = "gbm"
 version = "0.18.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ce852e998d3ca5e4a97014fb31c940dc5ef344ec7d364984525fd11e8a547e6a"
@@ -3845,16 +3765,7 @@ dependencies = [
  "bitflags 2.13.1",
  "drm 0.14.1",
  "drm-fourcc",
- "gbm-sys 0.4.0",
- "libc",
-]
-
-[[package]]
-name = "gbm-sys"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a9cc2f64de9fa707b5c6b2d2f10d7a7e49e845018a9f5685891eb40d3bab2538"
-dependencies = [
+ "gbm-sys",
  "libc",
 ]
 
@@ -4775,7 +4686,7 @@ dependencies = [
  "backon",
  "blake3",
  "bytes",
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "ctutils",
  "data-encoding",
  "derive_more",
@@ -4842,7 +4753,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9a41224eb0140a5c519935d4073fc6b236d174080be401f9bf7da126b2ee3aa4"
 dependencies = [
  "arc-swap",
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "derive_more",
  "hickory-resolver",
  "iroh-base",
@@ -4894,7 +4805,7 @@ checksum = "1b5f6f07e2c9b0c4bc82e2864be09f4aea4320165d5316e668616dbc822f428a"
 dependencies = [
  "blake3",
  "bytes",
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "data-encoding",
  "derive_more",
  "getrandom 0.4.3",
@@ -5412,7 +5323,7 @@ version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3b6e17bdaf63ed0d5e4144022624032b41fd9733112e8c74ac26fc9bf1291924"
 dependencies = [
- "bindgen 0.72.1",
+ "bindgen",
  "cc",
  "system-deps 7.0.8",
 ]
@@ -5691,7 +5602,7 @@ version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e2ab99dfb861450e68853d34ae665243a88b8c493d01ba957321a1e9b2312bbe"
 dependencies = [
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "derive_more",
  "futures-buffered",
  "futures-lite",
@@ -5727,7 +5638,7 @@ dependencies = [
  "bit-set",
  "bitflags 2.13.1",
  "cfg-if",
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "codespan-reporting",
  "half",
  "hashbrown 0.17.1",
@@ -5924,7 +5835,7 @@ checksum = "39da9cad5f23aa43401f09497d3b280e51b5feba115d9ffbf38ca35d6ff95e96"
 dependencies = [
  "atomic-waker",
  "bytes",
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "derive_more",
  "ipnet",
  "js-sys",
@@ -5956,25 +5867,13 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ab2156c4fce2f8df6c499cc1c763e4394b7482525bf2a9701c9d79d215f519e4"
-dependencies = [
- "bitflags 2.13.1",
- "cfg-if",
- "cfg_aliases 0.1.1",
- "libc",
-]
-
-[[package]]
-name = "nix"
 version = "0.29.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "71e2746dc3a24dd78b3cfcb7be93368c6de9963d30f43a6a73998a9cf4b17b46"
 dependencies = [
  "bitflags 2.13.1",
  "cfg-if",
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "libc",
 ]
 
@@ -5986,7 +5885,7 @@ checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
 dependencies = [
  "bitflags 2.13.1",
  "cfg-if",
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "libc",
 ]
 
@@ -6022,7 +5921,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f1e6c57353d26be91a242f0ec96073066c4481a03f6be874daafb18902394515"
 dependencies = [
  "bytes",
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "derive_more",
  "noq-proto",
  "noq-udp",
@@ -6070,7 +5969,7 @@ version = "1.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b56d621ed2c1773b5356ab39cc68c819f8d0103f7493d8661c4a5f5f8ea55f40"
 dependencies = [
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "libc",
  "socket2",
  "tracing",
@@ -6863,7 +6762,7 @@ version = "0.10.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9ce653f53e63e5b93853218092ee9a8906a5d082c92f3f1db26316955dd63ce0"
 dependencies = [
- "bindgen 0.72.1",
+ "bindgen",
  "libspa-sys",
  "system-deps 7.0.8",
 ]
@@ -8161,7 +8060,7 @@ dependencies = [
  "drm-sys 0.8.1",
  "encoding_rs",
  "errno",
- "gbm 0.18.0",
+ "gbm",
  "glam",
  "indexmap",
  "input",
@@ -10003,12 +9902,11 @@ name = "weld-media-vaapi"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "cros-codecs",
- "cros-libva",
  "ffmpeg-next",
  "libc",
  "tracing",
  "weld-media",
+ "weld-vaapi",
 ]
 
 [[package]]
@@ -10206,6 +10104,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "weld-vaapi"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bindgen",
+ "pkg-config",
+ "tracing",
+]
+
+[[package]]
 name = "weld-window"
 version = "0.1.0"
 dependencies = [
@@ -10351,7 +10259,7 @@ dependencies = [
  "bitflags 2.13.1",
  "bytemuck",
  "cfg-if",
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "document-features",
  "hashbrown 0.17.1",
  "log",
@@ -10377,7 +10285,7 @@ dependencies = [
  "bit-vec",
  "bitflags 2.13.1",
  "bytemuck",
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "document-features",
  "hashbrown 0.17.1",
  "indexmap",
@@ -10431,7 +10339,7 @@ dependencies = [
  "block2 0.6.2",
  "bytemuck",
  "cfg-if",
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "drm 0.15.0",
  "gpu-allocator",
  "hashbrown 0.17.1",
@@ -10913,7 +10821,7 @@ dependencies = [
  "block2 0.5.1",
  "bytemuck",
  "calloop 0.13.0",
- "cfg_aliases 0.2.2",
+ "cfg_aliases",
  "concurrent-queue",
  "core-foundation 0.9.4",
  "core-graphics",

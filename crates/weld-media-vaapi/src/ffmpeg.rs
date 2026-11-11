@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{VaapiDmabuf, VaapiEncodeGeometry, VppConverter, VppOutput};
+use crate::{VaapiDmabuf, VaapiEncodeGeometry, VppConverter};
 use anyhow::{Context, Result, bail, ensure};
 use ffmpeg_next::{Error as FfmpegError, ffi};
 use weld_media::{EncodedFrameKind, VideoCodec};
@@ -347,16 +347,9 @@ impl PendingDecodedFrame {
             "decoded extent is smaller than its transported visible extent"
         );
         // Keep the AVFrame and exported input alive through VPP completion.
-        let (dmabuf, timing) = vpp.convert_scaled_timed(
-            &source,
-            visible_width,
-            visible_height,
-            visible_width,
-            visible_height,
-            VppOutput::Xrgb8888 {
-                modifiers: xrgb_modifiers.to_vec(),
-            },
-        )?;
+        let converted = vpp.convert(&source, visible_width, visible_height, xrgb_modifiers)?;
+        let dmabuf = converted.buffer;
+        let timing = converted.timing;
         Ok(DecodedPacket {
             timestamp_micros: self.timestamp_micros,
             coded_width: source.width,

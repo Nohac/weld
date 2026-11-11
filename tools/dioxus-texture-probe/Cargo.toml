@@ -45,7 +45,6 @@ weld-hoist-encoded = { path = "../../crates/weld-hoist-encoded", features = ["an
 weld-media-vaapi = { path = "../../crates/weld-media-vaapi" }
 
 [patch.crates-io]
-cros-libva = { path = "../../vendor/cros-libva" }
 anyrender_vello_hybrid = { path = "../../vendor/anyrender-vello-hybrid" }
 # Shared native renderer fixes; provenance/removal in vendor/anyrender-vello-hybrid/README.weld.md.
 

@@ -124,6 +124,14 @@ eventually inherit demand and cadence from its destination instead; source
 local backpressure prevents that mismatch from becoming unbounded media work but
 does not yet stop the hidden source client from rendering coalesced frames.
 
+### Historical codec investigations
+
+The following cros-codecs/GStreamer/FFmpeg comparisons record the 2026
+investigation, not current implementation or runnable tools. The cros vendors,
+patches, and standalone comparison runners were removed on 2026-11-11 after
+FFmpeg became the production codec owner. Current validation uses the offscreen
+tests in [FFmpeg consolidation](ffmpeg-consolidation.md).
+
 An August 31, 2026 Blender input-stress trace on the Radeon 880M validated the
 credit stopgap for 55 seconds without queue failure: 1,591 one-layer commits
 were decoded and applied while 1,795 newer commits coalesced at the source.
@@ -158,7 +166,7 @@ bitrate is not binding; it is not mixed into this comparison. Automatic
 per-device round-trip validation remains deferred to the capability-negotiation
 pass, where peers should advertise only profiles that survive validation.
 
-### Independent GStreamer encoder probe
+### Retired GStreamer encoder probe
 
 `scripts/run-gstreamer-vaapi-probe` is an isolated diagnostic comparison, not a
 Weld runtime dependency or a production codec decision. Its standalone Cargo
@@ -166,7 +174,7 @@ workspace feeds the same deterministic XRGB DMA-BUF frames to Weld's patched
 cros-codecs H.264 path and to GStreamer's VA-API H.264 path. The runner rejects
 system-memory negotiation, software-decodes both streams, checks range anchors,
 SPS geometry and profile, measures PSNR, and records the executable, plugin,
-linkage, and Nix closure footprint. Run it with:
+linkage, and Nix closure footprint. Historical invocation:
 
 ```sh
 scripts/run-gstreamer-vaapi-probe
@@ -211,7 +219,7 @@ substantial runtime and packaging commitment compared with a narrow codec
 adapter. GStreamer remains useful as an independent implementation oracle;
 FFmpeg, Vulkan Video, and narrower native backends remain production candidates.
 
-### Independent FFmpeg encoder probe
+### Retired FFmpeg encoder probe
 
 `scripts/run-ffmpeg-vaapi-probe` is a second standalone diagnostic. It uses
 `ffmpeg-next` for version and linkage integration and keeps the unavoidable
@@ -221,7 +229,7 @@ FFmpeg boundary. The probe wraps owned XRGB DMA-BUFs as
 device, supplies it to `hwmap`, performs the RGB to limited-range NV12
 conversion with `scale_vaapi`, and feeds those hardware
 frames directly to the selected `av1_vaapi` or `h264_vaapi` encoder. It does
-not map the source or normalized frame into CPU memory. Run it with:
+not map the source or normalized frame into CPU memory. Historical invocation:
 
 ```sh
 scripts/run-ffmpeg-vaapi-probe

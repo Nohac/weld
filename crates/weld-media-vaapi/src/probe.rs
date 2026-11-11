@@ -1,31 +1,9 @@
 use std::{error::Error, fmt, path::Path};
 
 use anyhow::{Context, ensure};
-use cros_libva::{
-    Config, Display, GenericValue, VA_STATUS_ERROR_UNSUPPORTED_PROFILE, VAEntrypoint, VAProfile,
-    VASurfaceAttribType, VaError,
-};
 use weld_media::VideoCodec;
-
-/// Hardware H.264 entrypoint selected on one VA-API device.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum VaapiEncodeEntrypoint {
-    Slice,
-    LowPowerSlice,
-}
-
-impl VaapiEncodeEntrypoint {
-    const fn va_entrypoint(self) -> VAEntrypoint::Type {
-        match self {
-            Self::Slice => VAEntrypoint::VAEntrypointEncSlice,
-            Self::LowPowerSlice => VAEntrypoint::VAEntrypointEncSliceLP,
-        }
-    }
-
-    pub const fn is_low_power(self) -> bool {
-        matches!(self, Self::LowPowerSlice)
-    }
-}
+pub use weld_vaapi::EncodeEntrypoint as VaapiEncodeEntrypoint;
+use weld_vaapi::{Profile, VaapiDevice};
 
 /// Queried encoder limits plus Weld's conservative coded-geometry policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -159,62 +137,50 @@ impl Error for VaapiProbeError {}
 pub fn probe_vaapi_device(
     render_node: impl AsRef<Path>,
 ) -> Result<VaapiCapabilities, VaapiProbeError> {
-    let display = Display::open_drm_display(render_node.as_ref()).map_err(|error| {
+    let device = VaapiDevice::open(render_node.as_ref()).map_err(|error| {
         VaapiProbeError::Environment(format!(
-            "could not open {}: {error}",
+            "could not open {}: {error:#}",
             render_node.as_ref().display()
         ))
     })?;
-    let vendor = display
-        .query_vendor_string()
-        .map_err(|error| VaapiProbeError::Operation(error.to_owned()))?;
-
-    let h264 = supported_entrypoints(&display, VAProfile::VAProfileH264ConstrainedBaseline)?;
-    let h264_encode = select_encode_entrypoint(&h264);
-    let h264_decode = h264.contains(&VAEntrypoint::VAEntrypointVLD);
-    let av1 = supported_entrypoints(&display, VAProfile::VAProfileAV1Profile0)?;
-    let av1_encode = select_encode_entrypoint(&av1);
-    let av1_decode = av1.contains(&VAEntrypoint::VAEntrypointVLD);
-    let video_processing = supported_entrypoints(&display, VAProfile::VAProfileNone)?
-        .contains(&VAEntrypoint::VAEntrypointVideoProc);
-
+    let query = || -> anyhow::Result<_> {
+        Ok((
+            device.vendor()?,
+            device.profile(Profile::H264ConstrainedBaseline)?,
+            device.profile(Profile::Av1Main)?,
+            device.supports_processing()?,
+        ))
+    };
+    let (vendor, h264, av1, video_processing) =
+        query().map_err(|error| VaapiProbeError::Operation(format!("{error:#}")))?;
     Ok(VaapiCapabilities {
         vendor,
-        h264_decode,
-        h264_encode,
-        av1_decode,
-        av1_encode,
+        h264_decode: h264.decode,
+        h264_encode: h264.encode,
+        av1_decode: av1.decode,
+        av1_encode: av1.encode,
         video_processing,
     })
 }
 
 pub(crate) fn query_encode_geometry(
-    display: &std::rc::Rc<Display>,
+    device: &VaapiDevice,
     codec: VideoCodec,
 ) -> anyhow::Result<VaapiEncodeGeometry> {
     let profile = match codec {
-        VideoCodec::H264 => VAProfile::VAProfileH264ConstrainedBaseline,
-        VideoCodec::Av1 => VAProfile::VAProfileAV1Profile0,
+        VideoCodec::H264 => Profile::H264ConstrainedBaseline,
+        VideoCodec::Av1 => Profile::Av1Main,
         VideoCodec::Vp9 => anyhow::bail!("VP9 VA-API encoding is not implemented"),
     };
-    let entrypoints = display
-        .query_config_entrypoints(profile)
-        .map_err(anyhow::Error::new)?;
-    let entrypoint = select_encode_entrypoint(&entrypoints).ok_or_else(|| {
-        anyhow::anyhow!("VA-API exposes no supported {codec:?} encode entrypoint")
-    })?;
-    let mut config = display
-        .create_config(Vec::new(), profile, entrypoint.va_entrypoint())
-        .map_err(anyhow::Error::new)?;
-    let mut minimum_width =
-        query_dimension(&mut config, VASurfaceAttribType::VASurfaceAttribMinWidth)?;
-    let mut minimum_height =
-        query_dimension(&mut config, VASurfaceAttribType::VASurfaceAttribMinHeight)?;
-    let maximum_width = query_dimension(&mut config, VASurfaceAttribType::VASurfaceAttribMaxWidth)?
-        .unwrap_or(i32::MAX as u32);
-    let maximum_height =
-        query_dimension(&mut config, VASurfaceAttribType::VASurfaceAttribMaxHeight)?
-            .unwrap_or(i32::MAX as u32);
+    let entrypoint = device
+        .profile(profile)?
+        .encode
+        .context("VA-API exposes no supported encode entrypoint")?;
+    let limits = device.encode_limits(profile, entrypoint)?;
+    let mut minimum_width = limits.minimum_width;
+    let mut minimum_height = limits.minimum_height;
+    let maximum_width = limits.maximum_width.unwrap_or(i32::MAX as u32);
+    let maximum_height = limits.maximum_height.unwrap_or(i32::MAX as u32);
     if codec == VideoCodec::Av1 {
         minimum_width.get_or_insert(128);
         minimum_height.get_or_insert(128);
@@ -239,47 +205,6 @@ pub(crate) fn query_encode_geometry(
         maximum_width,
         maximum_height,
     })
-}
-
-fn select_encode_entrypoint(entrypoints: &[VAEntrypoint::Type]) -> Option<VaapiEncodeEntrypoint> {
-    if entrypoints.contains(&VAEntrypoint::VAEntrypointEncSlice) {
-        Some(VaapiEncodeEntrypoint::Slice)
-    } else if entrypoints.contains(&VAEntrypoint::VAEntrypointEncSliceLP) {
-        Some(VaapiEncodeEntrypoint::LowPowerSlice)
-    } else {
-        None
-    }
-}
-
-fn query_dimension(
-    config: &mut Config,
-    attribute: VASurfaceAttribType::Type,
-) -> anyhow::Result<Option<u32>> {
-    let values = config
-        .query_surface_attributes_by_type(attribute)
-        .map_err(anyhow::Error::new)?;
-    match values.as_slice() {
-        [] => Ok(None),
-        [GenericValue::Integer(value)] if *value > 0 => Ok(Some(u32::try_from(*value)?)),
-        [GenericValue::Integer(_)] => Ok(None),
-        [_] => anyhow::bail!("VA-API encoder geometry attribute is not an integer"),
-        _ => anyhow::bail!("VA-API encoder returned duplicate geometry attributes"),
-    }
-}
-
-fn supported_entrypoints(
-    display: &Display,
-    profile: VAProfile::Type,
-) -> Result<Vec<VAEntrypoint::Type>, VaapiProbeError> {
-    match display.query_config_entrypoints(profile) {
-        Ok(entrypoints) => Ok(entrypoints),
-        Err(error) if is_unsupported_profile(&error) => Ok(Vec::new()),
-        Err(error) => Err(VaapiProbeError::Operation(error.to_string())),
-    }
-}
-
-fn is_unsupported_profile(error: &VaError) -> bool {
-    error.va_status() as u32 == VA_STATUS_ERROR_UNSUPPORTED_PROFILE
 }
 
 #[cfg(test)]

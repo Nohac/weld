@@ -54,7 +54,13 @@ quietly accepting an incompatible modifier is not part of this migration.
 The Rust FFmpeg bindings also expose `VASurfaceAttrib` as an opaque type, so
 constructing VA-specific allocation attributes would need additional bindings.
 Capability enumeration and codec-specific geometry queries remain another direct
-libva boundary. Neither vendored VA crate is removed in this batch.
+libva boundary. These operations now live in `weld-vaapi`, whose safe API covers only queries,
+DMA-BUF ownership, modifier-controlled conversion, and diagnostic image access.
+Both vendored cros crates, the old diagnostic codec and its comparison tools were
+removed on 2026-11-11. Adapted resource-lifetime code retains the upstream BSD
+license and provenance in `crates/weld-vaapi/UPSTREAM.md`. Bindings are generated
+from installed libva >= 1.23 headers (package version 2.23), including only the
+required ABI. No codec parameter structures are maintained by Weld.
 
 ## Validation
 
@@ -75,8 +81,7 @@ windows. Select the render node explicitly:
 
 ```sh
 WELD_TEST_RENDER_NODE=/dev/dri/renderD128 cargo test \
-  -p weldwm -p weld-media-vaapi --lib \
-  ffmpeg_upload_decode_mapping_preserves -- --ignored --nocapture
+  -p weldwm -p weld-media-vaapi -p weld-vaapi --lib -- --ignored --nocapture
 ```
 
 PPM evidence is written to `target/validation/ffmpeg-consolidation/`. The initial
@@ -87,3 +92,14 @@ outputs after codec retirement. This is equivalence to the existing path, not a 
 codec or color-fidelity claim: the first comparison with original saturated RGB
 values exposed the same deviation in both paths. Performance is not established
 by these bounded correctness tests.
+
+The utility also checks exact mapped-image upload/readback after converter
+retirement; that test passed. Successful extraction runs reproduced all twelve
+saved pre-extraction PPMs byte for byte. Repeated untraced comparisons exposed an
+intermittent AV1 frame-1 edge difference of 33 channel levels in both binaries:
+the unchanged binary failed twice and passed once; the extracted binary passed
+once, failed the same pixel check once, and aborted once with a radeonsi hard
+recovery during FFmpeg AV1 encoding. GPU tests were then stopped. This validates
+neither stable AV1 driver behavior nor a clean hardware suite. The pixel test
+retains its strict tolerance; resolving the AV1 instability remains separate
+from the utility extraction. Logs are under `target/validation/vaapi-utility-*`.

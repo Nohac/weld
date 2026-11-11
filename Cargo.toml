@@ -51,6 +51,7 @@ members = [
   "crates/weld-media",
   "crates/weld-media-android",
   "crates/weld-media-vaapi",
+  "crates/weld-vaapi",
   "crates/weld-ssd",
   "crates/weld-sway-config",
   "crates/weld-sway-ipc",
@@ -90,8 +91,6 @@ bevy_ui_render = { version = "=0.20.0", default-features = false }
 bevy_winit = { version = "=0.20.0", default-features = false }
 calloop = { version = "0.14.4", features = ["signals"] }
 clap = { version = "4.5", features = ["derive"] }
-cros-codecs = { version = "=0.0.6", features = ["vaapi"] }
-cros-libva = "=0.0.12"
 cursor-icon = "1.2.0"
 ffmpeg-next = { version = "=9.0.0", default-features = false, features = ["format"] }
 futures-lite = "2.6.1"
@@ -196,8 +195,6 @@ strip = "none"
 [patch.crates-io]
 bevy_render = { path = "vendor/bevy-render" }
 bevy_ui = { path = "vendor/bevy-ui" }
-cros-libva = { path = "vendor/cros-libva" }
-cros-codecs = { path = "vendor/cros-codecs" }
 
 [[bench]]
 name = "shell_main"
