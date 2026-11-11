@@ -1493,6 +1493,11 @@ mod tests {
         },
     };
     #[cfg(feature = "test-support")]
+    use weld_client::{
+        ClientOutputId, ClientSurfaceRole, DesktopLayer, LayerKeyboardInteractivity,
+        LayerSurfaceState,
+    };
+    #[cfg(feature = "test-support")]
     use weld_core::{
         OutputConfiguration, OutputId, OutputScale,
         host::{CompositionDestination, CompositionOutputRequest},
@@ -3149,6 +3154,68 @@ mod tests {
                 > 0,
             "stable fixture must exercise reuse"
         );
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn idle_layer_resize_is_drawn_without_another_client_commit() {
+        let (mut shell, _, device, queue) = crate::benchmark::rendering_shell_with_outputs(
+            vec![diagnostic_output(
+                PRIMARY_OUTPUT_ID,
+                LogicalPoint::ZERO,
+                true,
+                0.0,
+            )],
+            |_| {},
+        )
+        .expect("diagnostic GPU shell");
+        let surface = SurfaceId::for_test(1);
+        shell.enqueue_client_event(ClientSurfaceEvent {
+            surface,
+            kind: ClientSurfaceEventKind::Role(ClientSurfaceRole::Layer(LayerSurfaceState {
+                output: ClientOutputId::new(PRIMARY_OUTPUT_ID.raw()),
+                position: weld_client::LogicalPoint::ZERO,
+                layer: DesktopLayer::Top,
+                keyboard: LayerKeyboardInteractivity::None,
+                stack_index: 0,
+            })),
+        });
+        update_diagnostic_surface(&mut shell, surface, [0, 255, 0, 255]);
+        let mut frames = Vec::new();
+        // Warm up pipelines once, as an already-visible idle panel would have done.
+        for tick in 0..8 {
+            shell.advance_main(tick);
+            shell
+                .render_outputs(&[owned_request(PRIMARY_OUTPUT_ID)], &mut frames)
+                .expect("warmup");
+        }
+        for (tick, size) in [(10, 48), (20, 24), (30, 56), (40, 32)] {
+            let extent = size * 2;
+            shell.update_output_topology(&[OutputConfiguration::new(
+                PRIMARY_OUTPUT_ID,
+                Extent::new(extent, extent),
+                OutputScale::default(),
+                LogicalPoint::ZERO,
+                true,
+                None,
+            )
+            .expect("resized output")]);
+            shell.advance_main(tick - 1);
+            shell
+                .render_outputs(&[owned_request(PRIMARY_OUTPUT_ID)], &mut frames)
+                .expect("output resized before panel commit");
+            update_diagnostic_surface_extent(&mut shell, surface, size, |_, _| [0, 255, 0, 255]);
+            shell.advance_main(tick);
+            shell
+                .render_outputs(&[owned_request(PRIMARY_OUTPUT_ID)], &mut frames)
+                .expect("resized panel");
+            // Read the submitted frame directly; requesting another render would hide the bug.
+            let pixels =
+                weld_core::renderer::read_owned_frame_rgba(&device, &queue, &frames[0].frame)
+                    .expect("panel readback");
+            let offset = (16 * extent as usize + 16) * 4;
+            assert_eq!(&pixels[offset..offset + 4], &[0, 255, 0, 255]);
+        }
     }
 
     #[cfg(feature = "test-support")]

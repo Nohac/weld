@@ -58,6 +58,16 @@ Rofi, use Alt+2 and Alt+Enter to populate another workspace, click between them
 on the bar, and try Alt+Space to reopen Rofi. Alt+Shift+R should retain one bar.
 Logical Alt is the physical Windows key with the example's configured swaps.
 
+Resizing an idle SHM-backed panel must draw its new buffer in the same frame.
+Weld installs uploaded SHM images before Bevy's image-asset preparation, which
+orders dependent UI material preparation after those images are available.
+Without that dependency, a material could be deferred until another render while
+the idle panel supplied no further commits, leaving the bar invisible. This was
+reproduced with the default Waybar configuration and fixed without extra redraws.
+An offscreen pixel regression covers output resize followed by a single panel
+commit; a private nested validation kept the default bar visible through 24
+consecutive resizes.
+
 Native protocol regression tests require a valid `XDG_RUNTIME_DIR` but no GPU:
 
 ```sh

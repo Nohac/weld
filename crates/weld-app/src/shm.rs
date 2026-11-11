@@ -15,7 +15,7 @@ use bevy::{
     image::Image,
     render::{
         Render, RenderApp, RenderSystems,
-        render_asset::RenderAssets,
+        render_asset::{RenderAssets, prepare_assets},
         render_resource::{DefaultImageSampler, Texture, TextureView},
         texture::GpuImage,
     },
@@ -84,7 +84,12 @@ impl ShmImages {
             .init_resource::<UploadedTextures>()
             .add_systems(
                 Render,
-                install_uploaded_images.in_set(RenderSystems::PrepareAssets),
+                // UI materials are prepared after Bevy's image assets. Install
+                // native SHM images before that dependency so a resized, idle
+                // client cannot leave its material waiting for another frame.
+                install_uploaded_images
+                    .in_set(RenderSystems::PrepareAssets)
+                    .before(prepare_assets::<GpuImage>),
             );
         Ok(Self {
             device: device.clone(),
